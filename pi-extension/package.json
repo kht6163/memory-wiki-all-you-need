@@ -1,0 +1,33 @@
+{
+  "name": "pi-memory-wiki-all-you-need",
+  "version": "0.3.0",
+  "description": "Central memory + LLM wiki for pi: always-injected memory, per-turn LLM curation, wiki written from memory.",
+  "type": "module",
+  "keywords": [
+    "pi-package",
+    "pi-extension",
+    "memory"
+  ],
+  "pi": {
+    "extensions": [
+      "./index.ts"
+    ]
+  },
+  "files": [
+    "index.ts",
+    "project.ts"
+  ],
+  "scripts": {
+    "typecheck": "tsc --noEmit"
+  },
+  "peerDependencies": {
+    "@earendil-works/pi-ai": "*",
+    "@earendil-works/pi-coding-agent": "*"
+  },
+  "devDependencies": {
+    "@earendil-works/pi-ai": "^0.99.2",
+    "@earendil-works/pi-coding-agent": "^0.99.2",
+    "@types/node": "^24.0.0",
+    "typescript": "^5.9.0"
+  }
+}
