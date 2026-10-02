@@ -67,6 +67,17 @@ export function removeLink(fromId: number, toId: number, type: LinkType): boolea
   return res.changes > 0;
 }
 
+/** Re-point every link of `fromId` to `toId` (used when memories are merged); links between the two are dropped. */
+export function moveLinks(fromId: number, toId: number) {
+  transaction(() => {
+    db.prepare(`DELETE FROM entry_links WHERE (from_id = ? AND to_id = ?) OR (from_id = ? AND to_id = ?)`).run(fromId, toId, toId, fromId);
+    db.prepare(`UPDATE OR IGNORE entry_links SET from_id = ? WHERE from_id = ?`).run(toId, fromId);
+    db.prepare(`UPDATE OR IGNORE entry_links SET to_id = ? WHERE to_id = ?`).run(toId, fromId);
+    // Rows that would have duplicated an existing link stay behind; drop them.
+    db.prepare(`DELETE FROM entry_links WHERE from_id = ? OR to_id = ?`).run(fromId, fromId);
+  });
+}
+
 /** Live links touching a memory, with the other memory's title. */
 export function linksOf(entryId: number) {
   const rows = db

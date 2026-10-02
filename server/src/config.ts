@@ -42,6 +42,14 @@ export const config = {
     /** Most memories one backfill job may take. */
     backfillMax: int("GRAPH_BACKFILL_MAX", 2000),
   },
+  review: {
+    /** Memory characters sent to the LLM per review call. */
+    chunkChars: int("REVIEW_CHUNK_CHARS", 24_000),
+    /** Most memories one review job may take. */
+    maxEntries: int("REVIEW_MAX_ENTRIES", 2000),
+    /** No use and no edit for this many days → listed as stale. */
+    staleDays: int("REVIEW_STALE_DAYS", 60),
+  },
 };
 
 export const llmEnabled = () => Boolean(config.llm.baseUrl);

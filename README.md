@@ -17,6 +17,8 @@ pi (각 PC) ── pi-extension ──HTTP──▶ server (Node 24 + node:sqlit
 - **메모리 그래프**: 메모리는 엔티티(기술·서비스·도구·파일·개념·사람)를 언급하고, 메모리끼리는 `because`(이유)·`depends_on`(전제)·`supersedes`(대체)·`related`(관련)로 잇는다. 턴 정리 LLM이 같은 호출에서 엔티티와 관계를 함께 정하고(추가 LLM 호출 없음), 기존 메모리는 웹의 "그래프 붙이기"로 백필한다. 엔티티는 프로젝트를 가로질러 공유되며, 이름 변경·합치기 시 예전 이름이 별칭으로 남는다.
   - 회상: 프롬프트가 언급한 엔티티의 메모리와, 회상된 메모리의 이유·전제·대체 이웃을 `GRAPH_RECALL_EXTRA`개까지 더한다(`RECALL_BUDGET_CHARS` 안에서, `(graph: …)` 표시).
   - 웹: 그래프 뷰(`#/graph`, 프로젝트별 탭), 엔티티 목록·상세(합치기·이름 변경), 메모리 상세의 "연결"에서 엔티티·관계 편집.
+- **메모리 점검**: 웹의 "메모리 점검"에서 범위(프로젝트, 또는 전역·사용자)를 골라 시작하면 LLM이 같은 엔티티를 가진 메모리끼리 묶어 읽고 합치기·고치기·삭제·모순을 **제안**한다. 사람이 적용하기 전에는 바뀌지 않고, 제안 뒤 메모리가 바뀌었으면(리비전 기준) 적용하지 않고 "오래됨"으로 돌린다. 합치기는 첫 메모리를 남기고 엔티티·관계를 옮긴 뒤 나머지를 소프트 삭제한다. 무시한 제안은 메모리가 바뀌기 전까지 다시 묻지 않는다.
+- **사용 기록**: 회상(`/context`)과 에이전트 검색(`memory_search`, `memory_graph`)에 쓰인 횟수·시각, 기본 블록에 들어간 날을 메모리마다 기록한다. 기본 블록은 최근에 쓰인 메모리를 앞에 두되 **전날까지의** 사용만 반영해 하루 동안 순서가 바뀌지 않는다(프롬프트 캐시 유지). 오래 안 쓰이고 주입되지도 않은 메모리는 점검 화면에 따로 보여준다.
 - **도구**: `memory_search`, `session_search`, `memory_add`, `memory_replace`, `memory_remove` (pi-hermes-memory와 같은 이름·target), `memory_graph`, `wiki_search`, `wiki_read`, `wiki_write`.
 - **명령**: `/memory`(상태·위키 링크), `/memory-pin <text> [--project]`(고정 지시), `/memory-flush`, `/wiki-compose [정리 방향]`(현재 세션의 턴을 위키로 정리).
 - **위키 (메모리와 독립)**: 프로젝트별 위키와 전역 위키. 페이지는 `[[slug]]`로 잇고, 필요하면 `[#id]`로 메모리를 참조한다(링크일 뿐 동기화하지 않음). 이력·되돌리기·백링크·검색·잠금을 지원한다. pi에는 페이지 목록만 주입되고 `wiki_search`/`wiki_read`로 읽으며, 사용자가 요청하면 `wiki_write`로 쓴다.
@@ -61,6 +63,8 @@ services:
 | `WIKI_WRITER_BUDGET_CHARS` | 40000 | 정리 호출 1회에 보여주는 기존 페이지 본문 예산 |
 | `GRAPH_RECALL_EXTRA` | 4 | 그래프로 회상에 더하는 메모리 수 상한 |
 | `GRAPH_BACKFILL_CHUNK_CHARS`, `GRAPH_BACKFILL_MAX` | 24000, 2000 | 그래프 백필 LLM 호출 1회 크기, 작업 1건 최대 메모리 수 |
+| `REVIEW_CHUNK_CHARS`, `REVIEW_MAX_ENTRIES` | 24000, 2000 | 메모리 점검 LLM 호출 1회 크기, 작업 1건 최대 메모리 수 |
+| `REVIEW_STALE_DAYS` | 60 | 이 기간 동안 사용·주입·수정이 없으면 "오래 안 쓰인 메모리" |
 
 pi (각 PC):
 
@@ -83,4 +87,8 @@ npm install
 npm run dev:server          # :8765 (PORT, DATA_DIR 로 변경)
 npm run dev:web             # vite, /api 는 API_URL(기본 127.0.0.1:8765) 로 프록시
 npm run typecheck
+npm test                    # server/test — 테스트 파일마다 임시 DB와 가짜 LLM으로 회귀 가드 검증 (node --test)
+npm run build               # 웹 UI
 ```
+
+GitHub Actions(`.github/workflows/ci.yml`)가 push·PR마다 `npm ci` → typecheck → test → build를 돌린다.

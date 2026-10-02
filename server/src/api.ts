@@ -15,6 +15,9 @@ import {
   listRevisions,
   purgeEntry,
   recentActivity,
+  recordShown,
+  recordUsage,
+  usageOf,
   restoreEntry,
   revertEntry,
   stats,
@@ -26,6 +29,18 @@ import {
 } from "./store.ts";
 import { deleteTurn, enqueueTurn, getTurn, listTurns, retryTurn } from "./turns.ts";
 import { config, llmEnabled } from "./config.ts";
+import {
+  applyProposal,
+  dismissProposal,
+  enqueueReview,
+  listProposals,
+  listReviewJobs,
+  retryReviewJob,
+  reviewScopeSummary,
+  reviewStats,
+  staleEntries,
+  type ProposalStatus,
+} from "./review.ts";
 import {
   addLink,
   deleteEntity,
@@ -95,13 +110,16 @@ function projectFromRef(ref: ProjectRef | null | undefined) {
 
 // ------------------------------------------------------------ agent-facing
 
-api.get("/health", (c) => c.json({ ok: true, llm: llmEnabled() ? config.llm.model : null, ...stats(), ...wikiStats(), ...graphStats() }));
+api.get("/health", (c) => c.json({ ok: true, llm: llmEnabled() ? config.llm.model : null, ...stats(), ...wikiStats(), ...graphStats(), ...reviewStats() }));
 
 /** Called by the pi extension before every run. Upserts the project. */
 api.post("/context", async (c) => {
   const b = await body<{ project?: ProjectRef | null; prompt?: string }>(c);
   const project = projectFromRef(b.project);
   const ctx = buildContext(project, String(b.prompt ?? "").slice(0, 8000));
+  // Only prompt-specific recall counts as use; the stable block is shown every time.
+  recordUsage(ctx.recalled, "recall");
+  recordShown(ctx.included);
   return c.json({ project, ...ctx });
 });
 
@@ -129,6 +147,8 @@ api.get("/search", (c) => {
     limit: num(c.req.query("limit")) ?? 20,
     allProjects: c.req.query("all") === "1",
   });
+  // via=agent: the memory_search tool (web searches do not count as use).
+  if (c.req.query("via") === "agent") recordUsage(hits.map((h) => h.entry.id), "search");
   return c.json(hits.map((h) => ({ ...h.entry, score: Math.round(h.score * 100) / 100 })));
 });
 
@@ -201,7 +221,7 @@ api.post("/agent/memory", async (c) => {
 // ------------------------------------------------------------------ wiki
 
 api.get("/meta", (c) => c.json({ categories: CATEGORIES, llm: llmEnabled() ? config.llm.model : null }));
-api.get("/stats", (c) => c.json({ ...stats(), ...wikiStats(), ...graphStats() }));
+api.get("/stats", (c) => c.json({ ...stats(), ...wikiStats(), ...graphStats(), ...reviewStats() }));
 
 api.get("/projects", (c) => c.json(listProjects()));
 api.get("/projects/:id", (c) => {
@@ -237,6 +257,7 @@ api.get("/entries/:id", (c) => {
     citedBy: pagesCitingEntry(e.id),
     entities: entitiesOf(e.id),
     links: linksOf(e.id),
+    usage: usageOf(e.id),
   });
 });
 api.post("/entries", async (c) => c.json(createEntry(await body(c), { author: "human" }), 201));
@@ -274,7 +295,9 @@ api.get("/graph", (c) => c.json(graphData(num(c.req.query("project_id")) ?? null
 api.get("/graph/neighbors", (c) => {
   const key = c.req.query("project");
   const projectId = num(c.req.query("project_id")) ?? (key ? getProjectByKey(key)?.id : undefined) ?? null;
-  return c.json(neighborhood({ entity: c.req.query("entity") || undefined, id: num(c.req.query("id")) }, projectId));
+  const r = neighborhood({ entity: c.req.query("entity") || undefined, id: num(c.req.query("id")) }, projectId);
+  if (c.req.query("via") === "agent") recordUsage(r.kind === "memory" ? [r.memory.id] : r.memories.map((m) => m.id), "search");
+  return c.json(r);
 });
 
 api.get("/entities", (c) =>
@@ -302,6 +325,37 @@ api.post("/graph/backfill", async (c) => {
 });
 api.get("/graph/jobs", (c) => c.json(listGraphJobs(num(c.req.query("limit")) ?? 20)));
 api.post("/graph/jobs/:id/retry", (c) => c.json(retryGraphJob(idParam(c))));
+
+// ---------------------------------------------------------------- review
+
+/** Start an LLM review of a scope: project_id, or none/0 = global + user memories. */
+api.post("/review", async (c) => {
+  const b = await body<{ project_id?: number | null }>(c);
+  return c.json(enqueueReview(b.project_id || null), 201);
+});
+api.get("/review/jobs", (c) => {
+  const pid = c.req.query("project_id");
+  return c.json(listReviewJobs({ projectId: pid === undefined ? undefined : num(pid) || null, limit: num(c.req.query("limit")) ?? 20 }));
+});
+api.get("/review/scope", (c) => c.json(reviewScopeSummary(num(c.req.query("project_id")) || null)));
+api.post("/review/jobs/:id/retry", (c) => c.json(retryReviewJob(idParam(c))));
+api.get("/review/proposals", (c) => {
+  const pid = c.req.query("project_id");
+  return c.json(
+    listProposals({
+      status: (c.req.query("status") as ProposalStatus) || undefined,
+      jobId: num(c.req.query("job_id")),
+      projectId: pid === undefined ? undefined : num(pid) || null,
+    }),
+  );
+});
+api.post("/review/proposals/:id/apply", (c) => c.json(applyProposal(idParam(c))));
+api.post("/review/proposals/:id/dismiss", (c) => c.json(dismissProposal(idParam(c))));
+/** Not used and not edited for `days` days (no LLM). */
+api.get("/review/stale", (c) => {
+  const pid = num(c.req.query("project_id"));
+  return c.json(staleEntries(pid || null, num(c.req.query("days")) ?? config.review.staleDays));
+});
 
 api.get("/activity", (c) => c.json(recentActivity(num(c.req.query("limit")) ?? 100, num(c.req.query("before")))));
 
@@ -386,7 +440,9 @@ api.get("/wiki/read", (c) => {
     slug = slug.slice(7);
     scope = null;
   }
-  const p = getPageBySlug(scope, slug) ?? (scope != null ? getPageBySlug(null, slug) : null);
+  // A deleted project page must not hide a live global page with the same slug.
+  const own = getPageBySlug(scope, slug);
+  const p = own && !own.deleted_at ? own : scope != null ? getPageBySlug(null, slug) : own;
   if (!p || p.deleted_at) {
     const pages = [...(scope != null ? listPages(scope) : []), ...listPages(null)].map((x) => x.slug);
     throw new HttpError(404, `no wiki page "${slug}". Pages: ${pages.join(", ") || "(none)"}`);

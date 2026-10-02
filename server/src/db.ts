@@ -313,6 +313,45 @@ CREATE TABLE IF NOT EXISTS graph_jobs (
   processed_at TEXT
 );
 
+-- How often a memory actually helped: recalled into a prompt, or returned to
+-- the agent by memory_search / memory_graph. Drives the stable block's order
+-- (recently used memories stay in) and the review job's stale detection.
+CREATE TABLE IF NOT EXISTS entry_usage (
+  entry_id INTEGER PRIMARY KEY REFERENCES entries(id) ON DELETE CASCADE,
+  recalled INTEGER NOT NULL DEFAULT 0,
+  searched INTEGER NOT NULL DEFAULT 0,
+  last_used_at TEXT,
+  -- Last day of use BEFORE the day of last_used_at. Ordering uses this for
+  -- memories used today, so today's uses only take effect tomorrow.
+  rank_day TEXT,
+  -- Last time it was part of the stable block (recorded at most once a day).
+  shown_at TEXT
+);
+-- Memory review: the LLM reads memories cluster by cluster and proposes merges,
+-- fixes, deletions and conflicts. Nothing changes until a person applies one.
+CREATE TABLE IF NOT EXISTS review_jobs (
+  id INTEGER PRIMARY KEY,
+  project_id INTEGER REFERENCES projects(id) ON DELETE CASCADE,
+  status TEXT NOT NULL DEFAULT 'pending',
+  payload TEXT NOT NULL DEFAULT '{}',
+  result TEXT,
+  error TEXT,
+  created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now')),
+  processed_at TEXT
+);
+CREATE TABLE IF NOT EXISTS review_proposals (
+  id INTEGER PRIMARY KEY,
+  job_id INTEGER NOT NULL REFERENCES review_jobs(id) ON DELETE CASCADE,
+  kind TEXT NOT NULL CHECK (kind IN ('merge','update','delete','conflict')),
+  entry_ids TEXT NOT NULL,
+  data TEXT NOT NULL DEFAULT '{}',
+  reason TEXT NOT NULL DEFAULT '',
+  status TEXT NOT NULL DEFAULT 'pending' CHECK (status IN ('pending','applied','dismissed','stale')),
+  created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now')),
+  decided_at TEXT
+);
+CREATE INDEX IF NOT EXISTS review_proposals_status ON review_proposals(status, job_id);
+
 CREATE VIRTUAL TABLE IF NOT EXISTS turns_fts USING fts5(
   text, content='turns', content_rowid='id', tokenize='trigram'
 );
@@ -328,6 +367,7 @@ END;
 db.exec(`UPDATE turns SET status = 'pending' WHERE status = 'processing'`);
 db.exec(`UPDATE wiki_jobs SET status = 'pending' WHERE status = 'processing'`);
 db.exec(`UPDATE graph_jobs SET status = 'pending' WHERE status = 'processing'`);
+db.exec(`UPDATE review_jobs SET status = 'pending' WHERE status = 'processing'`);
 
 // v0.4.0: revisions also snapshot the memory's entity names (NULL in older rows).
 if (!db.prepare(`SELECT 1 FROM pragma_table_info('revisions') WHERE name = 'entities'`).get()) {

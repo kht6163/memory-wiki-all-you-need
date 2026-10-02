@@ -18,6 +18,8 @@ import {
 import { claimDueJob, nextJobDueInMs, onWikiJobQueued } from "./wiki.ts";
 import { processWikiJob } from "./wiki-worker.ts";
 import { processGraphJob } from "./graph-worker.ts";
+import { claimReviewJob, onReviewJobQueued } from "./review.ts";
+import { processReviewJob } from "./review-worker.ts";
 import { claimNextTurn, finishTurn, onTurnQueued, renderTurn } from "./turns.ts";
 
 // Turn curation: one LLM call per finished turn decides which durable
@@ -236,7 +238,7 @@ function isTrivial(turn: Turn): boolean {
   return !hasTools && chars < 15;
 }
 
-async function processTurn(turn: Turn) {
+export async function processTurn(turn: Turn) {
   const started = Date.now();
   const project = turn.project_id ? getProject(turn.project_id) : null;
   if (!llmEnabled()) return finishTurn(turn.id, "skipped", null, "LLM is not configured (LLM_BASE_URL)");
@@ -260,6 +262,38 @@ async function processTurn(turn: Turn) {
   console.log(`[worker] turn ${turn.id} done: ${applied.length} change(s) in ${Date.now() - started}ms`);
 }
 
+/** Process every queued turn and job once, then return (tests and one-off scripts; the server uses startWorker). */
+export async function runQueueOnce() {
+  const drain = async () => {
+    for (let turn = claimNextTurn(); turn; turn = claimNextTurn()) {
+      try {
+        await processTurn(turn);
+      } catch (err) {
+        finishTurn(turn.id, "error", null, (err as Error).message);
+      }
+    }
+  };
+  for (;;) {
+    await drain();
+    const job = claimDueJob();
+    if (job) {
+      await processWikiJob(job, drain);
+      continue;
+    }
+    const gjob = claimGraphJob();
+    if (gjob) {
+      await processGraphJob(gjob, drain);
+      continue;
+    }
+    const rjob = claimReviewJob();
+    if (rjob) {
+      await processReviewJob(rjob, drain);
+      continue;
+    }
+    return;
+  }
+}
+
 export function startWorker() {
   let running = false;
   let wake: (() => void) | null = null;
@@ -267,9 +301,10 @@ export function startWorker() {
   onTurnQueued(poke);
   onWikiJobQueued(poke);
   onGraphJobQueued(poke);
+  onReviewJobQueued(poke);
 
   // One loop for all LLM work: turn curation first (it keeps memory current
-  // for the next request), then requested wiki compose and graph backfill jobs. Serial, so the
+  // for the next request), then requested wiki compose, graph backfill and memory review jobs. Serial, so the
   // LLM endpoint never sees more than one request from this server at a time.
   const loop = async () => {
     if (running) return;
@@ -295,6 +330,11 @@ export function startWorker() {
       const gjob = claimGraphJob();
       if (gjob) {
         await processGraphJob(gjob, drainTurns);
+        continue;
+      }
+      const rjob = claimReviewJob();
+      if (rjob) {
+        await processReviewJob(rjob, drainTurns);
         continue;
       }
       const due = nextJobDueInMs();

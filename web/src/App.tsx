@@ -16,6 +16,7 @@ import {
 import { EntitiesPage, EntityPage } from "./pages/GraphPages.tsx";
 
 const GraphPage = lazy(() => import("./pages/GraphView.tsx").then((m) => ({ default: m.GraphPage })));
+import { ReviewPage } from "./pages/ReviewPage.tsx";
 import { ScopePage } from "./pages/ScopePage.tsx";
 import { WikiCompose, WikiEdit, WikiHome, WikiJobsPage, WikiPageView } from "./pages/WikiPages.tsx";
 
@@ -71,6 +72,7 @@ export function App() {
   else if (p0 === "graph")
     page = <GraphPage key={route.query.toString()} projectId={num(route.query.get("project"))} initialFocus={route.query.get("focus") ?? undefined} />;
   else if (p0 === "entities") page = <EntitiesPage />;
+  else if (p0 === "review") page = <ReviewPage key={route.query.toString()} projectId={num(route.query.get("project"))} />;
   else if (p0 === "entity" && num(p1)) page = <EntityPage key={p1} id={num(p1)!} />;
   else if (p0 === "activity") page = <ActivityPage />;
   else if (p0 === "turns" && num(p1)) page = <TurnPage id={num(p1)!} />;
@@ -140,6 +142,10 @@ export function App() {
             ))}
           </div>
           <div className="nav-sep" />
+          <a className={active(p0 === "review")} href="#/review">
+            메모리 점검{s && s.reviewRunning > 0 && <span className="pill">…</span>}
+            {s && s.reviewProposals > 0 && <span className="count">{s.reviewProposals}</span>}
+          </a>
           <a className={active(p0 === "activity")} href="#/activity">
             활동
           </a>

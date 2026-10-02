@@ -212,7 +212,7 @@ export default function memoryAllYouNeed(pi: ExtensionAPI) {
       limit: Type.Optional(Type.Number()),
     }),
     async execute(_id, p) {
-      const q = new URLSearchParams({ q: p.query, limit: String(p.limit ?? 10) });
+      const q = new URLSearchParams({ q: p.query, limit: String(p.limit ?? 10), via: "agent" });
       if (project) q.set("project", project.key);
       if (p.scope && p.scope !== "all") q.set("scope", p.scope);
       if (p.category) q.set("category", p.category);
@@ -249,7 +249,7 @@ export default function memoryAllYouNeed(pi: ExtensionAPI) {
     }),
     async execute(_id, p) {
       if (!p.entity && !p.id) return text("Give an entity name or a memory id.");
-      const q = new URLSearchParams();
+      const q = new URLSearchParams({ via: "agent" });
       if (p.entity) q.set("entity", p.entity);
       if (p.id) q.set("id", String(p.id));
       if (project) q.set("project", project.key);

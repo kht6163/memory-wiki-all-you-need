@@ -93,6 +93,8 @@ export interface SessionHit {
 }
 
 export interface Stats {
+  reviewProposals: number;
+  reviewRunning: number;
   entities: number;
   links: number;
   unlinked: number;
@@ -216,6 +218,38 @@ export interface GraphJob {
   processed_at: string | null;
 }
 
+export interface Usage {
+  recalled: number;
+  searched: number;
+  last_used_at: string | null;
+  shown_at: string | null;
+}
+
+export interface ReviewJob {
+  id: number;
+  project_id: number | null;
+  project_name: string | null;
+  status: "pending" | "processing" | "done" | "skipped" | "error";
+  payload: { entries: number[] };
+  result: { done?: number[]; chunks?: number; proposals?: number; ms?: number } | null;
+  error: string | null;
+  created_at: string;
+  processed_at: string | null;
+}
+
+export interface Proposal {
+  id: number;
+  job_id: number;
+  kind: "merge" | "update" | "delete" | "conflict";
+  entry_ids: number[];
+  data: { title?: string; body?: string; category?: string; note?: string; snap: Record<string, string> };
+  reason: string;
+  status: "pending" | "applied" | "dismissed" | "stale";
+  created_at: string;
+  decided_at: string | null;
+  entries: ((Entry & { entities: string[]; changed: boolean }) | null)[];
+}
+
 export type PageRef = { id: number; slug: string; title: string; project_id?: number | null };
 
 async function request<T>(method: string, url: string, body?: unknown): Promise<T> {
@@ -246,7 +280,10 @@ export const api = {
   entries: (f: { scope?: Scope; project_id?: number; category?: string; deleted?: boolean }) =>
     request<Entry[]>("GET", `/entries${qs({ ...f, deleted: f.deleted ? 1 : undefined })}`),
   entry: (id: number) =>
-    request<{ entry: Entry; project: Project | null; revisions: Revision[]; citedBy: PageRef[]; entities: Entity[]; links: EntryLink[] }>("GET", `/entries/${id}`),
+    request<{ entry: Entry; project: Project | null; revisions: Revision[]; citedBy: PageRef[]; entities: Entity[]; links: EntryLink[]; usage: Usage }>(
+      "GET",
+      `/entries/${id}`,
+    ),
   createEntry: (e: Partial<Entry> & { entities?: string[] }) => request<Entry>("POST", "/entries", e),
   updateEntry: (id: number, patch: Partial<Entry> & { entities?: string[] }) => request<Entry>("PATCH", `/entries/${id}`, patch),
   addLink: (id: number, to: number, type: LinkType) => request<EntryLink[]>("POST", `/entries/${id}/links`, { to, type }),
@@ -259,6 +296,15 @@ export const api = {
   deleteEntity: (id: number) => request("DELETE", `/entities/${id}`),
   backfill: (project_id?: number, all = false) => request<GraphJob>("POST", "/graph/backfill", { project_id, all }),
   graphJobs: () => request<GraphJob[]>("GET", "/graph/jobs"),
+  startReview: (project_id?: number) => request<ReviewJob>("POST", "/review", { project_id }),
+  reviewJobs: (project_id?: number) => request<ReviewJob[]>("GET", `/review/jobs${qs({ project_id: project_id ?? 0 })}`),
+  reviewScope: (project_id?: number) => request<{ entries: number; unlinked: number; staleDays: number; maxEntries: number }>("GET", `/review/scope${qs({ project_id })}`),
+  retryReviewJob: (id: number) => request<ReviewJob>("POST", `/review/jobs/${id}/retry`),
+  proposals: (project_id: number | undefined, status = "pending") =>
+    request<Proposal[]>("GET", `/review/proposals${qs({ project_id: project_id ?? 0, status })}`),
+  applyProposal: (id: number) => request<Proposal>("POST", `/review/proposals/${id}/apply`),
+  dismissProposal: (id: number) => request<Proposal>("POST", `/review/proposals/${id}/dismiss`),
+  staleEntries: (project_id?: number, days?: number) => request<(Entry & { last_used_at: string | null })[]>("GET", `/review/stale${qs({ project_id, days })}`),
   retryGraphJob: (id: number) => request<GraphJob>("POST", `/graph/jobs/${id}/retry`),
   deleteEntry: (id: number) => request<Entry>("DELETE", `/entries/${id}`),
   restoreEntry: (id: number) => request<Entry>("POST", `/entries/${id}/restore`),

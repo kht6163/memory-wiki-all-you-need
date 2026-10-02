@@ -2,12 +2,19 @@
   "name": "memory-wiki-all-you-need",
   "private": true,
   "type": "module",
-  "workspaces": ["server", "web", "pi-extension"],
-  "engines": { "node": ">=24" },
+  "workspaces": [
+    "server",
+    "web",
+    "pi-extension"
+  ],
+  "engines": {
+    "node": ">=24"
+  },
   "scripts": {
     "dev:server": "npm --workspace server run dev",
     "dev:web": "npm --workspace web run dev",
     "build": "npm --workspace web run build",
-    "typecheck": "npm --workspaces --if-present run typecheck"
+    "typecheck": "npm --workspaces --if-present run typecheck",
+    "test": "npm --workspace server test"
   }
 }

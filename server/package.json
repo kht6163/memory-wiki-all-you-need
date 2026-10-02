@@ -1,12 +1,13 @@
 {
   "name": "@memory-wiki-all-you-need/server",
   "private": true,
-  "version": "0.4.0",
+  "version": "0.5.0",
   "type": "module",
   "scripts": {
     "start": "node src/index.ts",
     "dev": "node --watch src/index.ts",
-    "typecheck": "tsc --noEmit"
+    "typecheck": "tsc --noEmit",
+    "test": "node --import ./test/setup.ts --test --test-reporter=spec \"test/**/*.test.ts\""
   },
   "dependencies": {
     "@hono/node-server": "^1.19.0",

@@ -1292,3 +1292,33 @@ h2.flush {
     width: 100%;
   }
 }
+
+/* review */
+.proposal {
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  background: var(--surface);
+  padding: 12px 14px;
+  margin: 12px 0;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+.proposal-cols {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(260px, 1fr));
+  gap: 12px;
+}
+.proposal-entry {
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  padding: 8px 10px;
+  margin: 6px 0;
+}
+.proposal-entry.gone {
+  background: var(--del);
+  opacity: 0.85;
+}
+.proposal-entry.new {
+  background: var(--ins);
+}

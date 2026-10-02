@@ -23,7 +23,7 @@ export function EntryPage({ id }: { id: number }) {
   const { data, error } = useData(() => api.entry(id), [id]);
   if (error) return <ErrorBox error={error} />;
   if (!data) return null;
-  const { entry: e, project, revisions, citedBy, entities, links } = data;
+  const { entry: e, project, revisions, citedBy, entities, links, usage } = data;
   const scopeName = e.scope === "project" ? project?.name ?? "프로젝트" : SCOPE_LABEL[e.scope];
 
   return (
@@ -80,6 +80,24 @@ export function EntryPage({ id }: { id: number }) {
             <th>마지막 작성</th>
             <td>
               <SourceBadge source={e.source} /> <Time iso={e.updated_at} />
+            </td>
+          </tr>
+          <tr>
+            <th>사용</th>
+            <td>
+              {usage.recalled + usage.searched === 0 ? (
+                <span className="muted">아직 회상·검색된 적 없음</span>
+              ) : (
+                <>
+                  회상 {usage.recalled}회 · 검색 {usage.searched}회 · 마지막 {usage.last_used_at ? <Time iso={usage.last_used_at} /> : "—"}
+                </>
+              )}
+              {usage.shown_at && (
+                <span className="muted">
+                  {" "}
+                  · 기본 블록 주입 <Time iso={usage.shown_at} />
+                </span>
+              )}
             </td>
           </tr>
           <tr>

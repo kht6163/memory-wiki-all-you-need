@@ -116,11 +116,14 @@ function normalizeTags(tags: unknown): string[] {
   return [...new Set(tags.map((t) => String(t).trim()).filter(Boolean))].slice(0, 12);
 }
 
-function guardContent(title: string, body: string, author: Source, category: Category) {
+const entityText = (list: EntityInput[] | undefined) => (list ?? []).map((x) => (typeof x === "string" ? x : String(x?.name ?? ""))).join("\n");
+
+function guardContent(title: string, body: string, author: Source, category: Category, extra = "") {
   if (!title.trim()) throw new HttpError(400, "title is required");
   if (title.length > 200) throw new HttpError(400, "title is too long (max 200)");
   if (body.length > 20_000) throw new HttpError(400, "body is too long (max 20000)");
-  const secrets = findSecrets(`${title}\n${body}`);
+  // Tags and entity names are stored and shown too, so they are scanned with the text.
+  const secrets = findSecrets(`${title}\n${body}\n${extra}`);
   if (secrets.length) throw new HttpError(422, `content looks like it contains secrets: ${secrets.join(", ")}`);
   if (category === "standing" && author !== "human") {
     throw new HttpError(403, "standing instructions can only be written by a human");
@@ -155,7 +158,7 @@ export function createEntry(input: EntryInput, meta: WriteMeta): Entry {
   const category = normalizeCategory(input.category);
   const title = input.title?.trim() ?? "";
   const body = (input.body ?? "").trim();
-  guardContent(title, body, meta.author, category);
+  guardContent(title, body, meta.author, category, `${(input.tags ?? []).join("\n")}\n${entityText(input.entities)}`);
   const projectId = input.scope === "project" ? input.project_id ?? null : null;
   if (input.scope === "project" && !projectId) throw new HttpError(400, "project scope needs project_id");
   const created = transaction(() => {
@@ -210,7 +213,7 @@ export function updateEntry(id: number, patch: EntryPatch, meta: WriteMeta): Ent
     tags: patch.tags !== undefined ? normalizeTags(patch.tags) : cur.tags,
     pinned: patch.pinned !== undefined ? Boolean(patch.pinned) : cur.pinned,
   };
-  guardContent(next.title, next.body, meta.author, next.category);
+  guardContent(next.title, next.body, meta.author, next.category, `${next.tags.join("\n")}\n${entityText(patch.entities)}`);
   const unchanged =
     scope === cur.scope &&
     projectId === cur.project_id &&
@@ -335,13 +338,26 @@ export function listEntries(f: EntryFilter = {}): Entry[] {
     .map(rowToEntry);
 }
 
+/**
+ * Usage day for ordering: the last day of use, except that a use TODAY does
+ * not count yet — then the day of the use before it (rank_day). So the key is
+ * constant all day and only moves at midnight (UTC).
+ */
+const USAGE_DAY = `CASE WHEN substr(IFNULL(u.last_used_at, ''), 1, 10) < date('now') THEN substr(IFNULL(u.last_used_at, ''), 1, 10) ELSE IFNULL(u.rank_day, '') END`;
+
 /** Entries visible from a project: global + user + that project's own. */
 export function visibleEntries(projectId: number | null): Entry[] {
+  // Recently written OR recently used first, so a memory that keeps helping
+  // stays in the stable block even if nobody edits it. Usage only counts by
+  // DAY, and a use only counts from the next day on (see USAGE_DAY): recall
+  // bumps last_used_at on almost every request, and letting that reorder the
+  // block would break the provider prompt cache turn after turn. Within a day
+  // the order only changes when memory itself does.
   return db
     .prepare(
-      `SELECT * FROM entries WHERE deleted_at IS NULL
-         AND (scope IN ('global','user') OR project_id = ?)
-       ORDER BY pinned DESC, updated_at DESC`,
+      `SELECT e.* FROM entries e LEFT JOIN entry_usage u ON u.entry_id = e.id
+       WHERE e.deleted_at IS NULL AND (e.scope IN ('global','user') OR e.project_id = ?)
+       ORDER BY e.pinned DESC, MAX(substr(e.updated_at, 1, 10), ${USAGE_DAY}) DESC, e.updated_at DESC`,
     )
     .all(projectId ?? -1)
     .map(rowToEntry);
@@ -368,6 +384,62 @@ export function recentActivity(limit = 100, before?: number): ActivityItem[] {
       entry_project_id: r.entry_project_id == null ? null : Number(r.entry_project_id),
       project_name: r.project_name == null ? null : String(r.project_name),
     }));
+}
+
+export interface Usage {
+  recalled: number;
+  searched: number;
+  last_used_at: string | null;
+  shown_at: string | null;
+}
+
+/** Count that memories reached the agent: "recall" (injected for a prompt) or "search" (memory_search / memory_graph). */
+export function recordUsage(ids: number[], kind: "recall" | "search") {
+  if (!ids.length) return;
+  const col = kind === "recall" ? "recalled" : "searched";
+  // In an upsert's SET every bare column is the OLD value: rank_day becomes the
+  // previous use day only when this is the first use on a new day.
+  const stmt = db.prepare(
+    `INSERT INTO entry_usage (entry_id, ${col}, last_used_at) VALUES (?, 1, ?)
+     ON CONFLICT(entry_id) DO UPDATE SET ${col} = ${col} + 1,
+       rank_day = CASE WHEN substr(IFNULL(last_used_at, ''), 1, 10) < substr(excluded.last_used_at, 1, 10)
+                       THEN substr(last_used_at, 1, 10) ELSE rank_day END,
+       last_used_at = excluded.last_used_at`,
+  );
+  const t = now();
+  transaction(() => {
+    for (const id of new Set(ids)) if (getEntry(id)) stmt.run(id, t);
+  });
+}
+
+let shownDay = "";
+const shownToday = new Set<number>();
+/** Mark memories as shown in the stable block (once per memory per day; it does not affect ordering). */
+export function recordShown(ids: number[]) {
+  const t = now();
+  if (t.slice(0, 10) !== shownDay) {
+    shownDay = t.slice(0, 10);
+    shownToday.clear();
+  }
+  const fresh = ids.filter((id) => !shownToday.has(id));
+  if (!fresh.length) return;
+  const stmt = db.prepare(
+    `INSERT INTO entry_usage (entry_id, shown_at) VALUES (?, ?) ON CONFLICT(entry_id) DO UPDATE SET shown_at = excluded.shown_at`,
+  );
+  transaction(() => {
+    for (const id of fresh) if (getEntry(id)) stmt.run(id, t);
+  });
+  fresh.forEach((id) => shownToday.add(id));
+}
+
+export function usageOf(entryId: number): Usage {
+  const r = db.prepare(`SELECT * FROM entry_usage WHERE entry_id = ?`).get(entryId);
+  return {
+    recalled: Number(r?.recalled ?? 0),
+    searched: Number(r?.searched ?? 0),
+    last_used_at: r?.last_used_at == null ? null : String(r.last_used_at),
+    shown_at: r?.shown_at == null ? null : String(r.shown_at),
+  };
 }
 
 export function stats() {
