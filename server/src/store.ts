@@ -1,3 +1,4 @@
+import { entityNamesOf, pruneAllOrphanEntities, resolveEntityInputs, writeEntryEntities, type EntityInput } from "./entities.ts";
 import {
   CATEGORIES,
   db,
@@ -81,6 +82,7 @@ export function updateProject(id: number, patch: { name?: string; description?: 
 
 export function deleteProject(id: number): void {
   db.prepare(`DELETE FROM projects WHERE id = ?`).run(id);
+  pruneAllOrphanEntities();
 }
 
 // ----------------------------------------------------------------- entries
@@ -93,6 +95,8 @@ export interface EntryInput {
   body?: string;
   tags?: string[];
   pinned?: boolean;
+  /** Graph: entity names (or {name, kind}) this memory mentions. */
+  entities?: EntityInput[];
 }
 
 export interface WriteMeta {
@@ -125,8 +129,8 @@ function guardContent(title: string, body: string, author: Source, category: Cat
 
 function writeRevision(e: Entry, action: Revision["action"], meta: WriteMeta) {
   db.prepare(
-    `INSERT INTO revisions (entry_id, action, title, body, category, tags, pinned, author, turn_id, reason)
-     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+    `INSERT INTO revisions (entry_id, action, title, body, category, tags, pinned, author, turn_id, reason, entities)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
   ).run(
     e.id,
     action,
@@ -138,6 +142,7 @@ function writeRevision(e: Entry, action: Revision["action"], meta: WriteMeta) {
     meta.author,
     meta.turnId ?? null,
     meta.reason ?? null,
+    JSON.stringify(entityNamesOf(e.id)),
   );
 }
 
@@ -170,6 +175,7 @@ export function createEntry(input: EntryInput, meta: WriteMeta): Entry {
         meta.author,
       );
     const e = getEntry(Number(res.lastInsertRowid))!;
+    if (input.entities?.length) writeEntryEntities(e.id, resolveEntityInputs(input.entities));
     writeRevision(e, "create", meta);
     return e;
   });
@@ -184,6 +190,8 @@ export interface EntryPatch {
   body?: string;
   tags?: string[];
   pinned?: boolean;
+  /** Replaces the memory's entities when given. */
+  entities?: EntityInput[];
 }
 
 export function updateEntry(id: number, patch: EntryPatch, meta: WriteMeta): Entry {
@@ -211,8 +219,17 @@ export function updateEntry(id: number, patch: EntryPatch, meta: WriteMeta): Ent
     next.body === cur.body &&
     next.pinned === cur.pinned &&
     JSON.stringify(next.tags) === JSON.stringify(cur.tags);
-  if (unchanged) return cur;
-  const updated = transaction(() => {
+  const sameNames = (a: string[], b: string[]) => a.length === b.length && a.every((x, i) => x === b[i]);
+  return transaction(() => {
+    // Entities first, so the revision below snapshots them; an entity-only change still gets a revision.
+    const before = entityNamesOf(id);
+    if (patch.entities !== undefined) writeEntryEntities(id, resolveEntityInputs(patch.entities));
+    const entitiesChanged = !sameNames(before, entityNamesOf(id));
+    if (unchanged && !entitiesChanged) return cur;
+    if (unchanged) {
+      writeRevision(cur, "update", meta);
+      return cur;
+    }
     db.prepare(
       `UPDATE entries SET scope = ?, project_id = ?, category = ?, title = ?, body = ?, tags = ?, pinned = ?,
          source = ?, updated_at = ? WHERE id = ?`,
@@ -232,7 +249,6 @@ export function updateEntry(id: number, patch: EntryPatch, meta: WriteMeta): Ent
     writeRevision(e, "update", meta);
     return e;
   });
-  return updated;
 }
 
 export function deleteEntry(id: number, meta: WriteMeta): Entry {
@@ -265,6 +281,7 @@ export function restoreEntry(id: number, meta: WriteMeta): Entry {
 
 export function purgeEntry(id: number): void {
   db.prepare(`DELETE FROM entries WHERE id = ? AND deleted_at IS NOT NULL`).run(id);
+  pruneAllOrphanEntities();
 }
 
 export function revertEntry(id: number, revisionId: number, meta: WriteMeta): Entry {
@@ -276,7 +293,7 @@ export function revertEntry(id: number, revisionId: number, meta: WriteMeta): En
   if (cur.deleted_at) restoreEntry(id, meta);
   return updateEntry(
     id,
-    { title: r.title, body: r.body, category: r.category, tags: r.tags, pinned: r.pinned },
+    { title: r.title, body: r.body, category: r.category, tags: r.tags, pinned: r.pinned, ...(r.entities ? { entities: r.entities } : {}) },
     { ...meta, reason: meta.reason ?? `revision #${revisionId} 로 되돌림` },
   );
 }

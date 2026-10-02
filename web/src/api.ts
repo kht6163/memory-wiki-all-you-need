@@ -42,6 +42,8 @@ export interface Revision {
   author: Source;
   turn_id: number | null;
   reason: string | null;
+  /** Entity names at this revision (null before v0.4.0). */
+  entities?: string[] | null;
   created_at: string;
 }
 
@@ -91,6 +93,10 @@ export interface SessionHit {
 }
 
 export interface Stats {
+  entities: number;
+  links: number;
+  unlinked: number;
+  graphPending: number;
   entries: number;
   projects: number;
   turns: number;
@@ -166,6 +172,50 @@ export interface ComposeTurn {
   composed_at: string | null;
 }
 
+export type LinkType = "depends_on" | "because" | "supersedes" | "related";
+
+export interface Entity {
+  id: number;
+  name: string;
+  kind: string;
+  description: string;
+  created_at: string;
+  updated_at: string;
+  count?: number;
+  aliases?: string[];
+}
+
+export interface EntryLink {
+  from_id: number;
+  to_id: number;
+  type: LinkType;
+  author: Source;
+  created_at: string;
+  dir: "out" | "in";
+  other: { id: number; title: string; category: string; scope: string };
+}
+
+export type GraphNode =
+  | { id: string; type: "memory"; entryId: number; label: string; category: string; scope: string; projectId: number | null }
+  | { id: string; type: "entity"; entityId: number; label: string; kind: string; count: number };
+
+export interface GraphData {
+  nodes: GraphNode[];
+  edges: { id: string; source: string; target: string; type: LinkType | "mentions" }[];
+  truncated: boolean;
+  unlinked: number;
+}
+
+export interface GraphJob {
+  id: number;
+  status: "pending" | "processing" | "done" | "skipped" | "error";
+  payload: { entries: number[]; projectId?: number | null };
+  result: { done?: number[]; chunks?: number; entities?: number; links?: number; ms?: number } | null;
+  error: string | null;
+  created_at: string;
+  processed_at: string | null;
+}
+
 export type PageRef = { id: number; slug: string; title: string; project_id?: number | null };
 
 async function request<T>(method: string, url: string, body?: unknown): Promise<T> {
@@ -195,9 +245,21 @@ export const api = {
   deleteProject: (id: number) => request("DELETE", `/projects/${id}`),
   entries: (f: { scope?: Scope; project_id?: number; category?: string; deleted?: boolean }) =>
     request<Entry[]>("GET", `/entries${qs({ ...f, deleted: f.deleted ? 1 : undefined })}`),
-  entry: (id: number) => request<{ entry: Entry; project: Project | null; revisions: Revision[]; citedBy: PageRef[] }>("GET", `/entries/${id}`),
-  createEntry: (e: Partial<Entry>) => request<Entry>("POST", "/entries", e),
-  updateEntry: (id: number, patch: Partial<Entry>) => request<Entry>("PATCH", `/entries/${id}`, patch),
+  entry: (id: number) =>
+    request<{ entry: Entry; project: Project | null; revisions: Revision[]; citedBy: PageRef[]; entities: Entity[]; links: EntryLink[] }>("GET", `/entries/${id}`),
+  createEntry: (e: Partial<Entry> & { entities?: string[] }) => request<Entry>("POST", "/entries", e),
+  updateEntry: (id: number, patch: Partial<Entry> & { entities?: string[] }) => request<Entry>("PATCH", `/entries/${id}`, patch),
+  addLink: (id: number, to: number, type: LinkType) => request<EntryLink[]>("POST", `/entries/${id}/links`, { to, type }),
+  removeLink: (id: number, to: number, type: LinkType) => request<EntryLink[]>("DELETE", `/entries/${id}/links${qs({ to, type })}`),
+  graph: (project_id?: number) => request<GraphData>("GET", `/graph${qs({ project_id })}`),
+  entities: (q?: string, project_id?: number) => request<Entity[]>("GET", `/entities${qs({ q, project_id })}`),
+  entity: (id: number) => request<{ entity: Entity; memories: (Entry & { project_name: string | null })[] }>("GET", `/entities/${id}`),
+  updateEntity: (id: number, patch: Partial<Pick<Entity, "name" | "kind" | "description">>) => request<Entity>("PATCH", `/entities/${id}`, patch),
+  mergeEntity: (id: number, into: number) => request<Entity>("POST", `/entities/${id}/merge`, { into }),
+  deleteEntity: (id: number) => request("DELETE", `/entities/${id}`),
+  backfill: (project_id?: number, all = false) => request<GraphJob>("POST", "/graph/backfill", { project_id, all }),
+  graphJobs: () => request<GraphJob[]>("GET", "/graph/jobs"),
+  retryGraphJob: (id: number) => request<GraphJob>("POST", `/graph/jobs/${id}/retry`),
   deleteEntry: (id: number) => request<Entry>("DELETE", `/entries/${id}`),
   restoreEntry: (id: number) => request<Entry>("POST", `/entries/${id}/restore`),
   purgeEntry: (id: number) => request("DELETE", `/entries/${id}/purge`),

@@ -17,6 +17,7 @@ import { resolveProject, type ProjectRef } from "./project.ts";
 // - Tools compatible with pi-hermes-memory: memory_search, session_search,
 //   memory_add, memory_replace, memory_remove. Plus wiki_search / wiki_read /
 //   wiki_write for the project wiki, which is kept separately from memory.
+// - memory_graph: the memory knowledge graph (entities + typed links).
 // - /wiki-compose: asks the server LLM to organize this session's turn
 //   records into wiki pages.
 
@@ -234,6 +235,45 @@ export default function memoryAllYouNeed(pi: ExtensionAPI) {
       const hits = await call<{ id: number; project_name: string | null; created_at: string; snippet: string }[]>("GET", `/session-search?${q}`);
       if (!hits.length) return text("No matching past turns.");
       return text(hits.map((h) => `turn #${h.id} · ${h.project_name ?? "no project"} · ${h.created_at.slice(0, 16)}\n  ${h.snippet}`).join("\n"));
+    },
+  });
+
+  pi.registerTool({
+    name: "memory_graph",
+    label: "Memory graph",
+    description:
+      "Explore the memory graph. entity: everything remembered about a technology/service/tool/file (e.g. \"PostgreSQL\", \"docker compose\") plus co-occurring entities. id: one memory with its entities and typed links (because, depends_on, supersedes, related) — why it exists and what it depends on.",
+    parameters: Type.Object({
+      entity: Type.Optional(Type.String({ description: "Entity name, e.g. PostgreSQL" })),
+      id: Type.Optional(Type.Number({ description: "Memory id, e.g. 12 for [#12]" })),
+    }),
+    async execute(_id, p) {
+      if (!p.entity && !p.id) return text("Give an entity name or a memory id.");
+      const q = new URLSearchParams();
+      if (p.entity) q.set("entity", p.entity);
+      if (p.id) q.set("id", String(p.id));
+      if (project) q.set("project", project.key);
+      type Mem = EntryLite & { scope: string };
+      const r = await call<
+        | { kind: "entity"; entity: { name: string; kind: string; description: string }; memories: Mem[]; related: { name: string; count?: number }[] }
+        | {
+            kind: "memory";
+            memory: Mem;
+            entities: { name: string; kind: string }[];
+            links: { dir: "out" | "in"; type: string; other: { id: number; title: string; category: string } }[];
+          }
+      >("GET", `/graph/neighbors?${q}`);
+      if (r.kind === "entity") {
+        const head = `${r.entity.name} (${r.entity.kind})${r.entity.description ? ` — ${r.entity.description}` : ""}`;
+        const rel = r.related.length ? `\nRelated entities: ${r.related.map((x) => x.name).join(", ")}` : "";
+        return text(`${head}\n\n${fmtEntries(r.memories)}${rel}`);
+      }
+      const verb = (l: { dir: string; type: string }) =>
+        l.dir === "out" ? { because: "because of", depends_on: "depends on", supersedes: "replaces", related: "related to" }[l.type] : { because: "is the reason for", depends_on: "is needed by", supersedes: "was replaced by", related: "related to" }[l.type];
+      const links = r.links.map((l) => `  ${verb(l) ?? l.type} #${l.other.id} [${l.other.category}] ${l.other.title}`).join("\n");
+      return text(
+        `${fmtEntries([r.memory])}\nEntities: ${r.entities.map((e) => e.name).join(", ") || "(none)"}${links ? `\nLinks:\n${links}` : "\nLinks: (none)"}`,
+      );
     },
   });
 

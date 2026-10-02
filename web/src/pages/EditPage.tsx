@@ -20,6 +20,8 @@ export function EditPage({ id, defaults }: Props) {
     pinned: false,
   });
   const [tagText, setTagText] = useState("");
+  const [entityText, setEntityText] = useState("");
+  const [loadedEntities, setLoadedEntities] = useState("");
   const [error, setError] = useState<string | null>(null);
   const [saving, setSaving] = useState(false);
 
@@ -28,6 +30,9 @@ export function EditPage({ id, defaults }: Props) {
     if (e) {
       setForm(e);
       setTagText(e.tags.join(", "));
+      const names = (existing.data?.entities ?? []).map((n) => n.name).join(", ");
+      setEntityText(names);
+      setLoadedEntities(names);
     }
   }, [existing.data]);
 
@@ -44,6 +49,8 @@ export function EditPage({ id, defaults }: Props) {
       body: form.body,
       pinned: form.pinned,
       tags: tagText.split(",").map((t) => t.trim()).filter(Boolean),
+      // Only send entities when edited, so ones the curator added meanwhile are not dropped.
+      ...(!id || entityText !== loadedEntities ? { entities: entityText.split(",").map((t) => t.trim()).filter(Boolean) } : {}),
     };
     try {
       const saved = id ? await api.updateEntry(id, payload) : await api.createEntry(payload);
@@ -118,6 +125,10 @@ export function EditPage({ id, defaults }: Props) {
         <label>
           태그 (쉼표로 구분)
           <input value={tagText} onChange={(e) => setTagText(e.target.value)} placeholder="docker, deploy" />
+        </label>
+        <label>
+          엔티티 (쉼표로 구분 · 그래프 노드)
+          <input value={entityText} onChange={(e) => setEntityText(e.target.value)} placeholder="PostgreSQL, docker compose, Tailscale" />
         </label>
         {form.category === "standing" && <p className="hint">고정 지시는 모든 세션의 프롬프트에 항상 들어가며 LLM·에이전트는 수정할 수 없습니다.</p>}
         <div className="row">

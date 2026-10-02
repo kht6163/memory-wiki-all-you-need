@@ -27,6 +27,25 @@ import {
 import { deleteTurn, enqueueTurn, getTurn, listTurns, retryTurn } from "./turns.ts";
 import { config, llmEnabled } from "./config.ts";
 import {
+  addLink,
+  deleteEntity,
+  enqueueBackfill,
+  entitiesOf,
+  entityEntries,
+  getEntity,
+  graphData,
+  graphStats,
+  isLinkType,
+  linksOf,
+  listEntities,
+  listGraphJobs,
+  mergeEntities,
+  neighborhood,
+  removeLink,
+  retryGraphJob,
+  updateEntity,
+} from "./graph.ts";
+import {
   backlinks,
   citedEntries,
   composableTurns,
@@ -76,7 +95,7 @@ function projectFromRef(ref: ProjectRef | null | undefined) {
 
 // ------------------------------------------------------------ agent-facing
 
-api.get("/health", (c) => c.json({ ok: true, llm: llmEnabled() ? config.llm.model : null, ...stats(), ...wikiStats() }));
+api.get("/health", (c) => c.json({ ok: true, llm: llmEnabled() ? config.llm.model : null, ...stats(), ...wikiStats(), ...graphStats() }));
 
 /** Called by the pi extension before every run. Upserts the project. */
 api.post("/context", async (c) => {
@@ -182,7 +201,7 @@ api.post("/agent/memory", async (c) => {
 // ------------------------------------------------------------------ wiki
 
 api.get("/meta", (c) => c.json({ categories: CATEGORIES, llm: llmEnabled() ? config.llm.model : null }));
-api.get("/stats", (c) => c.json({ ...stats(), ...wikiStats() }));
+api.get("/stats", (c) => c.json({ ...stats(), ...wikiStats(), ...graphStats() }));
 
 api.get("/projects", (c) => c.json(listProjects()));
 api.get("/projects/:id", (c) => {
@@ -211,7 +230,14 @@ api.get("/entries/visible", (c) => c.json(visibleEntries(num(c.req.query("projec
 api.get("/entries/:id", (c) => {
   const e = getEntry(idParam(c));
   if (!e) throw new HttpError(404, "entry not found");
-  return c.json({ entry: e, project: e.project_id ? getProject(e.project_id) : null, revisions: listRevisions(e.id), citedBy: pagesCitingEntry(e.id) });
+  return c.json({
+    entry: e,
+    project: e.project_id ? getProject(e.project_id) : null,
+    revisions: listRevisions(e.id),
+    citedBy: pagesCitingEntry(e.id),
+    entities: entitiesOf(e.id),
+    links: linksOf(e.id),
+  });
 });
 api.post("/entries", async (c) => c.json(createEntry(await body(c), { author: "human" }), 201));
 api.patch("/entries/:id", async (c) => c.json(updateEntry(idParam(c), await body(c), { author: "human" })));
@@ -225,6 +251,57 @@ api.delete("/entries/:id/purge", (c) => {
   purgeEntry(idParam(c));
   return c.json({ ok: true });
 });
+
+api.post("/entries/:id/links", async (c) => {
+  const b = await body<{ to: number; type: string }>(c);
+  if (!isLinkType(b.type)) throw new HttpError(400, "invalid link type");
+  addLink(idParam(c), Number(b.to), b.type, "human");
+  return c.json(linksOf(idParam(c)), 201);
+});
+api.delete("/entries/:id/links", (c) => {
+  const type = c.req.query("type");
+  if (!isLinkType(type)) throw new HttpError(400, "invalid link type");
+  removeLink(idParam(c), Number(c.req.query("to")), type);
+  return c.json(linksOf(idParam(c)));
+});
+
+// ----------------------------------------------------------------- graph
+
+/** Whole graph for the web view: project (with bridging global/user memories) or everything. */
+api.get("/graph", (c) => c.json(graphData(num(c.req.query("project_id")) ?? null, { limit: num(c.req.query("limit")) })));
+
+/** memory_graph tool: neighborhood of an entity (entity=) or a memory (id=), as seen from a project. */
+api.get("/graph/neighbors", (c) => {
+  const key = c.req.query("project");
+  const projectId = num(c.req.query("project_id")) ?? (key ? getProjectByKey(key)?.id : undefined) ?? null;
+  return c.json(neighborhood({ entity: c.req.query("entity") || undefined, id: num(c.req.query("id")) }, projectId));
+});
+
+api.get("/entities", (c) =>
+  c.json(listEntities({ q: c.req.query("q") || undefined, projectId: num(c.req.query("project_id")), limit: num(c.req.query("limit")) })),
+);
+api.get("/entities/:id", (c) => {
+  const ent = getEntity(idParam(c));
+  if (!ent) throw new HttpError(404, "entity not found");
+  const memories = entityEntries(ent.id).map((e) => ({ ...e, project_name: e.project_id ? getProject(e.project_id)?.name ?? null : null }));
+  return c.json({ entity: ent, memories });
+});
+api.patch("/entities/:id", async (c) => c.json(updateEntity(idParam(c), await body(c))));
+api.post("/entities/:id/merge", async (c) => {
+  const b = await body<{ into: number }>(c);
+  return c.json(mergeEntities(idParam(c), Number(b.into)));
+});
+api.delete("/entities/:id", (c) => {
+  deleteEntity(idParam(c));
+  return c.json({ ok: true });
+});
+
+api.post("/graph/backfill", async (c) => {
+  const b = await body<{ project_id?: number | null; all?: boolean }>(c);
+  return c.json(enqueueBackfill(b.project_id || null, { all: b.all }), 201);
+});
+api.get("/graph/jobs", (c) => c.json(listGraphJobs(num(c.req.query("limit")) ?? 20)));
+api.post("/graph/jobs/:id/retry", (c) => c.json(retryGraphJob(idParam(c))));
 
 api.get("/activity", (c) => c.json(recentActivity(num(c.req.query("limit")) ?? 100, num(c.req.query("before")))));
 

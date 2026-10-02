@@ -57,6 +57,8 @@ export interface Revision {
   author: Source;
   turn_id: number | null;
   reason: string | null;
+  /** Entity names at this revision (null for rows written before v0.4.0). */
+  entities: string[] | null;
   created_at: string;
 }
 
@@ -266,6 +268,51 @@ CREATE TABLE IF NOT EXISTS wiki_composed (
   PRIMARY KEY (scope, turn_id)
 );
 
+-- Memory graph. Entities (tech, services, tools, files, concepts) are shared
+-- across projects; memories mention them, and memories link to each other
+-- with a small set of typed relations. Edges of deleted memories are kept
+-- (they come back on restore) but every query filters them out.
+CREATE TABLE IF NOT EXISTS entities (
+  id INTEGER PRIMARY KEY,
+  name TEXT NOT NULL,
+  norm TEXT NOT NULL UNIQUE,
+  kind TEXT NOT NULL DEFAULT 'concept',
+  description TEXT NOT NULL DEFAULT '',
+  created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now')),
+  updated_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now'))
+);
+-- Other spellings that resolve to an entity (kept when entities are merged or renamed).
+CREATE TABLE IF NOT EXISTS entity_aliases (
+  norm TEXT PRIMARY KEY,
+  entity_id INTEGER NOT NULL REFERENCES entities(id) ON DELETE CASCADE
+);
+CREATE TABLE IF NOT EXISTS entry_entities (
+  entry_id INTEGER NOT NULL REFERENCES entries(id) ON DELETE CASCADE,
+  entity_id INTEGER NOT NULL REFERENCES entities(id) ON DELETE CASCADE,
+  PRIMARY KEY (entry_id, entity_id)
+);
+CREATE INDEX IF NOT EXISTS entry_entities_entity ON entry_entities(entity_id);
+CREATE TABLE IF NOT EXISTS entry_links (
+  from_id INTEGER NOT NULL REFERENCES entries(id) ON DELETE CASCADE,
+  to_id INTEGER NOT NULL REFERENCES entries(id) ON DELETE CASCADE,
+  type TEXT NOT NULL CHECK (type IN ('depends_on','because','supersedes','related')),
+  author TEXT NOT NULL,
+  created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now')),
+  PRIMARY KEY (from_id, to_id, type),
+  CHECK (from_id != to_id)
+);
+CREATE INDEX IF NOT EXISTS entry_links_to ON entry_links(to_id);
+-- Backfill queue: attach entities/links to existing memories (on request).
+CREATE TABLE IF NOT EXISTS graph_jobs (
+  id INTEGER PRIMARY KEY,
+  status TEXT NOT NULL DEFAULT 'pending',
+  payload TEXT NOT NULL DEFAULT '{}',
+  result TEXT,
+  error TEXT,
+  created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now')),
+  processed_at TEXT
+);
+
 CREATE VIRTUAL TABLE IF NOT EXISTS turns_fts USING fts5(
   text, content='turns', content_rowid='id', tokenize='trigram'
 );
@@ -280,6 +327,12 @@ END;
 // A crash mid-processing leaves turns stuck; put them back in the queue.
 db.exec(`UPDATE turns SET status = 'pending' WHERE status = 'processing'`);
 db.exec(`UPDATE wiki_jobs SET status = 'pending' WHERE status = 'processing'`);
+db.exec(`UPDATE graph_jobs SET status = 'pending' WHERE status = 'processing'`);
+
+// v0.4.0: revisions also snapshot the memory's entity names (NULL in older rows).
+if (!db.prepare(`SELECT 1 FROM pragma_table_info('revisions') WHERE name = 'entities'`).get()) {
+  db.exec(`ALTER TABLE revisions ADD COLUMN entities TEXT`);
+}
 // v0.2.0 memory→wiki write / wiki→memory sync jobs no longer exist.
 db.exec(`UPDATE wiki_jobs SET status = 'skipped', error = 'removed in v0.3.0' WHERE status = 'pending' AND kind IN ('write','sync')`);
 
@@ -319,6 +372,7 @@ export function rowToRevision(r: Row): Revision {
     author: r.author as Source,
     turn_id: r.turn_id == null ? null : Number(r.turn_id),
     reason: r.reason == null ? null : String(r.reason),
+    entities: r.entities == null ? null : JSON.parse(String(r.entities)),
     created_at: String(r.created_at),
   };
 }
@@ -353,8 +407,12 @@ export function rowToProject(r: Row): Project {
   };
 }
 
+let txDepth = 0;
+/** Runs fn in one transaction; nested calls join the outer one. */
 export function transaction<T>(fn: () => T): T {
+  if (txDepth > 0) return fn();
   db.exec("BEGIN IMMEDIATE");
+  txDepth++;
   try {
     const result = fn();
     db.exec("COMMIT");
@@ -362,5 +420,7 @@ export function transaction<T>(fn: () => T): T {
   } catch (err) {
     db.exec("ROLLBACK");
     throw err;
+  } finally {
+    txDepth--;
   }
 }

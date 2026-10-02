@@ -16,13 +16,14 @@ import {
   scopeHref,
   useData,
 } from "../lib.tsx";
+import { EntryGraph } from "./GraphPages.tsx";
 import { CitedBy } from "./WikiPages.tsx";
 
 export function EntryPage({ id }: { id: number }) {
   const { data, error } = useData(() => api.entry(id), [id]);
   if (error) return <ErrorBox error={error} />;
   if (!data) return null;
-  const { entry: e, project, revisions, citedBy } = data;
+  const { entry: e, project, revisions, citedBy, entities, links } = data;
   const scopeName = e.scope === "project" ? project?.name ?? "프로젝트" : SCOPE_LABEL[e.scope];
 
   return (
@@ -98,6 +99,8 @@ export function EntryPage({ id }: { id: number }) {
         </tbody>
       </table>
 
+      <EntryGraph entryId={e.id} projectId={e.project_id} entities={entities} links={links} editable={!e.deleted_at && e.category !== "standing"} />
+
       <CitedBy pages={citedBy} />
 
       <h2>수정 이력</h2>
@@ -113,7 +116,7 @@ export function EntryPage({ id }: { id: number }) {
 function RevisionItem({ rev, prev, entryId, isCurrent }: { rev: Revision; prev?: Revision; entryId: number; isCurrent: boolean }) {
   const [open, setOpen] = useState(isCurrent && rev.action === "update");
   const changedFields = prev
-    ? [prev.title !== rev.title && "제목", prev.body !== rev.body && "본문", prev.category !== rev.category && "분류", prev.pinned !== rev.pinned && "고정", JSON.stringify(prev.tags) !== JSON.stringify(rev.tags) && "태그"].filter(Boolean)
+    ? [prev.title !== rev.title && "제목", prev.body !== rev.body && "본문", prev.category !== rev.category && "분류", prev.pinned !== rev.pinned && "고정", JSON.stringify(prev.tags) !== JSON.stringify(rev.tags) && "태그", prev.entities && rev.entities && JSON.stringify(prev.entities) !== JSON.stringify(rev.entities) && "엔티티"].filter(Boolean)
     : [];
   return (
     <li className={`rev rev-${rev.action}`}>
@@ -148,6 +151,9 @@ function RevisionItem({ rev, prev, entryId, isCurrent }: { rev: Revision; prev?:
         <div className="rev-body">
           {prev && prev.title !== rev.title && <Diff a={prev.title} b={rev.title} />}
           {prev ? prev.body !== rev.body ? <Diff a={prev.body} b={rev.body} /> : null : <Markdown>{rev.body || "_본문 없음_"}</Markdown>}
+          {prev?.entities && rev.entities && JSON.stringify(prev.entities) !== JSON.stringify(rev.entities) && (
+            <Diff a={`엔티티: ${prev.entities.join(", ")}`} b={`엔티티: ${rev.entities.join(", ")}`} />
+          )}
         </div>
       )}
     </li>

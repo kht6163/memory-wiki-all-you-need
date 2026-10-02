@@ -34,6 +34,14 @@ export const config = {
     /** Character budget of the wiki page list injected into pi. */
     indexBudget: int("WIKI_INDEX_BUDGET_CHARS", 1500),
   },
+  graph: {
+    /** Extra memories recall may add through the graph (entity mentions, links), still inside RECALL_BUDGET_CHARS. */
+    recallExtra: int("GRAPH_RECALL_EXTRA", 4),
+    /** Memory characters sent to the LLM per backfill call. */
+    backfillChunkChars: int("GRAPH_BACKFILL_CHUNK_CHARS", 24_000),
+    /** Most memories one backfill job may take. */
+    backfillMax: int("GRAPH_BACKFILL_MAX", 2000),
+  },
 };
 
 export const llmEnabled = () => Boolean(config.llm.baseUrl);

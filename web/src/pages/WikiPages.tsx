@@ -16,7 +16,7 @@ import {
 } from "../lib.tsx";
 
 /** Tabs shared by a project's (or the global) wiki, memory and turn views. */
-export function ScopeTabs({ scope, active }: { scope: number; active: "wiki" | "memory" | "user" | "turns" | "jobs" }) {
+export function ScopeTabs({ scope, active }: { scope: number; active: "wiki" | "memory" | "user" | "turns" | "jobs" | "graph" }) {
   const tabs =
     scope === 0
       ? [
@@ -28,6 +28,7 @@ export function ScopeTabs({ scope, active }: { scope: number; active: "wiki" | "
       : [
           ["wiki", "위키", `#/w/${scope}`],
           ["memory", "메모리", `#/p/${scope}`],
+          ["graph", "그래프", `#/graph?project=${scope}`],
           ["turns", "턴 기록", `#/turns?project=${scope}`],
           ["jobs", "위키 작업", `#/wiki-jobs?project=${scope}`],
         ];

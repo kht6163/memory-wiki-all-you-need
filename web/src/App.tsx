@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+import { Suspense, lazy, useEffect, useState } from "react";
 import { api } from "./api.ts";
 import { go, useData, useRoute } from "./lib.tsx";
 import { EditPage } from "./pages/EditPage.tsx";
@@ -13,6 +13,9 @@ import {
   TurnPage,
   TurnsPage,
 } from "./pages/OtherPages.tsx";
+import { EntitiesPage, EntityPage } from "./pages/GraphPages.tsx";
+
+const GraphPage = lazy(() => import("./pages/GraphView.tsx").then((m) => ({ default: m.GraphPage })));
 import { ScopePage } from "./pages/ScopePage.tsx";
 import { WikiCompose, WikiEdit, WikiHome, WikiJobsPage, WikiPageView } from "./pages/WikiPages.tsx";
 
@@ -65,6 +68,10 @@ export function App() {
     else if (p3 === "edit") page = <WikiEdit key={`edit-${scope}-${p2}`} scope={scope} slug={p2} />;
     else page = <WikiPageView key={`${scope}-${p2}`} scope={scope} slug={p2} />;
   } else if (p0 === "wiki-jobs") page = <WikiJobsPage scope={route.query.has("project") ? num(route.query.get("project")) ?? 0 : undefined} />;
+  else if (p0 === "graph")
+    page = <GraphPage key={route.query.toString()} projectId={num(route.query.get("project"))} initialFocus={route.query.get("focus") ?? undefined} />;
+  else if (p0 === "entities") page = <EntitiesPage />;
+  else if (p0 === "entity" && num(p1)) page = <EntityPage key={p1} id={num(p1)!} />;
   else if (p0 === "activity") page = <ActivityPage />;
   else if (p0 === "turns" && num(p1)) page = <TurnPage id={num(p1)!} />;
   else if (p0 === "turns") page = <TurnsPage projectId={num(route.query.get("project"))} status={route.query.get("status") ?? undefined} />;
@@ -115,6 +122,12 @@ export function App() {
           <a className={active(p0 === "global")} href="#/global">
             전역 메모리
           </a>
+          <a className={active(p0 === "graph")} href="#/graph">
+            그래프{s && s.graphPending > 0 && <span className="pill">{s.graphPending}</span>}
+          </a>
+          <a className={active(p0 === "entities" || p0 === "entity")} href="#/entities">
+            엔티티{s && s.entities > 0 && <span className="count">{s.entities}</span>}
+          </a>
           <div className="nav-group">
             <a className={`nav-group-title ${active(p0 === "projects") ?? ""}`} href="#/projects">
               프로젝트
@@ -146,7 +159,9 @@ export function App() {
           </a>
         </nav>
       </aside>
-      <main className="main">{page}</main>
+      <main className="main">
+        <Suspense fallback={null}>{page}</Suspense>
+      </main>
     </div>
   );
 }

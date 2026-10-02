@@ -1,7 +1,7 @@
 {
   "name": "@memory-wiki-all-you-need/web",
   "private": true,
-  "version": "0.3.0",
+  "version": "0.4.0",
   "type": "module",
   "scripts": {
     "dev": "vite",
@@ -9,6 +9,7 @@
     "typecheck": "tsc --noEmit"
   },
   "dependencies": {
+    "cytoscape": "^3.34.3",
     "diff": "^8.0.2",
     "react": "^19.1.1",
     "react-dom": "^19.1.1",
