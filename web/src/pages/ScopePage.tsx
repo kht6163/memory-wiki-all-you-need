@@ -19,6 +19,7 @@ import {
   go,
   isHistory,
   softDelete,
+  errorText,
   toast,
   useData,
 } from "../lib.tsx";
@@ -538,7 +539,7 @@ function PolicyCard({ projectId }: { projectId: number | null }) {
     api
       .policy(projectId)
       .then((p) => alive && (setPolicy(p), setError(null)))
-      .catch((e: Error) => alive && setError(e.message));
+      .catch((e: unknown) => alive && setError(errorText(e)));
     return () => {
       alive = false;
     };

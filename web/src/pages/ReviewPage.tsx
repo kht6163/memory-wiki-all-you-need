@@ -1,6 +1,7 @@
 import "./review.css";
 import { useEffect, useRef, useState, type ReactNode } from "react";
 import { api, type Proposal, type ReviewJob } from "../api.ts";
+import { editProblems, entityChange, proposalEdits, type EditProblem } from "../proposal.ts";
 import {
   CATEGORY_LABEL,
   CategoryBadge,
@@ -353,6 +354,12 @@ function EntryBox({ e, role, gone }: { e: PEntry; role?: "kept" | "gone"; gone?:
   );
 }
 
+const EDIT_PROBLEM: Record<EditProblem, string> = {
+  missing: "바꿀 구절이 현재 본문에 없습니다. 적용하면 실패할 수 있습니다.",
+  repeated: "바꿀 구절이 현재 본문에 여러 번 나옵니다. 적용하면 실패할 수 있습니다.",
+  overlap: "다른 수정 구절과 겹칩니다. 적용하면 실패할 수 있습니다.",
+};
+
 function MissingBox({ id }: { id: number }) {
   return <div className="pentry is-missing">#{id} (삭제됨)</div>;
 }
@@ -394,7 +401,9 @@ function ProposalCard({
 
   let body: ReactNode;
   if (p.kind === "update") {
-    const edit = p.data.edit;
+    const edits = proposalEdits(p.data);
+    const problems = first ? editProblems(first.body, edits) : edits.map(() => null);
+    const entChange = first ? entityChange(first.entities ?? [], p.data.entities) : null;
     const newTitle = p.data.title ?? first?.title ?? "";
     body = (
       <>
@@ -411,18 +420,21 @@ function ProposalCard({
               분류 {CATEGORY_LABEL[first!.category] ?? first!.category} <Icon name="arrow-right" size={12} /> {CATEGORY_LABEL[p.data.category!] ?? p.data.category}
             </div>
           )}
-          {edit ? (
+          {edits.length > 0 ? (
             <>
               <div className="change-label">
-                부분 수정 <span className="change-note">본문에서 정확히 일치하는 이 구절 한 곳만 바꿉니다</span>
+                부분 수정{edits.length > 1 && ` ${edits.length}곳`}{" "}
+                <span className="change-note">
+                  {edits.length > 1 ? "본문에서 정확히 일치하는 구절들을 함께 바꿉니다(각각 한 곳)" : "본문에서 정확히 일치하는 이 구절 한 곳만 바꿉니다"}
+                </span>
               </div>
-              <Diff a={edit.old} b={edit.new} />
-              {first && !first.body.includes(edit.old) && (
-                <Callout kind="danger">바꿀 구절이 현재 본문에 없습니다. 적용하면 실패할 수 있습니다.</Callout>
-              )}
-              {first && edit.old && first.body.split(edit.old).length > 2 && (
-                <Callout kind="danger">바꿀 구절이 현재 본문에 여러 번 나옵니다. 적용하면 실패할 수 있습니다.</Callout>
-              )}
+              {edits.map((e, i) => (
+                <div key={i} className="proposal-edit">
+                  {edits.length > 1 && <div className="change-sub">{i + 1}</div>}
+                  <Diff a={e.old} b={e.new} />
+                  {problems[i] && <Callout kind="danger">{EDIT_PROBLEM[problems[i]!]}</Callout>}
+                </div>
+              ))}
             </>
           ) : (
             p.data.body !== undefined &&
@@ -433,6 +445,29 @@ function ProposalCard({
                 <Diff a={first.body} b={p.data.body} />
               </>
             )
+          )}
+          {entChange && (
+            <>
+              <div className="change-label">
+                엔티티 <span className="change-note">빠지는 엔티티와의 연결을 끊습니다</span>
+              </div>
+              <div className="entity-change">
+                {entChange.kept.map((n) => (
+                  <span key={`k-${n}`} className="ent-name">
+                    {n}
+                  </span>
+                ))}
+                {entChange.removed.map((n) => (
+                  <span key={`r-${n}`} className="ent-name ent-removed" title="빠짐">
+                    {n}
+                  </span>
+                ))}
+                {entChange.kept.length === 0 && entChange.added.length === 0 && <span className="faint">(엔티티 없음)</span>}
+              </div>
+              {entChange.added.length > 0 && (
+                <Callout kind="danger">현재 메모리에 없는 엔티티가 들어 있습니다({entChange.added.join(", ")}). 적용하면 실패할 수 있습니다.</Callout>
+              )}
+            </>
           )}
         </div>
       </>

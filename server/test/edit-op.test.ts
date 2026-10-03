@@ -1,5 +1,5 @@
 // Exact-substring "edit" of a memory body: the curation op {"op":"edit"} and
-// review update proposals with data.edit. Only an "old" passage that occurs
+// review update proposals with data.edits. Only an "old" passage that occurs
 // exactly once (CRLF → LF, nothing fuzzier) is replaced; shown candidates only
 // (G-009); review proposals re-check version (G-021) and uniqueness on apply.
 import assert from "node:assert/strict";
@@ -122,7 +122,8 @@ test("review: an edit proposal on a >4000-char memory is accepted and applies; a
   assert.equal((await ok<Any[]>("GET", "/review/jobs?limit=100")).find((j) => j.id === job.id).status, "done");
   const props = await ok<Any[]>("GET", `/review/proposals?job_id=${job.id}`);
   assert.equal(props.length, 1, "the full rewrite of a truncated body is dropped");
-  assert.deepEqual(props[0].data.edit, { old: "cache key is v1", new: "cache key is v2" });
+  assert.deepEqual(props[0].data.edits, [{ old: "cache key is v1", new: "cache key is v2" }]);
+  assert.equal(props[0].data.edit, undefined);
   assert.equal(props[0].data.body, undefined, "an edit replaces any full body");
 
   const applied = await ok<Any>("POST", `/review/proposals/${props[0].id}/apply`);

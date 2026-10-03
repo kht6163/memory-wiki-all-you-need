@@ -100,8 +100,9 @@ test("G-017: /graph drops a soft-deleted memory's node and edges and restores th
 
 // ------------------------------------------------------------------ G-020
 
-test("G-020: case, spaces, . _ - / and trailing versions resolve to one entity", async () => {
-  const variants = ["PostgreSQL 16", "postgres-ql", "Postgre_SQL", "postgre.sql", "POSTGRESQL", "  PostgreSQL   v16.1 ", "Postgre/SQL", "Postgre SQL"];
+test("G-020: case, spaces, . _ - and trailing versions resolve to one entity", async () => {
+  // Slashes are kept in the norm since v0.6.1 (a path "k8s/" is not the name "k8s").
+  const variants = ["PostgreSQL 16", "postgres-ql", "Postgre_SQL", "postgre.sql", "POSTGRESQL", "  PostgreSQL   v16.1 ", "Postgre SQL"];
   const one = await entry({ title: "g020 all spellings", entities: variants });
   const ids = await entityIdsOf(one.id);
   assert.equal(ids.length, 1, "all variants on one memory collapse into one mention");

@@ -54,6 +54,7 @@ Remember (only if it will plausibly matter in a FUTURE session):
 
 Do NOT remember:
 - transient task progress, TODOs of this turn, or the conversation itself
+- one-off work that merely applies an existing memory (a task done the way a remembered rule says): that is a confirm of the rule, not a new convention — add only when the turn states a new durable fact
 - things obvious from reading the code, or generic programming knowledge
 - guesses not confirmed in the turn: a claim that appears only in the assistant's own reasoning or plan is not a fact until a tool result, the user or the code backs it (what the agent actually did and verified — "fixed X by doing Y" — does count)
 - an assistant message that only repeats or acknowledges what the user said (store the user's fact once, not the echo)
@@ -66,18 +67,18 @@ Scopes:
 - "user": about the user as a person (preferences, communication style, background)
 
 Rules:
-- Prefer updating an existing memory over adding a near-duplicate. Merge related facts into one entry. Memories from earlier turns of this session are among the candidates: extend them instead of repeating them.
+- Prefer updating an existing memory over adding a near-duplicate. Memories from earlier turns of this session are among the candidates: extend them instead of repeating them. But merge only facts about the SAME subject whose title still fits; a different component or concern (DB vs CI auth vs cache) gets its own add, linked "related" if useful — never let one memory grow into a grab bag.
 - When the world changed (switched library, moved a path, upgraded a version, reversed a decision): add the new memory with a "supersedes" link to the old one. The old one is then kept as history and no longer injected — do not also delete it. Use update for corrections/refinements of the same fact, delete only for memories that were wrong from the start or are noise.
 - Multiple values are not a contradiction: "uses PostgreSQL" and "also uses Redis" can both be true; only replace/supersede when the new fact makes the old one false.
-- valid_until (YYYY-MM-DD, optional): only for facts that are true until a known date or event (a temporary workaround until a release, a freeze until a date, a sprint's branch). Leave it out for lasting facts.
-- keywords (0-8, optional): other words someone might search for to find this memory and that are NOT already in title/body — synonyms, the English/Korean translation, abbreviations, alternate spellings ("Postgres", "포스트그레스"). They are only used for search, never shown to the agent.
+- valid_until (YYYY-MM-DD): for facts that are true only until a known date (a temporary workaround, a freeze, a deadline like "until next Wednesday"): set it to that resolved date, in addition to writing the date in the body. Leave it out for lasting facts.
+- keywords (0-8): other words someone might search for that are NOT already in title/body — the user's own wording when the memory words it differently, the English/Korean translation, aliases, abbreviations, alternate spellings. REQUIRED whenever such a term exists (user wrote "포스트그레스", title says "PostgreSQL" → ["포스트그레스","Postgres"]); omit only when there is truly none. Used for search only, never shown to the agent.
 - Only reference ids from the EXISTING MEMORIES list.
-- edit: for a small change to a long body (fix a value, add or drop a line), prefer {"op":"edit","id":N,"old":"...","new":"..."} over update: "old" is copied verbatim from the body and must occur in it exactly once (include enough surrounding text to make it unique); it is replaced by "new". Nothing else changes. Use update with a full "body" only when rewriting the memory, and never drop still-true lines when you do.
+- edit: for a small change to a long body (fix a value, add or drop a line), prefer {"op":"edit","id":N,"old":"...","new":"..."} over update: "old" is copied verbatim from the body and must occur in it exactly once (include enough surrounding text to make it unique); it is replaced by "new". To also change that memory's entities, links or valid_until (e.g. a deadline the turn adds), put "entities"/"links"/"valid_until" on the same edit op — never a second op for the same memory. Use update with a full "body" only when rewriting the memory, and never drop still-true lines when you do.
 - confirm: when the turn relies on or re-states an existing memory that is still accurate and needs no change, return {"op":"confirm","id":N} instead of an update (at most a few per turn). It changes nothing; it only records that the memory is still in use.
-- Write titles and bodies in the same language the user writes in (Korean if the user writes Korean). Keep technical identifiers as-is.
+- Write titles and bodies in the same language the user writes in (Korean if the user writes Korean). In title and body, copy package, container, service, CLI, config and file names exactly as written ("redis-sentinel" stays "redis-sentinel", not "Redis Sentinel"); canonical spelling is for entity names only.
 - title: short and specific (<= 80 chars). body: concise, self-contained markdown (1-6 lines). Include the "why" when known.
 - tags: 0-5 short lowercase keywords.
-- Dates: memories are kept indefinitely, so never write relative times ("today", "yesterday", "recently", "last week"). Resolve them against TURN DATE (when the turn happened — not TODAY) into absolute dates (YYYY-MM-DD). Keep exact versions, paths, flags, ports and error strings as written; never generalize identifiers.
+- Dates: memories are kept indefinitely, so never write relative times ("today", "yesterday", "recently", "last week"). Resolve them against TURN DATE (when the turn happened — not TODAY) into absolute dates (YYYY-MM-DD). When the turn dates an event (incident, failure, release, migration, decision), the body MUST keep that resolved date — drop the relative word, never the date. Keep exact versions, paths, flags, ports and error strings as written; never generalize identifiers.
 - Most turns need no change. Returning no ops is normal.
 
 Graph (memories are also nodes of a knowledge graph):
@@ -88,15 +89,15 @@ Graph (memories are also nodes of a knowledge graph):
   - "supersedes": this replaces the other (the other then becomes history automatically)
   - "related": closely related, nothing more specific fits
   Only link when the relation is real and useful; most memories need 0-2 links.
-- Give entities on every add. On update, entities REPLACE the memory's entity list (omit to keep it).
-- Graph upkeep is expected even when nothing else changes: every EXISTING memory this turn is about that has "entities": [] (e.g. one the agent just saved with memory_add) MUST get an update op with only "id", "entities" and, where real, "links". Also add links between existing memories when this turn reveals a relation (op "link").
+- Give entities on every add. On update and edit, entities REPLACE the memory's entity list (omit to keep it).
+- Graph upkeep is expected even when nothing else changes: every EXISTING memory this turn is about that has "entities": [] (e.g. one the agent just saved with memory_add) MUST get an update op with only "id", "entities" and, where real, "links" (or carry them on the edit op if you also edit it). Also add links between existing memories when this turn reveals a relation (op "link").
 - {"op":"link"} relates two existing memories without changing them.
 
 Respond with ONLY a JSON object:
 {"ops":[
-  {"op":"add","scope":"project|global|user","category":"...","title":"...","body":"...","tags":["..."],"keywords":["..."],"valid_until":"YYYY-MM-DD","entities":[{"name":"...","kind":"tech"}],"links":[{"to":123,"type":"because"}]},
-  {"op":"update","id":123,"title":"...","body":"...","category":"...","tags":["..."],"keywords":["..."],"entities":[{"name":"...","kind":"..."}],"links":[{"to":45,"type":"related"}],"reason":"..."},
-  {"op":"edit","id":123,"old":"exact text from the body","new":"replacement","reason":"..."},
+  {"op":"add","scope":"project|global|user","category":"...","title":"...","body":"...","tags":["..."],"keywords":["user's own term","alias"],"valid_until":"YYYY-MM-DD","entities":[{"name":"...","kind":"tech"}],"links":[{"to":123,"type":"because"}]},
+  {"op":"update","id":123,"title":"...","body":"...","category":"...","tags":["..."],"keywords":["..."],"valid_until":"YYYY-MM-DD","entities":[{"name":"...","kind":"..."}],"links":[{"to":45,"type":"related"}],"reason":"..."},
+  {"op":"edit","id":123,"old":"exact text from the body","new":"replacement","entities":[{"name":"...","kind":"..."}],"links":[{"to":45,"type":"related"}],"valid_until":"YYYY-MM-DD","reason":"..."},
   {"op":"delete","id":123,"reason":"..."},
   {"op":"confirm","id":123},
   {"op":"link","from":123,"to":45,"type":"depends_on"}
@@ -226,25 +227,36 @@ export function applyMemoryOps(
       }
     }
   };
-  for (const op of ops.slice(0, 20)) {
+  const batch = ops.slice(0, 20);
+  // An edit plus an update of the same memory that only sets entities/links/valid_until
+  // would write two revisions for one change: such updates are held back and committed
+  // with the first edit of that id that succeeds. If no edit of that id succeeds, they
+  // apply on their own after the last one, as if never held.
+  const editsLeft = new Map<number, number>();
+  for (const op of batch) if (op.op === "edit") editsLeft.set(Number(op.id), (editsLeft.get(Number(op.id)) ?? 0) + 1);
+  const heldSide = new Map<number, Op[]>();
+  const heldAt = new Map<number, number>(); // response position of the first held update, per id
+  const held = new Set<Op>();
+  batch.forEach((op, i) => {
+    const id = Number(op.id);
+    if (op.op !== "update" || !editsLeft.has(id) || !isSideUpdate(op)) return;
+    heldSide.set(id, [...(heldSide.get(id) ?? []), op]);
+    if (!heldAt.has(id)) heldAt.set(id, i);
+    held.add(op);
+  });
+  const applyOp = (op: Op) => {
     try {
       const kind = String(op.op ?? "");
       const category = CATEGORY_LIST.includes(String(op.category)) ? String(op.category) : undefined;
       const tags = Array.isArray(op.tags) ? op.tags.map(String) : undefined;
       const entities = Array.isArray(op.entities) ? (op.entities as EntityInput[]) : undefined;
       const keywords = Array.isArray(op.keywords) ? op.keywords.map(String) : undefined;
-      // A malformed date from the LLM is dropped rather than failing the whole op.
-      let validUntil: string | undefined;
-      try {
-        validUntil = op.valid_until ? normalizeValidUntil(op.valid_until) ?? undefined : undefined;
-      } catch {
-        validUntil = undefined;
-      }
+      const validUntil = validUntilOf(op);
       if (kind === "link") {
         const from = Number(op.from);
-        if (!linkable.has(from)) continue;
+        if (!linkable.has(from)) return;
         linkFrom(from, [{ to: op.to, type: op.type }]);
-        continue;
+        return;
       }
       if (kind === "add") {
         let scope = String(op.scope ?? "project") as Entry["scope"];
@@ -260,7 +272,7 @@ export function applyMemoryOps(
           const sameBatch = applied.some((a) => a.op === "add" && a.entryId === dup);
           if (meta.turnId != null && !sameBatch) recordEntryTurn(dup, meta.turnId, "duplicate");
           // Standing instructions are human-only (G-002): never link from or tag one.
-          if (getEntry(dup)?.category === "standing") continue;
+          if (getEntry(dup)?.category === "standing") return;
           // The rest of the op still counts: its links (a "supersedes" retires the old fact)...
           linkable.add(dup);
           linkFrom(dup, op.links);
@@ -272,7 +284,7 @@ export function applyMemoryOps(
               console.warn(`[worker] ${label}: entities for duplicate #${dup} rejected: ${(err as Error).message}`);
             }
           }
-          continue;
+          return;
         }
         const e = createEntry(
           {
@@ -294,26 +306,70 @@ export function applyMemoryOps(
         if (meta.turnId != null) recordEntryTurn(e.id, meta.turnId, "add");
       } else if (kind === "update" || kind === "edit" || kind === "delete" || kind === "confirm") {
         const id = Number(op.id);
-        if (!allowed.has(id)) continue;
+        if (!allowed.has(id)) return;
         const current = getEntry(id);
-        if (!current) continue;
+        if (!current) return;
         if (kind === "confirm") {
           // Provenance only: no revision, no updated_at change, so the stable block does not move (G-005).
           // Skipped when an earlier op of this batch already touched the memory (a delete,
-          // an update, a repeated confirm) or retired it (an add that supersedes it).
-          if (meta.turnId == null || current.deleted_at || applied.some((a) => a.entryId === id) || !isActive(current)) continue;
+          // an update, a repeated confirm) or retired it (an add that supersedes it). An update
+          // held back for an edit counts at its own position in the response.
+          if (meta.turnId == null || current.deleted_at || applied.some((a) => a.entryId === id) || !isActive(current)) return;
+          if ((heldAt.get(id) ?? Infinity) < batch.indexOf(op)) return;
           applied.push({ op: "confirm", entryId: id, title: current.title });
           recordEntryTurn(id, meta.turnId, "confirm");
         } else if (kind === "edit") {
           // Exact-substring replacement (never fuzzy): the LLM changes one passage of a long
           // body without re-emitting it, so it cannot silently drop lines it did not mean to touch.
-          if (current.deleted_at || current.category === "standing") continue;
+          // Body, entities, valid_until and the held updates go in ONE updateEntry (one revision).
+          // A skipped edit applies nothing of its own; the held updates wait for the next edit
+          // of this memory, or apply on their own after the last one.
+          const lastEdit = (editsLeft.get(id) ?? 1) <= 1;
+          editsLeft.set(id, (editsLeft.get(id) ?? 1) - 1);
+          const flushHeld = () => {
+            const side = heldSide.get(id) ?? [];
+            heldSide.delete(id);
+            for (const u of side) applyOp(u);
+          };
+          // Standing / deleted: the held updates would be refused as well (G-002), so drop them.
+          if (current.deleted_at || current.category === "standing") return void heldSide.delete(id);
           const r = replaceExactlyOnce(current.body, op.old, op.new);
           if ("error" in r) {
             skipped.push({ op: "edit", title: current.title, reason: r.error, entryId: id });
-            continue;
+            if (lastEdit) flushHeld();
+            return;
           }
-          const e = updateEntry(id, { body: r.body }, { ...meta, reason: op.reason ? String(op.reason) : meta.reason ?? null });
+          const reason = op.reason ? String(op.reason) : meta.reason ?? null;
+          const commit = (group: Op[]) => {
+            // In response order the last op that names a field wins, as if applied one by one.
+            group.sort((a, b) => batch.indexOf(a) - batch.indexOf(b));
+            const ents = group.filter((o) => Array.isArray(o.entities)).at(-1)?.entities as EntityInput[] | undefined;
+            const until = group.map(validUntilOf).filter((v) => v).at(-1);
+            const e = updateEntry(id, { body: r.body, entities: ents, ...(until ? { valid_until: until } : {}) }, { ...meta, reason });
+            for (const o of group) linkFrom(e.id, o.links);
+            return e;
+          };
+          const side = heldSide.get(id) ?? [];
+          heldSide.delete(id);
+          let e: Entry;
+          try {
+            e = commit([op, ...side]);
+          } catch (err) {
+            if (!side.length) throw err;
+            // A held update may be what was refused (e.g. a secret-looking entity): never let it
+            // take the edit down. Retry the edit alone; the held updates then apply one by one.
+            heldSide.set(id, side);
+            try {
+              e = commit([op]);
+            } catch (err2) {
+              if (lastEdit) flushHeld();
+              throw err2;
+            }
+            applied.push({ op: "update", entryId: e.id, title: e.title });
+            if (meta.turnId != null) recordEntryTurn(e.id, meta.turnId, "update");
+            flushHeld();
+            return;
+          }
           applied.push({ op: "update", entryId: e.id, title: e.title });
           if (meta.turnId != null) recordEntryTurn(e.id, meta.turnId, "update");
         } else if (kind === "update") {
@@ -341,8 +397,24 @@ export function applyMemoryOps(
     } catch (err) {
       console.warn(`[worker] ${label}: op rejected: ${(err as Error).message}`);
     }
-  }
+  };
+  for (const op of batch) if (!held.has(op)) applyOp(op);
   return { applied, skipped };
+}
+
+/** An update that only sets entities, links and/or valid_until (what the LLM sends next to an edit). */
+function isSideUpdate(op: Op): boolean {
+  if (op.entities === undefined && op.links === undefined && op.valid_until == null) return false;
+  return ["title", "body", "category", "tags", "keywords", "scope"].every((k) => op[k] == null);
+}
+
+/** The op's valid_until as YYYY-MM-DD; a malformed date from the LLM is dropped rather than failing the op. */
+function validUntilOf(op: Op): string | undefined {
+  try {
+    return op.valid_until ? normalizeValidUntil(op.valid_until) ?? undefined : undefined;
+  } catch {
+    return undefined;
+  }
 }
 
 const normText = (s: string) => s.toLowerCase().replace(/\s+/g, " ").trim();

@@ -170,6 +170,8 @@ export function findSimilarPairs(
     const a = byId.get(ia);
     const b = byId.get(ib);
     if (!a || !b) continue;
+    // A path and a same-letter name are kept apart on purpose (G-040: "k8s/" file vs "k8s").
+    if ((a.kind === "file") !== (b.kind === "file") && a.fuzzy === b.fuzzy) continue;
     const name = nameSimilarity(a, b);
     const n = shared.get(key) ?? 0;
     const cooccur = n >= MIN_SHARED ? n / (a.count + b.count - n || 1) : 0;

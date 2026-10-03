@@ -21,9 +21,22 @@ export function entityDisplayName(name: string): string {
   return (stripped || s).slice(0, 60);
 }
 
-/** Matching key: display form, lowercased, without spaces, dots, dashes or underscores. */
+/**
+ * Matching key: display form, lowercased, without spaces, dots, dashes or
+ * underscores. Slashes are kept (repeats collapsed, a leading "./" dropped) so
+ * a path ("k8s/") and a name ("k8s") stay apart, while "src / api" is still
+ * "src/api". A trailing "/" counts only on a one-part path: "src/api/" is
+ * "src/api". Persisted in entities.norm and entity_aliases.norm: changing the
+ * rule needs a migration step that recomputes them (schema.ts, step 10, whose
+ * frozen copy entityNormV10 must match this).
+ */
 export function entityNorm(name: string): string {
-  return entityDisplayName(name).toLowerCase().replace(/[\s._\-/]+/g, "");
+  const norm = entityDisplayName(name)
+    .toLowerCase()
+    .replace(/^\.\//, "")
+    .replace(/[\s._\-]+/g, "")
+    .replace(/\/+/g, "/");
+  return /.\/.+\/$/.test(norm) ? norm.slice(0, -1) : norm;
 }
 
 const kindOf = (k: unknown): EntityKind => ((ENTITY_KINDS as readonly string[]).includes(String(k)) ? (k as EntityKind) : "concept");

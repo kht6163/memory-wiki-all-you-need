@@ -1,3 +1,5 @@
+import { ApiError } from "./errors.ts";
+
 export type Scope = "global" | "user" | "project";
 export type Source = "agent" | "llm" | "human";
 /** Wiki compose / graph backfill / review job status. "cancelled" jobs can be resumed with retry. */
@@ -281,12 +283,29 @@ export interface ReviewJob {
   processed_at: string | null;
 }
 
+export interface ProposalEdit {
+  old: string;
+  new: string;
+}
+
 export interface Proposal {
   id: number;
   job_id: number;
   kind: "merge" | "update" | "delete" | "conflict";
   entry_ids: number[];
-  data: { title?: string; body?: string; category?: string; note?: string; snap: Record<string, string>; /** Exact-substring edit of the body (update proposals). */ edit?: { old: string; new: string } };
+  data: {
+    title?: string;
+    body?: string;
+    category?: string;
+    note?: string;
+    snap: Record<string, string>;
+    /** Exact-substring edits of the body (update proposals), applied together; each `old` occurs once. */
+    edits?: ProposalEdit[];
+    /** Legacy single edit (proposals written before v0.6.1); still applied. */
+    edit?: ProposalEdit;
+    /** New full entity name list (update proposals), a subset of the memory's current names. Absent = keep. */
+    entities?: string[];
+  };
   reason: string;
   status: "pending" | "applied" | "dismissed" | "stale";
   created_at: string;
@@ -303,7 +322,7 @@ async function request<T>(method: string, url: string, body?: unknown): Promise<
     body: body !== undefined ? JSON.stringify(body) : undefined,
   });
   const data = await res.json().catch(() => ({}));
-  if (!res.ok) throw new Error((data as { error?: string }).error ?? `HTTP ${res.status}`);
+  if (!res.ok) throw new ApiError(res.status, (data as { error?: string }).error ?? `HTTP ${res.status}`);
   return data as T;
 }
 

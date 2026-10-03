@@ -444,7 +444,203 @@ ALTER TABLE entities_new RENAME TO entities;
 `);
     },
   },
+  {
+    version: 9,
+    name: "memory ids are never reused",
+    up(db) {
+      // Same reason as step 8, for memories: graph_revisions link snapshots,
+      // wiki_citations and review proposals name memories by id, so a purged
+      // memory's id must not go to a new one (a revert would link an unrelated
+      // memory). Columns, checks and defaults are the effective entries DDL
+      // after step 2. Dropping entries also drops its index and FTS triggers,
+      // so they are made again (latest version, with keywords) and the
+      // external-content FTS index is rebuilt. Children (revisions,
+      // entry_entities, entry_links, entry_usage, entry_turns) reference
+      // "entries" by name and follow the renamed table; foreign keys are off.
+      db.exec(`
+CREATE TABLE entries_new (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  scope TEXT NOT NULL CHECK (scope IN ('global','user','project')),
+  project_id INTEGER REFERENCES projects(id) ON DELETE CASCADE,
+  category TEXT NOT NULL DEFAULT 'fact',
+  title TEXT NOT NULL,
+  body TEXT NOT NULL DEFAULT '',
+  tags TEXT NOT NULL DEFAULT '[]',
+  pinned INTEGER NOT NULL DEFAULT 0,
+  source TEXT NOT NULL DEFAULT 'human',
+  created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now')),
+  updated_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now')),
+  deleted_at TEXT,
+  keywords TEXT NOT NULL DEFAULT '[]',
+  valid_until TEXT,
+  CHECK ((scope = 'project') = (project_id IS NOT NULL))
+);
+INSERT INTO entries_new (id, scope, project_id, category, title, body, tags, pinned, source, created_at, updated_at, deleted_at, keywords, valid_until)
+  SELECT id, scope, project_id, category, title, body, tags, pinned, source, created_at, updated_at, deleted_at, keywords, valid_until FROM entries;
+DROP TABLE entries;
+ALTER TABLE entries_new RENAME TO entries;
+CREATE INDEX entries_scope ON entries(scope, project_id, deleted_at);
+CREATE TRIGGER entries_ai AFTER INSERT ON entries BEGIN
+  INSERT INTO entries_fts(rowid, title, body, tags, keywords) VALUES (new.id, new.title, new.body, new.tags, new.keywords);
+END;
+CREATE TRIGGER entries_ad AFTER DELETE ON entries BEGIN
+  INSERT INTO entries_fts(entries_fts, rowid, title, body, tags, keywords) VALUES ('delete', old.id, old.title, old.body, old.tags, old.keywords);
+END;
+CREATE TRIGGER entries_au AFTER UPDATE ON entries BEGIN
+  INSERT INTO entries_fts(entries_fts, rowid, title, body, tags, keywords) VALUES ('delete', old.id, old.title, old.body, old.tags, old.keywords);
+  INSERT INTO entries_fts(rowid, title, body, tags, keywords) VALUES (new.id, new.title, new.body, new.tags, new.keywords);
+END;
+INSERT INTO entries_fts(entries_fts) VALUES ('rebuild');
+`);
+      // The copy seeds sqlite_sequence with the largest id still present. A
+      // memory purged before this upgrade may still be named elsewhere, so the
+      // counter starts above every id any record mentions.
+      const mentioned = Number(
+        (
+          db
+            .prepare(
+              `SELECT max(
+                 IFNULL((SELECT max(id) FROM entries), 0),
+                 IFNULL((SELECT max(entry_id) FROM wiki_citations), 0),
+                 IFNULL((SELECT max(CAST(j.value AS INTEGER)) FROM graph_revisions g, json_each(g.snapshot, '$.entry_ids') j WHERE json_valid(g.snapshot)), 0),
+                 IFNULL((SELECT max(CAST(j.value AS INTEGER)) FROM review_proposals p, json_each(p.entry_ids) j WHERE json_valid(p.entry_ids)), 0)
+               ) AS n`,
+            )
+            .get() as { n: number }
+        ).n,
+      );
+      if (mentioned > 0) {
+        const res = db.prepare(`UPDATE sqlite_sequence SET seq = max(seq, ?) WHERE name = 'entries'`).run(mentioned);
+        if (!res.changes) db.prepare(`INSERT INTO sqlite_sequence (name, seq) VALUES ('entries', ?)`).run(mentioned);
+      }
+    },
+  },
+  {
+    version: 10,
+    name: "entity norms keep slashes",
+    up(db) {
+      // entityNorm() stopped dropping "/" so a directory ("k8s/") and a tool
+      // ("k8s") are two entities. The new key is finer than the old one (the
+      // old key is the new one without slashes), so distinct rows cannot
+      // collide; a row that would anyway keeps its old key and is logged.
+      // Mentions already merged under one entity stay merged.
+      recomputeEntityNorms(db);
+      // Alias rows store only the old key, which never holds a "/" and so is
+      // its own new key: nothing to recompute. The spellings behind merge and
+      // rename aliases survive in graph_revisions, though, so those get their
+      // new key added next to the old one (the old one stays).
+      recoverSlashAliases(db);
+      // Merge and delete snapshots carry the entity row with its old norm; a
+      // revert recreates the entity from it, so it must hold the new key.
+      rewriteEntitySnapshots(db);
+    },
+  },
 ];
+
+/**
+ * entityNorm() as of step 10, frozen here: schema.ts must not import
+ * entities.ts (it opens the database), and a released step must keep
+ * computing what it computed. If entityNorm() changes again, add a new step
+ * with its own copy (a test checks this copy against entityNorm()).
+ */
+export function entityNormV10(name: string): string {
+  const s = name.normalize("NFKC").replace(/\s+/g, " ").trim();
+  const display = (s.replace(/\s+v?\d+(?:\.\d+)*[a-z]?$/i, "") || s).slice(0, 60);
+  const norm = display
+    .toLowerCase()
+    .replace(/^\.\//, "")
+    .replace(/[\s._\-]+/g, "")
+    .replace(/\/+/g, "/");
+  return /.\/.+\/$/.test(norm) ? norm.slice(0, -1) : norm;
+}
+
+/** The key entityNorm() made before step 10 (the same, without slashes). */
+const entityNormV9 = (name: string) => entityNormV10(name).replace(/\//g, "");
+
+/** Rewrite entities.norm from the name, skipping (and logging) rows whose new key is too short or taken. */
+function recomputeEntityNorms(db: DatabaseSync) {
+  const rows = db.prepare(`SELECT id, name, norm FROM entities ORDER BY id`).all() as { id: number; name: string; norm: string }[];
+  let apply = rows
+    .map((r) => ({ id: Number(r.id), norm: String(r.norm), next: entityNormV10(String(r.name)) }))
+    .filter((c) => c.next !== c.norm);
+  // A changed row may only take a key no kept row (or alias) holds and no
+  // other changed row wants; a row that is skipped keeps its old key, which
+  // may in turn block another, so repeat until nothing more is skipped.
+  const aliases = new Set(db.prepare(`SELECT norm FROM entity_aliases`).all().map((r) => String(r.norm)));
+  for (;;) {
+    const moving = new Set(apply.map((c) => c.id));
+    const kept = new Set(rows.filter((r) => !moving.has(Number(r.id))).map((r) => String(r.norm)));
+    const wanted = new Map<string, number>();
+    for (const c of apply) wanted.set(c.next, (wanted.get(c.next) ?? 0) + 1);
+    const ok = apply.filter((c) => c.next.length >= 2 && !kept.has(c.next) && !aliases.has(c.next) && wanted.get(c.next) === 1);
+    for (const c of apply) if (!ok.includes(c)) console.warn(`[db] entities: keeping norm "${c.norm}" (new norm "${c.next}" is too short or already used)`);
+    if (ok.length === apply.length) break;
+    apply = ok;
+  }
+  if (!apply.length) return;
+  // Two passes so a key moving between rows never hits the UNIQUE index.
+  const set = db.prepare(`UPDATE entities SET norm = ? WHERE id = ?`);
+  for (const c of apply) set.run(`\u0000${c.norm}`, c.id);
+  for (const c of apply) set.run(c.next, c.id);
+  console.log(`[db] entities: recomputed ${apply.length} norm(s)`);
+}
+
+type Snapshot = Record<string, unknown> & { entity?: { name?: unknown; norm?: unknown }; before?: { name?: unknown }; after?: { name?: unknown } };
+
+function entitySnapshots(db: DatabaseSync, actions: string[]) {
+  return (
+    db
+      .prepare(`SELECT id, snapshot FROM graph_revisions WHERE target = 'entity' AND action IN (${actions.map(() => "?").join(",")}) AND json_valid(snapshot) ORDER BY id`)
+      .all(...actions) as { id: number; snapshot: string }[]
+  ).map((r) => ({ id: Number(r.id), s: JSON.parse(r.snapshot) as Snapshot }));
+}
+
+/**
+ * Merges and renames left the old key of a name as an alias. Where that name
+ * had a "/", its new key no longer matches the alias; give the entity that
+ * owns the old alias now the new key too, unless something else holds it.
+ */
+function recoverSlashAliases(db: DatabaseSync) {
+  const names = new Set<string>();
+  for (const { s } of entitySnapshots(db, ["merge", "update"])) {
+    for (const n of [s.entity?.name, s.before?.name, s.after?.name]) if (typeof n === "string") names.add(n);
+  }
+  const owner = db.prepare(`SELECT entity_id FROM entity_aliases WHERE norm = ?`);
+  const taken = db.prepare(`SELECT 1 FROM entities WHERE norm = ? UNION ALL SELECT 1 FROM entity_aliases WHERE norm = ?`);
+  const add = db.prepare(`INSERT INTO entity_aliases (norm, entity_id) VALUES (?, ?)`);
+  let added = 0;
+  for (const name of names) {
+    const next = entityNormV10(name);
+    const old = entityNormV9(name);
+    if (next === old || next.length < 2) continue;
+    const o = owner.get(old);
+    if (!o) continue;
+    if (taken.get(next, next)) {
+      console.warn(`[db] entity_aliases: not adding "${next}" for entity #${o.entity_id} (already used)`);
+      continue;
+    }
+    add.run(next, Number(o.entity_id));
+    added++;
+  }
+  if (added) console.log(`[db] entity_aliases: added ${added} alias(es) for names with "/"`);
+}
+
+/** Put the new key into the entity rows (and merge name aliases) that reverts recreate from. */
+function rewriteEntitySnapshots(db: DatabaseSync) {
+  const set = db.prepare(`UPDATE graph_revisions SET snapshot = ? WHERE id = ?`);
+  let n = 0;
+  for (const { id, s } of entitySnapshots(db, ["merge", "delete"])) {
+    const e = s.entity;
+    if (!e || typeof e.name !== "string") continue;
+    const next = entityNormV10(e.name);
+    if (e.norm === next && (!("name_alias" in s) || s.name_alias === next)) continue;
+    e.norm = next;
+    if ("name_alias" in s) s.name_alias = next;
+    set.run(JSON.stringify(s), id);
+    n++;
+  }
+  if (n) console.log(`[db] graph_revisions: rewrote ${n} entity snapshot norm(s)`);
+}
 
 export const SCHEMA_VERSION = MIGRATIONS[MIGRATIONS.length - 1].version;
 

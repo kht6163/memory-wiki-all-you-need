@@ -1,9 +1,9 @@
 import { config, llmEnabled } from "./config.ts";
 import { CATEGORIES, db, now, rowToEntry, transaction, type Entry } from "./db.ts";
-import { entityNamesOf } from "./entities.ts";
+import { entityNamesOf, entityNorm } from "./entities.ts";
 import { moveLinks } from "./graph.ts";
 import { findSecrets } from "./secrets.ts";
-import { HttpError, NOT_SUPERSEDED_SQL, deleteEntry, entryState, getEntry, getProject, replaceExactlyOnce, updateEntry } from "./store.ts";
+import { HttpError, NOT_SUPERSEDED_SQL, deleteEntry, entryState, getEntry, getProject, updateEntry, type ExactEditError } from "./store.ts";
 
 // Memory review: an LLM pass over existing memories (cluster by cluster) that
 // PROPOSES merges, fixes, deletions and flags conflicts. Proposals wait for a
@@ -18,10 +18,24 @@ export interface ReviewJob {
   status: "pending" | "processing" | "done" | "skipped" | "error" | "cancelled";
   /** scheduled: queued by scheduleDueReviews (REVIEW_EVERY_DAYS), not by a person. */
   payload: { entries: number[]; scheduled?: boolean };
-  result: { done?: number[]; chunks?: number; proposals?: number; ms?: number } | null;
+  /** dropped: LLM proposals that were not stored and why (first DROPPED_KEPT); dropped_count: all of them. */
+  result: { done?: number[]; chunks?: number; proposals?: number; dropped?: DroppedProposal[]; dropped_count?: number; ms?: number } | null;
   error: string | null;
   created_at: string;
   processed_at: string | null;
+}
+
+/** An LLM proposal that was not stored: kept on the job result so nothing is dropped silently. */
+export interface DroppedProposal {
+  kind: string;
+  ids: number[];
+  reason: string;
+}
+export const DROPPED_KEPT = 50;
+
+export interface ExactEdit {
+  old: string;
+  new: string;
 }
 
 export interface Proposal {
@@ -35,8 +49,12 @@ export interface Proposal {
     body?: string;
     category?: string;
     note?: string;
-    /** update only: replace this exact passage (occurring once in the body) instead of rewriting the body. */
-    edit?: { old: string; new: string };
+    /** update only: replace these exact passages (each occurring once in the body, not overlapping) instead of rewriting the body. */
+    edits?: ExactEdit[];
+    /** Legacy (v0.6.0) single edit: still read and applied for proposals stored before data.edits. */
+    edit?: ExactEdit;
+    /** update only: the memory's new full entity list, a subset of its entities at proposal time (absent = keep). */
+    entities?: string[];
     snap: Record<string, string>;
   };
   reason: string;
@@ -280,33 +298,199 @@ export function versionOf(id: number): string {
   return String(r?.v ?? "");
 }
 
+export type EditsError = ExactEditError | "edit_overlap";
+
 /**
- * Validate and store one LLM proposal. `allowed` = ids shown in that batch.
- * Returns null (and stores nothing) when the proposal breaks a rule.
+ * Apply several exact-substring edits to one body at once (G-033). Every "old" is
+ * looked up in the ORIGINAL body (never in a body already changed by an earlier
+ * edit) and must occur there exactly once; the passages may not overlap. All or
+ * nothing: any failure returns the error and the index of the edit that caused it.
  */
-export function addProposal(jobId: number, raw: Record<string, unknown>, seen: Map<number, string>): Proposal | null {
+export function applyExactEdits(body: string, edits: unknown[]): { body: string } | { error: EditsError; index: number } {
+  const lf = (s: string) => s.replace(/\r\n/g, "\n");
+  const b = lf(body);
+  const spans: { at: number; end: number; next: string; index: number }[] = [];
+  for (const [index, ed] of edits.entries()) {
+    const e = ed as Record<string, unknown> | null;
+    if (!e || typeof e !== "object" || typeof e.old !== "string" || typeof e.new !== "string" || !lf(e.old)) return { error: "edit_invalid", index };
+    const old = lf(e.old);
+    const at = b.indexOf(old);
+    if (at < 0) return { error: "edit_not_found", index };
+    if (b.indexOf(old, at + 1) >= 0) return { error: "edit_not_unique", index };
+    spans.push({ at, end: at + old.length, next: lf(e.new), index });
+  }
+  spans.sort((x, y) => x.at - y.at);
+  for (let i = 1; i < spans.length; i++) if (spans[i].at < spans[i - 1].end) return { error: "edit_overlap", index: Math.max(spans[i].index, spans[i - 1].index) };
+  let out = b;
+  for (const sp of [...spans].reverse()) out = out.slice(0, sp.at) + sp.next + out.slice(sp.end);
+  return { body: out };
+}
+
+/** The edits an LLM proposal carries: "edits" (list) and/or the single "edit" it may still send. null = malformed. */
+function rawEdits(raw: Record<string, unknown>): unknown[] | null {
+  const out: unknown[] = [];
+  if (raw.edits != null) {
+    if (!Array.isArray(raw.edits)) return null;
+    out.push(...raw.edits);
+  }
+  if (raw.edit != null) out.push(raw.edit);
+  return out;
+}
+const editKey = (e: unknown) => {
+  const r = e as Record<string, unknown> | null;
+  return r && typeof r === "object" ? JSON.stringify([String(r.old ?? "").replace(/\r\n/g, "\n"), String(r.new ?? "").replace(/\r\n/g, "\n")]) : "";
+};
+const blank = (v: unknown) => v == null || !String(v).trim();
+/** A category a review may propose: a real one, never standing (humans only). */
+const proposableCategory = (v: unknown) => {
+  const c = v == null ? "" : String(v).trim();
+  return c && c !== "standing" && (CATEGORIES as readonly string[]).includes(c) ? c : undefined;
+};
+
+/**
+ * A proposed entity list for memory `id`: only names it has now (a review never adds
+ * entities), matched by entity norm and returned as the current names, deduped.
+ */
+function entitySubset(id: number, raw: unknown): { names: string[]; same: boolean } | { reason: string } {
+  if (!Array.isArray(raw) || raw.some((n) => typeof n !== "string")) return { reason: "entities_invalid" };
+  const current = new Map(entityNamesOf(id).map((n) => [entityNorm(n), n]));
+  const names: string[] = [];
+  for (const n of raw as string[]) {
+    const name = current.get(entityNorm(n));
+    if (!name) return { reason: "entities_not_subset" };
+    if (!names.includes(name)) names.push(name);
+  }
+  // In the memory's own (name) order, so the same set always compares equal.
+  return { names: [...current.values()].filter((n) => names.includes(n)), same: names.length === current.size };
+}
+
+/**
+ * Fold the update proposals one LLM answer makes for the same single memory into
+ * one proposal (the store keeps one pending update per memory and version, so the
+ * others would be dropped as duplicates). Only rewrite-free updates fold (edits,
+ * title, category, entities); a full-body rewrite stays on its own. Each source
+ * proposal is all-or-nothing: one whose edits clash with those already taken, or
+ * whose title/category contradict them, is dropped with a reason. Entity lists are
+ * intersected (each part may list only what it keeps after its own edit).
+ * Order: the folded proposal sits where its first part was.
+ */
+export function combineUpdateProposals(
+  raws: Record<string, unknown>[],
+  bodyOf: (id: number) => string | undefined,
+): { proposals: Record<string, unknown>[]; dropped: DroppedProposal[] } {
+  const idsOf = (p: Record<string, unknown>) => [...new Set((Array.isArray(p.ids) ? p.ids : p.id != null ? [p.id] : []).map(Number))];
+  const foldable = (p: Record<string, unknown>) => {
+    if (String(p.kind ?? p.op ?? "") !== "update" || idsOf(p).length !== 1) return false;
+    const eds = rawEdits(p);
+    // An edit decides the body (a "body" next to it is ignored); without edits, only a body-free update folds.
+    return eds !== null && (eds.length > 0 || blank(p.body));
+  };
+  const groups = new Map<number, Record<string, unknown>[]>();
+  for (const p of raws) if (foldable(p)) groups.set(idsOf(p)[0], [...(groups.get(idsOf(p)[0]) ?? []), p]);
+
+  const dropped: DroppedProposal[] = [];
+  const proposals: Record<string, unknown>[] = [];
+  for (const p of raws) {
+    if (!foldable(p)) {
+      proposals.push(p);
+      continue;
+    }
+    const id = idsOf(p)[0];
+    const group = groups.get(id)!;
+    if (group[0] !== p) continue; // folded into the group's first part
+    const body = bodyOf(id);
+    if (group.length === 1 || body === undefined) {
+      proposals.push(...group); // nothing to fold, or addProposal rejects it anyway
+      continue;
+    }
+    const edits: unknown[] = [];
+    const keys = new Set<string>();
+    const fields: { title?: string; category?: string; entities?: string[] } = {};
+    const reasons: string[] = [];
+    for (const part of group) {
+      // Each part is checked on its own first, so one bad part cannot sink the others.
+      const drop = (reason: string) => dropped.push({ kind: "update", ids: [id], reason });
+      const all = rawEdits(part) ?? [];
+      // Deduped against earlier parts and within this one (as tryAddProposal dedupes a lone proposal).
+      const partKeys = new Set<string>();
+      const fresh = all.filter((e) => {
+        const k = editKey(e);
+        if (keys.has(k) || partKeys.has(k)) return false;
+        partKeys.add(k);
+        return true;
+      });
+      const own: typeof fields = {};
+      if (!blank(part.title)) own.title = String(part.title).trim().slice(0, 200);
+      const cat = proposableCategory(part.category);
+      if (cat) own.category = cat;
+      if (part.entities != null) {
+        const ents = entitySubset(id, part.entities);
+        if ("reason" in ents) {
+          drop(ents.reason);
+          continue;
+        }
+        own.entities = ents.names;
+      }
+      if (!fresh.length && !Object.keys(own).length) {
+        drop(all.length ? "duplicate" : "no_change");
+        continue;
+      }
+      // Entities never clash: each part lists what it keeps (often after only its own edit), so
+      // the folded list keeps only names every part kept — the union of their removals.
+      const clash = (["title", "category"] as const).find((k) => own[k] !== undefined && fields[k] !== undefined && own[k] !== fields[k]);
+      if (clash) {
+        drop(`conflicting_${clash}`);
+        continue;
+      }
+      if (findSecrets(`${own.title ?? ""}\n${fresh.map((e) => String((e as Record<string, unknown>)?.new ?? "")).join("\n")}`).length) {
+        drop("secret");
+        continue;
+      }
+      if (fresh.length) {
+        const r = applyExactEdits(body, [...edits, ...fresh]);
+        if ("error" in r || r.body.length > 20_000) {
+          drop("error" in r ? r.error : "too_long");
+          continue;
+        }
+      }
+      for (const e of fresh) {
+        edits.push(e);
+        keys.add(editKey(e));
+      }
+      const kept = own.entities && fields.entities ? fields.entities.filter((n) => own.entities!.includes(n)) : (own.entities ?? fields.entities);
+      Object.assign(fields, own, kept ? { entities: kept } : {});
+      const why = String(part.reason ?? "").trim();
+      if (why && !reasons.includes(why)) reasons.push(why);
+    }
+    proposals.push({ kind: "update", ids: [id], ...(edits.length ? { edits } : {}), ...fields, reason: reasons.join("; ") });
+  }
+  return { proposals, dropped };
+}
+
+/** addProposal, but says why a proposal was not stored (reported on the job result). */
+export function tryAddProposal(jobId: number, raw: Record<string, unknown>, seen: Map<number, string>): { proposal: Proposal } | { reason: string } {
   const kind = String(raw.kind ?? raw.op ?? "") as ProposalKind;
-  if (!["merge", "update", "delete", "conflict"].includes(kind)) return null;
+  if (!["merge", "update", "delete", "conflict"].includes(kind)) return { reason: "unknown_kind" };
   const ids = [...new Set((Array.isArray(raw.ids) ? raw.ids : raw.id != null ? [raw.id] : []).map(Number))].filter((id) => seen.has(id));
   // A memory that changed while the LLM was reading it: the proposal is built on old text.
-  if (ids.some((id) => versionOf(id) !== seen.get(id))) return null;
+  if (ids.some((id) => versionOf(id) !== seen.get(id))) return { reason: "changed_meanwhile" };
   const job = getReviewJob(jobId);
   const entries = ids
     .map((id) => getEntry(id))
     .filter((e): e is Entry => Boolean(e && !e.deleted_at && e.category !== "standing" && inScope(e, job?.project_id ?? null)));
-  if (entries.length !== ids.length) return null;
+  if (entries.length !== ids.length) return { reason: "not_reviewable" };
   // Superseded since the LLM saw it (a link writes no memory revision, so the version check misses it):
   // it is history now, and a merge would hide or delete live content.
-  if (entries.some((e) => entryState(e).superseded_by)) return null;
-  if ((kind === "merge" || kind === "conflict") && ids.length < 2) return null;
-  if ((kind === "update" || kind === "delete") && ids.length !== 1) return null;
+  if (entries.some((e) => entryState(e).superseded_by)) return { reason: "superseded" };
+  if ((kind === "merge" || kind === "conflict") && ids.length < 2) return { reason: "too_few_ids" };
+  if ((kind === "update" || kind === "delete") && ids.length !== 1) return { reason: ids.length ? "too_many_ids" : "no_ids" };
   // A merge keeps one memory, so all of them must live in the same place.
-  if (kind === "merge" && new Set(entries.map((e) => `${e.scope}/${e.project_id ?? 0}`)).size > 1) return null;
-  if (kind === "delete" && entries[0].pinned) return null;
+  if (kind === "merge" && new Set(entries.map((e) => `${e.scope}/${e.project_id ?? 0}`)).size > 1) return { reason: "mixed_scope" };
+  if (kind === "delete" && entries[0].pinned) return { reason: "pinned" };
   // A merge deletes every memory but the first; a pinned memory may only be the one kept.
   if (kind === "merge" && entries.slice(1).some((e) => e.pinned)) {
     const pinned = entries.filter((e) => e.pinned);
-    if (pinned.length > 1) return null;
+    if (pinned.length > 1) return { reason: "pinned" };
     ids.splice(ids.indexOf(pinned[0].id), 1);
     ids.unshift(pinned[0].id);
   }
@@ -317,31 +501,47 @@ export function addProposal(jobId: number, raw: Record<string, unknown>, seen: M
     data.title = text(raw.title)?.slice(0, 200);
     data.body = text(raw.body);
     // Only real categories; never promote to standing (humans only).
-    const cat = text(raw.category);
-    if (cat && cat !== "standing" && (CATEGORIES as readonly string[]).includes(cat)) data.category = cat;
+    data.category = proposableCategory(raw.category);
     if (kind === "merge") {
-      if (!data.title) return null;
+      if (!data.title) return { reason: "no_title" };
       // No merged body from the LLM: keep every member's body rather than silently dropping the others'.
       // In final order (a pinned member may have been moved first).
       data.body ??= [...new Set(ids.map((id) => entries.find((e) => e.id === id)!.body.trim()).filter(Boolean))].join("\n\n") || undefined;
     }
-    // Exact-substring edit: an "edit" decides the body; a full body next to it is ignored, and an
-    // edit that does not match exactly once is rejected outright (never falls back to the body —
-    // that body may come from a truncated view). Checked against the FULL current body.
+    // Exact-substring edits: "edits" decide the body; a full body next to them is ignored, and an
+    // edit that does not match exactly once (or overlaps another) rejects the whole proposal — it
+    // never falls back to the body (that body may come from a truncated view). Checked against
+    // the FULL current body. Always stored as data.edits (a single "edit" from the LLM too).
     let edited: string | undefined;
-    if (kind === "update" && raw.edit != null) {
-      const ed = raw.edit as Record<string, unknown>;
-      const r = typeof ed === "object" ? replaceExactlyOnce(entries[0].body, ed.old, ed.new) : null;
-      if (!r || "error" in r) return null;
-      edited = r.body;
-      delete data.body;
-      data.edit = { old: String(ed.old).replace(/\r\n/g, "\n"), new: String(ed.new).replace(/\r\n/g, "\n") };
+    if (kind === "update") {
+      const eds = rawEdits(raw);
+      if (eds === null) return { reason: "edit_invalid" };
+      const unique = eds.filter((e, i) => eds.findIndex((x) => editKey(x) === editKey(e)) === i);
+      if (unique.length) {
+        const r = applyExactEdits(entries[0].body, unique);
+        if ("error" in r) return { reason: r.error };
+        edited = r.body;
+        delete data.body;
+        data.edits = unique.map((e) => {
+          const ed = e as ExactEdit;
+          return { old: ed.old.replace(/\r\n/g, "\n"), new: ed.new.replace(/\r\n/g, "\n") };
+        });
+      }
+      // Entities: only a subset of what the memory has now (a review never adds entities), so an
+      // edit that removes the only passage naming one can drop it. Matched by entity norm, stored
+      // as the current names; the same set as now counts as absent.
+      if (raw.entities != null) {
+        const ents = entitySubset(ids[0], raw.entities);
+        if ("reason" in ents) return { reason: ents.reason };
+        if (!ents.same) data.entities = ents.names;
+      }
     }
     for (const k of ["title", "body", "category"] as const) if (data[k] === undefined) delete data[k];
     // Same limits the store enforces on apply, so an accepted proposal can actually be applied.
-    if ((data.body?.length ?? 0) > 20_000 || (edited?.length ?? 0) > 20_000) return null;
-    if (findSecrets(`${data.title ?? ""}\n${data.body ?? ""}\n${data.edit?.new ?? ""}`).length) return null;
-    if (kind === "update" && data.title === undefined && data.body === undefined && data.category === undefined && data.edit === undefined) return null;
+    if ((data.body?.length ?? 0) > 20_000 || (edited?.length ?? 0) > 20_000) return { reason: "too_long" };
+    if (findSecrets(`${data.title ?? ""}\n${data.body ?? ""}\n${(data.edits ?? []).map((e) => e.new).join("\n")}`).length) return { reason: "secret" };
+    if (kind === "update" && data.title === undefined && data.body === undefined && data.category === undefined && data.edits === undefined && data.entities === undefined)
+      return { reason: "no_change" };
   }
   if (kind === "conflict" && raw.note != null) data.note = String(raw.note);
   // The same memories already have an open proposal of this kind: skip the duplicate.
@@ -356,14 +556,23 @@ export function addProposal(jobId: number, raw: Record<string, unknown>, seen: M
     if (JSON.stringify((JSON.parse(String(r.entry_ids)) as number[]).sort((a, b) => a - b)) !== sortedKey) continue;
     const prevSnap = (JSON.parse(String(r.data ?? "{}")) as Proposal["data"]).snap ?? {};
     const same = JSON.stringify(Object.fromEntries(Object.keys(data.snap).map((k) => [k, prevSnap[k]]))) === snapKey;
-    if (same) return null;
+    if (same) return { reason: r.status === "pending" ? "duplicate" : "dismissed_before" };
     // An open proposal built on older versions can never apply; retire it so the fresh one counts.
     if (r.status === "pending") decide(Number(r.id), "stale");
   }
   const res = db
     .prepare(`INSERT INTO review_proposals (job_id, kind, entry_ids, data, reason) VALUES (?, ?, ?, ?, ?)`)
     .run(jobId, kind, JSON.stringify(ids), JSON.stringify(data), String(raw.reason ?? "").slice(0, 500));
-  return getProposal(Number(res.lastInsertRowid));
+  return { proposal: getProposal(Number(res.lastInsertRowid))! };
+}
+
+/**
+ * Validate and store one LLM proposal. `seen` = ids shown in that batch with the version the LLM saw.
+ * Returns null (and stores nothing) when the proposal breaks a rule; tryAddProposal says which.
+ */
+export function addProposal(jobId: number, raw: Record<string, unknown>, seen: Map<number, string>): Proposal | null {
+  const r = tryAddProposal(jobId, raw, seen);
+  return "proposal" in r ? r.proposal : null;
 }
 
 export function getProposal(id: number): Proposal | null {
@@ -446,13 +655,27 @@ function applyInTransaction(p: Proposal, meta: { author: "llm"; reason: string }
     if (p.kind === "delete") deleteEntry(p.entry_ids[0], meta);
     else if (p.kind === "update") {
       let body = p.data.body;
-      if (p.data.edit) {
-        // Re-check at apply time: the passage must still occur exactly once.
-        const r = replaceExactlyOnce(getEntry(p.entry_ids[0])!.body, p.data.edit.old, p.data.edit.new);
-        if ("error" in r) throw new HttpError(422, r.error === "edit_not_unique" ? "the edited passage now occurs more than once" : "the edited passage is no longer in the body");
+      // data.edit: a proposal stored before data.edits (v0.6.0), still applied.
+      const edits = p.data.edits ?? (p.data.edit ? [p.data.edit] : undefined);
+      if (edits?.length) {
+        // Re-check at apply time: every passage must still occur exactly once, without overlapping.
+        const r = applyExactEdits(getEntry(p.entry_ids[0])!.body, edits);
+        if ("error" in r)
+          throw new HttpError(
+            422,
+            r.error === "edit_not_unique" ? "the edited passage now occurs more than once"
+              : r.error === "edit_overlap" ? "the edited passages now overlap"
+              : "the edited passage is no longer in the body",
+          );
         body = r.body;
       }
-      updateEntry(p.entry_ids[0], { title: p.data.title, body, category: p.data.category }, meta);
+      if (p.data.entities) {
+        // Still a subset of the memory's entities (the version check normally guarantees this).
+        const current = new Set(entityNamesOf(p.entry_ids[0]).map(entityNorm));
+        if (p.data.entities.some((n) => !current.has(entityNorm(n)))) throw new HttpError(422, "the proposed entities are no longer on the memory");
+      }
+      // One updateEntry call: text and entities land in a single revision.
+      updateEntry(p.entry_ids[0], { title: p.data.title, body, category: p.data.category, entities: p.data.entities }, meta);
     }
     else if (p.kind === "merge") {
       const [keep, ...rest] = p.entry_ids;

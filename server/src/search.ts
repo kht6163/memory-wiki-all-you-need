@@ -160,11 +160,30 @@ export function entityBoost(n: number): number {
   return 1 + 0.5 / (1 + 0.001 * Math.max(0, n - 1) ** 2);
 }
 
-function applyEntityBoost(hits: SearchHit[], entityIds: number[], projectId?: number) {
+/**
+ * How many of an entity's newest memories recall adds as extras when the prompt
+ * names it, from the same hub curve as entityBoost: 3 while the boost is still
+ * strong (n ≤ 16), 1 for a mid-sized entity (n ≤ 39), none for a hub — its
+ * newest memories are most likely unrelated to the request; the boost on search
+ * hits already surfaces the relevant ones.
+ */
+export function entityExtraLimit(n: number): number {
+  const f = entityBoost(n);
+  return f >= 1.4 ? 3 : f >= 1.2 ? 1 : 0;
+}
+
+/**
+ * Active, live memories mentioning each entity (the hub size n of entityBoost).
+ * projectId limits the count to what that project can see (undefined = every
+ * project; pass `projectId ?? -1` for a project-less caller). The only counting
+ * path: the search boost and the per-entity recall extras both use it.
+ */
+export function entityMentionCounts(entityIds: number[], projectId?: number): Map<number, number> {
   const ents = [...new Set(entityIds)];
+  const counts = new Map<number, number>();
+  if (!ents.length) return counts;
   const eph = ents.map(() => "?").join(",");
   const visible = projectId === undefined ? "" : "AND (e.scope != 'project' OR e.project_id = ?)";
-  const counts = new Map<number, number>();
   for (const r of db
     .prepare(
       `SELECT ee.entity_id AS id, COUNT(*) AS n FROM entry_entities ee JOIN entries e ON e.id = ee.entry_id
@@ -172,6 +191,13 @@ function applyEntityBoost(hits: SearchHit[], entityIds: number[], projectId?: nu
     )
     .all(...ents, ...(projectId === undefined ? [] : [projectId])))
     counts.set(Number(r.id), Number(r.n));
+  return counts;
+}
+
+function applyEntityBoost(hits: SearchHit[], entityIds: number[], projectId?: number) {
+  const ents = [...new Set(entityIds)];
+  const eph = ents.map(() => "?").join(",");
+  const counts = entityMentionCounts(ents, projectId);
   const ids = hits.map((h) => h.entry.id);
   const best = new Map<number, number>();
   for (const r of db

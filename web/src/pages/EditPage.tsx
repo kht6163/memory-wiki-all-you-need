@@ -1,7 +1,7 @@
 import "./scope.css";
 import { useEffect, useLayoutEffect, useRef, useState, type KeyboardEvent } from "react";
 import { api, type Entry, type Scope } from "../api.ts";
-import { CATEGORY_LABEL, CATEGORY_ORDER, ErrorBox, MOD_LABEL, Markdown, go, leaveTo as leave, toast, useData, changed, useLeaveGuard } from "../lib.tsx";
+import { CATEGORY_LABEL, CATEGORY_ORDER, ErrorBox, MOD_LABEL, Markdown, go, leaveTo as leave, toast, toastError, errorText, useData, changed, useLeaveGuard } from "../lib.tsx";
 import { Icon } from "../components/Icon.tsx";
 import { SkeletonPage } from "../components/Skeleton.tsx";
 
@@ -144,8 +144,8 @@ export function EditPage({ id, defaults }: Props) {
         toast({ kind: "ok", title: "저장했습니다" });
       }
     } catch (e) {
-      setError((e as Error).message);
-      toast({ kind: "error", title: "저장하지 못했습니다", description: (e as Error).message });
+      setError(errorText(e));
+      toastError(e, "저장하지 못했습니다");
     } finally {
       setSaving(false);
     }

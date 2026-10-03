@@ -2,7 +2,10 @@ import { llmEnabled } from "./config.ts";
 import { db, type Entry } from "./db.ts";
 import { entityNamesOf } from "./entities.ts";
 import { chatJson } from "./llm.ts";
-import { addProposal, buildReviewBatches, finishReviewJob, inScope, isReviewJobCancelled, runningReviewJobs, saveReviewProgress, versionOf, type ReviewJob } from "./review.ts";
+import {
+  DROPPED_KEPT, buildReviewBatches, combineUpdateProposals, finishReviewJob, inScope, isReviewJobCancelled, runningReviewJobs, saveReviewProgress, tryAddProposal, versionOf,
+  type DroppedProposal, type ReviewJob,
+} from "./review.ts";
 import { confirmTrackingSince, confirmedTurns, entryState, getEntry, getProject, policyPrompt, projectLabel, usageOf } from "./store.ts";
 
 // Review job: one LLM call per batch of related memories (see buildReviewBatches).
@@ -13,8 +16,9 @@ const REVIEW_PROMPT = `You audit a coding agent's long-term memory. Memories are
 Propose:
 - "merge": two or more memories say the same thing or belong together → one memory. ids: the memories (the FIRST id is kept), title/body/category: the merged memory, keeping every still-true detail. Only memories with the same scope (and project).
 - "update": one memory is unclear, too long, partly outdated or wrongly categorized → corrected title/body/category. Do not invent facts.
-  For a small change to a long body, prefer "edit" instead of a full "body": {"old":"...","new":"..."} where "old" is copied verbatim from the body and occurs in it exactly once (include enough context to make it unique); only that passage is replaced. Give either "body" or "edit", not both.
-- Memories marked body_truncated were cut for this review: never send a full "body" for them. An "edit" whose "old" passage you can see is fine, as are title/category changes and delete.
+  For small changes to a long body, prefer "edits" instead of a full "body": [{"old":"...","new":"..."}, ...] where each "old" is copied verbatim from the body and occurs in it exactly once (include enough context to make it unique); only those passages are replaced, all together. Passages must not overlap. Put ALL changes to one memory in ONE "update" proposal (several entries in "edits"), never several updates for the same id. Give either "body" or "edits", not both.
+  "entities" (optional): the memory's full entity list after the change. Only names from its current "entities" may appear (you can remove, never add); use it when your change removes the only mention of an entity. Omit it to keep the entities as they are.
+- Memories marked body_truncated were cut for this review: never send a full "body" for them. "edits" whose "old" passages you can see are fine, as are title/category/entities changes and delete.
 - "delete": a memory is obsolete, transient (task progress, one-off), generic knowledge, or fully covered by another memory that stays. Never for pinned memories. A memory whose valid_until is before DATE has expired: propose delete unless it is still useful history.
 - Multiple values are not a contradiction ("uses PostgreSQL" and "also uses Redis"); only report a conflict when both cannot be true at once.
 - "conflict": memories contradict each other and you cannot tell which is right → ids + note for a human.
@@ -27,7 +31,8 @@ Respond with ONLY a JSON object:
 {"proposals":[
   {"kind":"merge","ids":[12,15],"title":"...","body":"...","category":"...","reason":"..."},
   {"kind":"update","ids":[20],"title":"...","body":"...","category":"...","reason":"..."},
-  {"kind":"update","ids":[20],"edit":{"old":"...","new":"..."},"reason":"..."},
+  {"kind":"update","ids":[20],"edits":[{"old":"...","new":"..."},{"old":"...","new":"..."}],"reason":"..."},
+  {"kind":"update","ids":[22],"edits":[{"old":"...","new":"..."}],"entities":["..."],"reason":"... (entities only when the change drops one)"},
   {"kind":"delete","ids":[31],"reason":"..."},
   {"kind":"conflict","ids":[40,41],"note":"...","reason":"..."}
 ]}`;
@@ -53,11 +58,20 @@ interface Progress {
   done: number[];
   chunks: number;
   proposals: number;
+  /** Proposals the LLM made that were not stored, with why (first DROPPED_KEPT kept; dropped_count counts all). */
+  dropped: DroppedProposal[];
+  dropped_count: number;
 }
 
 async function runReview(job: ReviewJob, between: () => Promise<void>) {
   const prev = (job.result ?? {}) as Partial<Progress>;
-  const progress: Progress = { done: prev.done ?? [], chunks: prev.chunks ?? 0, proposals: prev.proposals ?? 0 };
+  const progress: Progress = { done: prev.done ?? [], chunks: prev.chunks ?? 0, proposals: prev.proposals ?? 0, dropped: prev.dropped ?? [], dropped_count: prev.dropped_count ?? 0 };
+  // No silent drops: every proposal not stored is logged and counted on the job result.
+  const drop = (d: DroppedProposal) => {
+    progress.dropped_count++;
+    if (progress.dropped.length < DROPPED_KEPT) progress.dropped.push(d);
+    console.log(`[review] job ${job.id} dropped ${d.kind} [${d.ids.join(",")}]: ${d.reason}`);
+  };
   const done = new Set(progress.done);
   const entries = job.payload.entries
     .filter((id) => !done.has(id))
@@ -88,14 +102,26 @@ async function runReview(job: ReviewJob, between: () => Promise<void>) {
         // Cancelled while the LLM was answering: keep nothing from this batch.
         if (isReviewJobCancelled(job.id)) return;
         const raw = (data as { proposals?: unknown })?.proposals;
+        const all = (Array.isArray(raw) ? raw : []).filter((p): p is Record<string, unknown> => p != null && typeof p === "object");
+        const idsOf = (p: Record<string, unknown>) => (Array.isArray(p.ids) ? p.ids : [p.id]).map(Number);
+        for (const p of all.slice(30)) drop({ kind: String(p.kind ?? ""), ids: idsOf(p), reason: "over_limit" });
         const truncated = new Set(batch.filter((e) => e.body.length > BODY_SHOWN).map((e) => e.id));
-        for (const p of (Array.isArray(raw) ? raw : []).slice(0, 30) as Record<string, unknown>[]) {
-          // The LLM never saw the end of a truncated body: it may not rewrite that body. An exact-substring
-          // edit is fine (addProposal checks it against the full body, and an edit replaces any "body").
-          const ids = (Array.isArray(p.ids) ? p.ids : [p.id]).map(Number);
-          const isEdit = p.kind === "update" && p.edit != null;
-          if ((p.kind === "update" || p.kind === "merge") && !isEdit && p.body != null && String(p.body).trim() && ids.some((id) => truncated.has(id))) continue;
-          if (addProposal(job.id, p, seen)) progress.proposals++;
+        // Several updates of one memory (e.g. one edit each) become one proposal with all their edits.
+        const bodies = new Map(batch.map((e) => [e.id, e.body]));
+        const combined = combineUpdateProposals(all.slice(0, 30), (id) => (seen.has(id) ? bodies.get(id) : undefined));
+        combined.dropped.forEach(drop);
+        for (const p of combined.proposals) {
+          // The LLM never saw the end of a truncated body: it may not rewrite that body. Exact-substring
+          // edits are fine (addProposal checks them against the full body, and edits replace any "body").
+          const ids = idsOf(p);
+          const isEdit = p.kind === "update" && (p.edit != null || (Array.isArray(p.edits) && p.edits.length > 0));
+          if ((p.kind === "update" || p.kind === "merge") && !isEdit && p.body != null && String(p.body).trim() && ids.some((id) => truncated.has(id))) {
+            drop({ kind: String(p.kind), ids, reason: "body_truncated" });
+            continue;
+          }
+          const r = tryAddProposal(job.id, p, seen);
+          if ("proposal" in r) progress.proposals++;
+          else drop({ kind: String(p.kind ?? p.op ?? ""), ids, reason: r.reason });
         }
       }
       progress.done.push(...planned.map((e) => e.id));

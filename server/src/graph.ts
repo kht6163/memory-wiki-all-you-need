@@ -50,6 +50,14 @@ const toLink = (r: Row): Link => ({
 
 // ------------------------------------------------------------------ links
 
+/**
+ * Creation times of a link's two memories, stored in link snapshots so a revert can
+ * tell the original memories from newer ones that took a purged id.
+ */
+function endpointStamps(fromId: number, toId: number): { from_created_at: string | null; to_created_at: string | null } {
+  return { from_created_at: getEntry(fromId)?.created_at ?? null, to_created_at: getEntry(toId)?.created_at ?? null };
+}
+
 /** Add a typed link between two live memories. Returns false when it already existed. */
 export function addLink(fromId: number, toId: number, type: LinkType, author: Source, opts: { revertOf?: number } = {}): boolean {
   if (fromId === toId) throw new HttpError(400, "a memory cannot link to itself");
@@ -130,6 +138,7 @@ export function removeLink(fromId: number, toId: number, type: LinkType, author:
       snapshot: {
         from_id: fromId, to_id: toId, type,
         retires: Number(row.retires), link_author: String(row.author), link_created_at: String(row.created_at),
+        ...endpointStamps(fromId, toId),
         entity_ids: [], entry_ids: [fromId, toId],
       },
       author,
@@ -367,6 +376,7 @@ export function revertGraphRevision(id: number, author: Source = "human"): { rev
     let written: number | null = null;
     if (rev.target === "link" && rev.action === "add") written = revertLinkAdd(s, author, id);
     else if (rev.target === "link" && rev.action === "remove") {
+      assertLinkEndpointsOriginal(s, rev.created_at);
       if (Number(s.retires) === 0) written = restoreInformationalLink(s, author, id);
       else {
         if (!addLink(Number(s.from_id), Number(s.to_id), s.type, author, { revertOf: id })) {
@@ -387,6 +397,27 @@ export function revertGraphRevision(id: number, author: Source = "human"): { rev
 type Snap = Record<string, any>;
 /** Id of the revision just recorded by addLink / removeLink (same connection, same transaction). */
 const lastRevisionId = () => Number((db.prepare(`SELECT MAX(id) AS id FROM graph_revisions`).get() as Row).id);
+
+/**
+ * Before a removed link is put back: both memories must still be the ones it
+ * linked. A purged memory is gone for good (409, unlike addLink's 404 for a
+ * memory in the trash, which can be restored). Its id may also have been taken
+ * by a newer memory (rowid reuse in databases from before AUTOINCREMENT): the
+ * snapshot's creation times must match, and older snapshots without them fall
+ * back to "created after the removal" (the original existed when it was removed).
+ * Never links an unrelated memory.
+ */
+function assertLinkEndpointsOriginal(s: Snap, removedAt: string) {
+  for (const end of ["from", "to"] as const) {
+    const id = Number(s[`${end}_id`]);
+    const e = getEntry(id);
+    if (!e) throw new HttpError(409, `memory #${id} was permanently deleted — this link cannot be restored`);
+    const stamp = s[`${end}_created_at`];
+    if (stamp ? e.created_at !== stamp : e.created_at > removedAt) {
+      throw new HttpError(409, `memory #${id} is now a different memory (the original was permanently deleted) — this link cannot be restored`);
+    }
+  }
+}
 
 /**
  * Put back a removed pre-v0.6 informational supersedes link (retires = 0) as it
@@ -433,6 +464,7 @@ function revertLinkAdd(s: Snap, author: Source, revertOf: number): number {
     snapshot: {
       from_id: from, to_id: to, type, retires: 1, downgrade: true,
       link_author: String(row.author), link_created_at: String(row.created_at),
+      ...endpointStamps(from, to),
       entity_ids: [], entry_ids: [from, to],
     },
     author,

@@ -8,6 +8,10 @@ export interface ToastOptions {
   kind?: ToastKind;
   title: string;
   description?: string;
+  /** Small print under the description (e.g. the server's original error message). */
+  detail?: string;
+  /** Tooltip on the text (e.g. the original message behind a translated error). */
+  hint?: string;
   action?: { label: string; run: () => void };
   /** ms; ok/info default 4000, errors stay until closed. */
   duration?: number;
@@ -82,9 +86,10 @@ function ToastView({ t }: { t: ToastItem }) {
       <span className="toast-icon">
         <Icon name={KIND_ICON[t.kind]} />
       </span>
-      <div className="toast-text">
+      <div className="toast-text" title={t.hint}>
         <div className="toast-title">{t.title}</div>
         {t.description && <div className="toast-desc">{t.description}</div>}
+        {t.detail && <div className="toast-detail">{t.detail}</div>}
       </div>
       {t.action && (
         <button

@@ -6,9 +6,13 @@ import type { Entry, Scope, Source } from "./api.ts";
 import { Icon, type IconName } from "./components/Icon.tsx";
 import { toast } from "./components/Toast.tsx";
 import { confirmDialog } from "./components/Dialog.tsx";
+import { describeError, errorText } from "./errors.ts";
+import { WIKILINK_RE, slugify } from "./wikilinks.ts";
 
 export { toast, dismissToast } from "./components/Toast.tsx";
 export { confirmDialog };
+export { describeError, errorText };
+export { slugify };
 
 // ------------------------------------------------------------ hash router
 
@@ -121,7 +125,7 @@ export function useData<T>(fn: () => Promise<T>, deps: unknown[]): { data: T | u
     setLoading(true);
     fn()
       .then((d) => alive && (setData(d), setError(null)))
-      .catch((e: Error) => alive && setError(e.message))
+      .catch((e: unknown) => alive && setError(errorText(e)))
       .finally(() => alive && setLoading(false));
     return () => {
       alive = false;
@@ -158,17 +162,6 @@ export const ACTION_LABEL: Record<string, string> = { create: "추가", update: 
 
 // ------------------------------------------------------------ components
 
-/** Same rules as the server's slugify (server/src/wiki.ts). */
-export function slugify(s: string): string {
-  const slug = s
-    .trim()
-    .toLowerCase()
-    .replace(/[^\p{L}\p{N}]+/gu, "-")
-    .replace(/^-+|-+$/g, "")
-    .slice(0, 80);
-  return slug || "page";
-}
-
 /** wiki scope id used in routes: project id, or 0 for the global wiki. */
 export const scopeId = (projectId: number | null | undefined) => projectId ?? 0;
 
@@ -180,7 +173,7 @@ export const scopeId = (projectId: number | null | undefined) => projectId ?? 0;
 export function Markdown({ children, wikiScope, missing }: { children: string; wikiScope?: number; /** Slugs (in `wikiScope`) with no page yet: shown as "create" links. */ missing?: Set<string> }) {
   let src = children;
   if (wikiScope !== undefined) {
-    src = src.replace(/\[\[([^\]|#\n]+)(?:#[^\]|\n]*)?(?:\|([^\]\n]*))?\]\]/g, (_m, target: string, label?: string) => {
+    src = src.replace(WIKILINK_RE, (_m, target: string, label?: string) => {
       const global = target.startsWith("global:");
       const slug = slugify(global ? target.slice(7) : target);
       return `[${(label ?? target).replace(/[[\]]/g, "")}](#/w/${global ? 0 : wikiScope}/${encodeURIComponent(slug)})`;
@@ -293,9 +286,26 @@ export async function act<T>(fn: () => Promise<T>, opts?: { success?: string }):
     if (opts?.success) toast({ kind: "ok", title: opts.success });
     return r;
   } catch (e) {
-    toast({ kind: "error", title: "요청 실패", description: (e as Error).message });
+    toastError(e);
     return undefined;
   }
+}
+
+/**
+ * Error toast in Korean (server messages are English; see errors.ts). With `title` the translated
+ * text becomes the description. A known message keeps the original as a tooltip; an unknown one
+ * shows it in small print.
+ */
+export function toastError(e: unknown, title?: string) {
+  const d = describeError(e);
+  const raw = d.raw && d.raw !== d.text ? d.raw : undefined;
+  toast({
+    kind: "error",
+    title: title ?? d.text,
+    description: title ? d.text : undefined,
+    detail: d.known ? undefined : raw,
+    hint: d.known ? raw : undefined,
+  });
 }
 
 /**

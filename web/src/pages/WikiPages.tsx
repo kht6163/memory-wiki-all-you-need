@@ -1,5 +1,6 @@
 import "./wiki.css";
 import { useEffect, useLayoutEffect, useMemo, useRef, useState, type ReactNode, type RefObject } from "react";
+import { missingLinks } from "../wikilinks.ts";
 import { api, type ComposeTurn, type Entry, type WikiLint, type WikiPage, type WikiRevision } from "../api.ts";
 import {
   ACTION_LABEL,
@@ -20,7 +21,8 @@ import {
   leaveTo,
   slugify,
   softDelete,
-  toast,
+  errorText,
+  toastError,
   useData,
   useLeaveGuard,
   usePoll,
@@ -67,11 +69,29 @@ const newPageHref = (scope: number, slug: string) => `#/w/${scope}/~new?slug=${e
 
 // ------------------------------------------------------------- wiki home
 
+const readHomeFilter = () => new URLSearchParams(window.location.hash.split("?")[1] ?? "").get("q") ?? "";
+
+/** Keeps the page filter in the hash (`#/w/<scope>?q=…`) without firing hashchange (no scroll jump, no re-route per key). */
+function writeHomeFilter(scope: number, q: string) {
+  const next = `#/w/${scope}${q ? `?${new URLSearchParams({ q })}` : ""}`;
+  if (window.location.hash !== next) history.replaceState(history.state, "", next);
+}
+
 export function WikiHome({ scope }: { scope: number }) {
   const { project, name } = useScopeName(scope);
   const pages = useData(() => api.wikiPages(scope || null), [scope]);
   const jobs = useData(() => api.wikiJobs(scope || null), [scope]);
-  const [filter, setFilter] = useState("");
+  const [filter, setFilterState] = useState(readHomeFilter);
+  const setFilter = (q: string) => {
+    setFilterState(q);
+    writeHomeFilter(scope, q);
+  };
+  useEffect(() => {
+    // A link to this page with another ?q= (palette, back/forward) re-syncs the field.
+    const on = () => setFilterState(readHomeFilter());
+    window.addEventListener("hashchange", on);
+    return () => window.removeEventListener("hashchange", on);
+  }, []);
   const pending = jobs.data?.find((j) => j.kind === "compose" && (j.status === "pending" || j.status === "processing"));
   usePoll(jobs.reload, 4000, Boolean(pending));
   // When a compose job finishes, the page list changes: refetch once it disappears.
@@ -603,6 +623,8 @@ function WikiRevisionItem({ rev, prev, pageId, isCurrent }: { rev: WikiRevision;
 export function WikiEdit({ scope, slug, initialSlug }: { scope: number; slug?: string; initialSlug?: string }) {
   const { name } = useScopeName(scope);
   const existing = useData(() => (slug ? api.wikiBySlug(scope || null, slug) : Promise.resolve(null)), [scope, slug]);
+  // Existing page slugs, so the preview draws links to pages that do not exist yet dotted (like the page view).
+  const scopePages = useData(() => api.wikiPages(scope || null), [scope]);
   const initial = { title: initialSlug ?? "", slug: initialSlug ?? "", body: "", locked: false };
   const [form, setForm] = useState(initial);
   const [base, setBase] = useState(() => JSON.stringify(initial));
@@ -622,6 +644,11 @@ export function WikiEdit({ scope, slug, initialSlug }: { scope: number; slug?: s
   }, [existing.data]);
 
   const dirty = JSON.stringify(form) !== base;
+  const selfSlug = existing.data?.slug ?? slugify(form.slug || form.title || "page");
+  const previewMissing = useMemo(
+    () => (scopePages.data ? missingLinks(form.body, scope, scopePages.data.map((p) => p.slug), selfSlug) : undefined),
+    [form.body, scope, scopePages.data, selfSlug],
+  );
   const route = slug ? `/w/${scope}/${encodeURIComponent(slug)}/edit` : window.location.hash.replace(/^#/, "");
   useLeaveGuard(route, dirty);
 
@@ -647,8 +674,8 @@ export function WikiEdit({ scope, slug, initialSlug }: { scope: number; slug?: s
       await act(async () => p, { success: "저장했습니다" });
       leaveTo(`/w/${scope}/${encodeURIComponent(p.slug)}`);
     } catch (e) {
-      setError((e as Error).message);
-      toast({ kind: "error", title: "저장하지 못했습니다", description: (e as Error).message });
+      setError(errorText(e));
+      toastError(e, "저장하지 못했습니다");
     } finally {
       setSaving(false);
     }
@@ -738,7 +765,7 @@ export function WikiEdit({ scope, slug, initialSlug }: { scope: number; slug?: s
               {mode === "preview" && modeToggle}
             </div>
             <div className="edit-preview" aria-live="off">
-              {form.body ? <Markdown wikiScope={scope}>{form.body}</Markdown> : <p className="hint">본문을 입력하면 여기에 표시됩니다.</p>}
+              {form.body ? <Markdown wikiScope={scope} missing={previewMissing}>{form.body}</Markdown> : <p className="hint">본문을 입력하면 여기에 표시됩니다.</p>}
             </div>
           </div>
         </div>
@@ -930,7 +957,7 @@ export function WikiCompose({ scope }: { scope: number }) {
       await api.compose(scope || null, [...sel], instruction);
       go(`/wiki-jobs?project=${scope}`);
     } catch (e) {
-      setError((e as Error).message);
+      setError(errorText(e));
     } finally {
       setSaving(false);
     }

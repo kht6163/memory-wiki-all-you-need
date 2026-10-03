@@ -1,7 +1,7 @@
 import "./graph.css";
 import { useEffect, useMemo, useRef, useState, type KeyboardEvent, type ReactNode } from "react";
 import { api, type Entity, type EntryLink, type GraphRevision, type LinkType, type SimilarPair } from "../api.ts";
-import { CategoryBadge, Empty, ErrorBox, SCOPE_LABEL, SourceBadge, StateBadge, Time, act, confirmDialog, go, isHistory, toast, useData } from "../lib.tsx";
+import { CategoryBadge, Empty, ErrorBox, SCOPE_LABEL, SourceBadge, StateBadge, Time, act, confirmDialog, go, isHistory, toast, toastError, useData } from "../lib.tsx";
 import { Icon, type IconName } from "../components/Icon.tsx";
 import { Dialog } from "../components/Dialog.tsx";
 import { PageHeader } from "../components/PageHeader.tsx";
@@ -670,7 +670,7 @@ function SimilarSection() {
               setGone((g) => new Set(g).add(key));
               toast({ kind: "ok", title: "다른 것으로 표시했습니다", description: `${p.a.name} · ${p.b.name}은(는) 다시 제안되지 않습니다.` });
             } catch (e) {
-              toast({ kind: "error", title: "요청 실패", description: (e as Error).message });
+              toastError(e);
             } finally {
               setBusy(null);
             }

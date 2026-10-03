@@ -229,27 +229,6 @@
   --select-chevron: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='16' height='16' viewBox='0 0 24 24' fill='none' stroke='%236e6f78' stroke-width='2' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpath d='m6 9 6 6 6-6'/%3E%3C/svg%3E");
   color-scheme: dark;
 }
-
-/* old names, kept as aliases for one release (§2.4) — new code uses --color-* */
-:root {
-  --bg: var(--color-bg);
-  --surface: var(--color-surface);
-  --sidebar: var(--color-surface-2);
-  --text: var(--color-text);
-  --muted: var(--color-text-2);
-  --border: var(--color-border);
-  --border-strong: var(--color-border-strong);
-  --accent: var(--color-accent);
-  --accent-soft: var(--color-accent-soft);
-  --danger: var(--color-danger-text);
-  --danger-soft: var(--color-danger-soft);
-  --ok: var(--color-ok-text);
-  --warn: var(--color-warn-text);
-  --ins: var(--color-ins);
-  --del: var(--color-del);
-  --code-bg: var(--color-code-bg);
-  --shadow: var(--shadow-sm);
-}
 /* tokens:end */
 
 /* ------------------------------------------------------------------ base */
@@ -1287,6 +1266,13 @@ a.list-row:hover,
 .toast-desc {
   color: var(--color-text-2);
   white-space: pre-wrap;
+}
+.toast-detail {
+  margin-top: var(--space-1);
+  color: var(--color-text-3);
+  font-family: var(--font-mono);
+  font-size: var(--text-xs);
+  overflow-wrap: anywhere;
 }
 .toast .btn.small {
   margin-top: 1px;

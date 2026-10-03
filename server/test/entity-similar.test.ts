@@ -142,3 +142,12 @@ test("pure core: blocking finds every pair the scoring would keep", () => {
   assert.ok(brute.size > 5, "the fixture has real pairs");
   assert.deepEqual([...all].sort(), [...brute].sort());
 });
+
+test("G-040: a path and a same-letter name are never suggested as a merge", async () => {
+  await entry({ title: "sim path A", entities: [{ name: "helmchart/", kind: "file" }] });
+  await entry({ title: "sim path B", entities: [{ name: "Helmchart", kind: "tool" }] });
+  await entry({ title: "sim path C", entities: [{ name: "helmcharts/", kind: "file" }] });
+  const pairs = await similar();
+  assert.equal(pairOf(pairs, "helmchart/", "Helmchart"), undefined, "file vs name with the same letters is kept apart");
+  assert.ok(pairOf(pairs, "helmchart/", "helmcharts/"), "two paths can still pair");
+});

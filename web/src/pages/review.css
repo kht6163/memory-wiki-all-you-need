@@ -151,6 +151,33 @@
   margin: 0;
   font-family: var(--font-mono);
 }
+.proposal-edit {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-1_5);
+}
+.change-sub {
+  font-size: var(--text-xs);
+  color: var(--color-text-3);
+  font-variant-numeric: tabular-nums;
+}
+.entity-change {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--space-1_5);
+}
+.entity-change .ent-name {
+  padding: 1px var(--space-2);
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-md);
+  background: var(--color-surface);
+  font-size: var(--text-xs);
+}
+.entity-change .ent-removed {
+  background: var(--color-del);
+  color: var(--color-danger-text);
+  text-decoration: line-through;
+}
 
 /* ---- actions */
 .proposal-actions {
