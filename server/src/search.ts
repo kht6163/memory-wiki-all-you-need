@@ -1,15 +1,11 @@
 import { db, rowToEntry, type Entry, type Scope } from "./db.ts";
 import { ACTIVE_SQL, NOT_SUPERSEDED_SQL } from "./store.ts";
+import { splitWords, STOPWORDS } from "./words.ts";
 
 // Search over a trigram FTS index. Trigram cannot match terms shorter than
 // three characters, which is common in Korean ("포트", "설정"), so short terms
 // fall back to LIKE. Korean words also carry trailing particles ("포트를"), so
 // each Hangul term is also tried with its last one or two syllables dropped.
-
-const STOPWORDS = new Set([
-  "the", "and", "for", "with", "this", "that", "from", "into", "what", "how", "are", "was",
-  "해줘", "해주세요", "있어", "없어", "그리고", "그런데", "근데", "이거", "저거", "그거", "어떻게", "뭐야", "에서",
-]);
 
 const HANGUL = /[가-힣]/;
 
@@ -18,11 +14,7 @@ interface Term {
 }
 
 export function extractTerms(query: string, max = 12): Term[] {
-  const words = query
-    .toLowerCase()
-    .split(/[^\p{L}\p{N}_.\-/]+/u)
-    .map((w) => w.replace(/^[.\-/]+|[.\-/]+$/g, ""))
-    .filter((w) => w.length >= 2 && !STOPWORDS.has(w));
+  const words = splitWords(query).filter((w) => w.length >= 2 && !STOPWORDS.has(w));
   const seen = new Set<string>();
   const terms: Term[] = [];
   for (const w of words) {

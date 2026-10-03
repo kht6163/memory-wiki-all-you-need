@@ -18,7 +18,7 @@ import {
   updateEntry,
   type WriteMeta,
 } from "./store.ts";
-import { ENTITY_KINDS, type EntityInput } from "./entities.ts";
+import { ENTITY_KINDS, entryEntitiesDroppedByEdit, type EntityInput } from "./entities.ts";
 import {
   addLink,
   claimGraphJob,
@@ -67,15 +67,16 @@ Scopes:
 - "user": about the user as a person (preferences, communication style, background)
 
 Rules:
-- Prefer updating an existing memory over adding a near-duplicate. Memories from earlier turns of this session are among the candidates: extend them instead of repeating them. But merge only facts about the SAME subject whose title still fits; a different component or concern (DB vs CI auth vs cache) gets its own add, linked "related" if useful — never let one memory grow into a grab bag.
+- Prefer updating an existing memory over adding a near-duplicate. Memories from earlier turns of this session are among the candidates: extend them instead of repeating them. But merge only facts about the SAME subject whose title still fits; a different component or concern (DB vs CI auth vs cache) gets its own add — never let one memory grow into a grab bag.
+- Topic split: when one turn yields several memories (adds, or adds plus updates) that belong to the same change or system, link them "related" — give each add a short "ref" ("a", "b", ...) and a later op links to an earlier add of this response with {"to":"a","type":"related"}; link to existing memories by id.
 - When the world changed (switched library, moved a path, upgraded a version, reversed a decision): add the new memory with a "supersedes" link to the old one. The old one is then kept as history and no longer injected — do not also delete it. Use update for corrections/refinements of the same fact, delete only for memories that were wrong from the start or are noise.
 - Multiple values are not a contradiction: "uses PostgreSQL" and "also uses Redis" can both be true; only replace/supersede when the new fact makes the old one false.
 - valid_until (YYYY-MM-DD): for facts that are true only until a known date (a temporary workaround, a freeze, a deadline like "until next Wednesday"): set it to that resolved date, in addition to writing the date in the body. Leave it out for lasting facts.
-- keywords (0-8): other words someone might search for that are NOT already in title/body — the user's own wording when the memory words it differently, the English/Korean translation, aliases, abbreviations, alternate spellings. REQUIRED whenever such a term exists (user wrote "포스트그레스", title says "PostgreSQL" → ["포스트그레스","Postgres"]); omit only when there is truly none. Used for search only, never shown to the agent.
-- Only reference ids from the EXISTING MEMORIES list.
+- keywords (0-8): search terms NOT already in title/body (never repeat a title/body word) — prefer the user's own wording when the memory words it differently, the Korean↔English translation ("머지 동결" ↔ "merge freeze"), abbreviations, aliases, alternate spellings. REQUIRED whenever such a term exists (user wrote "포스트그레스", title says "PostgreSQL" → ["포스트그레스","Postgres"]); omit only when there is truly none. Used for search only, never shown to the agent.
+- Only reference ids from the EXISTING MEMORIES list (or a "ref" of an earlier add in this response).
 - edit: for a small change to a long body (fix a value, add or drop a line), prefer {"op":"edit","id":N,"old":"...","new":"..."} over update: "old" is copied verbatim from the body and must occur in it exactly once (include enough surrounding text to make it unique); it is replaced by "new". To also change that memory's entities, links or valid_until (e.g. a deadline the turn adds), put "entities"/"links"/"valid_until" on the same edit op — never a second op for the same memory. Use update with a full "body" only when rewriting the memory, and never drop still-true lines when you do.
 - confirm: when the turn relies on or re-states an existing memory that is still accurate and needs no change, return {"op":"confirm","id":N} instead of an update (at most a few per turn). It changes nothing; it only records that the memory is still in use.
-- Write titles and bodies in the same language the user writes in (Korean if the user writes Korean). In title and body, copy package, container, service, CLI, config and file names exactly as written ("redis-sentinel" stays "redis-sentinel", not "Redis Sentinel"); canonical spelling is for entity names only.
+- Write titles and bodies in the same language the user writes in (Korean if the user writes Korean). In title and body, copy package, container, service, CLI, config and file names exactly as written, even when they are also product names ("redis-sentinel" stays "redis-sentinel", not "Redis Sentinel"; "envoy 1.29.1" stays "envoy 1.29.1", not "Envoy 1.29.1"); canonical spelling ("Envoy") belongs in the entities list only.
 - title: short and specific (<= 80 chars). body: concise, self-contained markdown (1-6 lines). Include the "why" when known.
 - tags: 0-5 short lowercase keywords.
 - Dates: memories are kept indefinitely, so never write relative times ("today", "yesterday", "recently", "last week"). Resolve them against TURN DATE (when the turn happened — not TODAY) into absolute dates (YYYY-MM-DD). When the turn dates an event (incident, failure, release, migration, decision), the body MUST keep that resolved date — drop the relative word, never the date. Keep exact versions, paths, flags, ports and error strings as written; never generalize identifiers.
@@ -89,13 +90,13 @@ Graph (memories are also nodes of a knowledge graph):
   - "supersedes": this replaces the other (the other then becomes history automatically)
   - "related": closely related, nothing more specific fits
   Only link when the relation is real and useful; most memories need 0-2 links.
-- Give entities on every add. On update and edit, entities REPLACE the memory's entity list (omit to keep it).
+- Give entities on every add. On update, entities REPLACE the memory's entity list (omit to keep it). On edit, entities ADD to the list (omit to add none): the memory's other entities stay, except ones only the replaced "old" text named, which are dropped even without "entities".
 - Graph upkeep is expected even when nothing else changes: every EXISTING memory this turn is about that has "entities": [] (e.g. one the agent just saved with memory_add) MUST get an update op with only "id", "entities" and, where real, "links" (or carry them on the edit op if you also edit it). Also add links between existing memories when this turn reveals a relation (op "link").
-- {"op":"link"} relates two existing memories without changing them.
+- {"op":"link"} relates two existing memories (or a "ref" of an earlier add in this response) without changing them.
 
 Respond with ONLY a JSON object:
 {"ops":[
-  {"op":"add","scope":"project|global|user","category":"...","title":"...","body":"...","tags":["..."],"keywords":["user's own term","alias"],"valid_until":"YYYY-MM-DD","entities":[{"name":"...","kind":"tech"}],"links":[{"to":123,"type":"because"}]},
+  {"op":"add","ref":"a","scope":"project|global|user","category":"...","title":"...","body":"...","tags":["..."],"keywords":["user's own term","alias"],"valid_until":"YYYY-MM-DD","entities":[{"name":"...","kind":"tech"}],"links":[{"to":123,"type":"because"}]},
   {"op":"update","id":123,"title":"...","body":"...","category":"...","tags":["..."],"keywords":["..."],"valid_until":"YYYY-MM-DD","entities":[{"name":"...","kind":"..."}],"links":[{"to":45,"type":"related"}],"reason":"..."},
   {"op":"edit","id":123,"old":"exact text from the body","new":"replacement","entities":[{"name":"...","kind":"..."}],"links":[{"to":45,"type":"related"}],"valid_until":"YYYY-MM-DD","reason":"..."},
   {"op":"delete","id":123,"reason":"..."},
@@ -215,10 +216,18 @@ export function applyMemoryOps(
   const skipped: NonNullable<TurnResult["skipped"]> = [];
   // Links may only point at memories the LLM was shown (or just created in this batch).
   const linkable = new Set(allowed);
+  // An add may carry a short "ref" label so a later op of this response can link to it
+  // (the LLM cannot know the new id): {"to":"a"}. Only earlier adds resolve.
+  const refs = new Map<string, number>();
+  const target = (raw: unknown) => (typeof raw === "string" && refs.has(raw.trim()) ? refs.get(raw.trim())! : Number(raw));
+  const setRef = (op: Op, id: number) => {
+    const ref = typeof op.ref === "string" ? op.ref.trim() : "";
+    if (ref && !/^\d+$/.test(ref) && !refs.has(ref)) refs.set(ref, id); // a numeric ref would shadow an id
+  };
   const linkFrom = (from: number, raw: unknown) => {
     if (!Array.isArray(raw)) return;
     for (const l of raw.slice(0, 6) as Record<string, unknown>[]) {
-      const to = Number(l?.to);
+      const to = target(l?.to);
       if (!linkable.has(to) || to === from || !isLinkType(l?.type)) continue;
       try {
         addLink(from, to, l.type, meta.author);
@@ -253,7 +262,7 @@ export function applyMemoryOps(
       const keywords = Array.isArray(op.keywords) ? op.keywords.map(String) : undefined;
       const validUntil = validUntilOf(op);
       if (kind === "link") {
-        const from = Number(op.from);
+        const from = target(op.from);
         if (!linkable.has(from)) return;
         linkFrom(from, [{ to: op.to, type: op.type }]);
         return;
@@ -275,6 +284,7 @@ export function applyMemoryOps(
           if (getEntry(dup)?.category === "standing") return;
           // The rest of the op still counts: its links (a "supersedes" retires the old fact)...
           linkable.add(dup);
+          setRef(op, dup);
           linkFrom(dup, op.links);
           // ...and its entities, when the stored copy has none yet (never replaces existing ones).
           if (entities?.length && !entitiesOf(dup).length) {
@@ -301,6 +311,7 @@ export function applyMemoryOps(
           { ...meta, reason: op.reason ? String(op.reason) : meta.reason ?? null },
         );
         linkable.add(e.id);
+        setRef(op, e.id);
         linkFrom(e.id, op.links);
         applied.push({ op: "add", entryId: e.id, title: e.title });
         if (meta.turnId != null) recordEntryTurn(e.id, meta.turnId, "add");
@@ -343,7 +354,12 @@ export function applyMemoryOps(
           const commit = (group: Op[]) => {
             // In response order the last op that names a field wins, as if applied one by one.
             group.sort((a, b) => batch.indexOf(a) - batch.indexOf(b));
-            const ents = group.filter((o) => Array.isArray(o.entities)).at(-1)?.entities as EntityInput[] | undefined;
+            const given = group.filter((o) => Array.isArray(o.entities)).at(-1)?.entities as EntityInput[] | undefined;
+            // An edit ADDS entities: it may drop only those the replaced passage alone named
+            // (a one-line change must not rewrite the whole list), with or without "entities".
+            // The kept ones go first so the per-memory cap cuts an addition, never a kept one.
+            const { kept, dropped } = keptOnEdit(id, String(op.old), `${getEntry(id)?.title ?? ""}\n${r.body}`);
+            const ents = given || dropped ? [...kept, ...(given ?? [])] : undefined;
             const until = group.map(validUntilOf).filter((v) => v).at(-1);
             const e = updateEntry(id, { body: r.body, entities: ents, ...(until ? { valid_until: until } : {}) }, { ...meta, reason });
             for (const o of group) linkFrom(e.id, o.links);
@@ -400,6 +416,14 @@ export function applyMemoryOps(
   };
   for (const op of batch) if (!held.has(op)) applyOp(op);
   return { applied, skipped };
+}
+
+/** The memory's current entities an edit keeps: all but those only the removed passage named. */
+function keptOnEdit(id: number, old: string, after: string): { kept: EntityInput[]; dropped: boolean } {
+  const current = entitiesOf(id);
+  const dropped = new Set(entryEntitiesDroppedByEdit(id, [old], after));
+  const kept = current.filter((n) => !dropped.has(n.name)).map((n) => ({ name: n.name, kind: n.kind }));
+  return { kept, dropped: dropped.size > 0 };
 }
 
 /** An update that only sets entities, links and/or valid_until (what the LLM sends next to an edit). */

@@ -826,6 +826,22 @@ a.entity-mem:hover .entity-mem-title {
 .gh-row .gh-revert {
   margin: calc(-1 * var(--space-1)) 0;
 }
+/* Disabled buttons get no pointer events in some browsers: the wrapper carries the reason tooltip. */
+.gh-row .gh-blocked {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--space-1);
+  cursor: help;
+}
+/* Shown on touch screens (no hover tooltip); desktop keeps the tooltip only. */
+.gh-row .gh-blocked-why {
+  display: none;
+}
+@media (hover: none) {
+  .gh-row .gh-blocked-why {
+    display: inline;
+  }
+}
 .gh-row[aria-busy="true"] {
   opacity: 0.6;
 }

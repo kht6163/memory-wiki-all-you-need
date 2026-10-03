@@ -268,7 +268,10 @@ export interface GraphRevision {
   author: Source;
   created_at: string;
   reverted_at: string | null;
+  /** False when already reverted, never revertible, or `blocked`. */
   revertible: boolean;
+  /** Why a revert would fail now (e.g. a memory of the link was purged); the button is disabled. */
+  blocked: { code: "endpoint_purged" | "endpoint_replaced" | "link_exists" | "link_gone" | "link_not_retiring"; entry_id?: number; message: string } | null;
 }
 
 export interface ReviewJob {
@@ -305,6 +308,8 @@ export interface Proposal {
     edit?: ProposalEdit;
     /** New full entity name list (update proposals), a subset of the memory's current names. Absent = keep. */
     entities?: string[];
+    /** Server-side caution in Korean (e.g. a delete of a memory holding a decision's reason). */
+    warning?: string;
   };
   reason: string;
   status: "pending" | "applied" | "dismissed" | "stale";

@@ -3,6 +3,7 @@ import { useEffect, useMemo, useRef, useState, type KeyboardEvent, type ReactNod
 import { api, type Entity, type EntryLink, type GraphRevision, type LinkType, type SimilarPair } from "../api.ts";
 import { CategoryBadge, Empty, ErrorBox, SCOPE_LABEL, SourceBadge, StateBadge, Time, act, confirmDialog, go, isHistory, toast, toastError, useData } from "../lib.tsx";
 import { Icon, type IconName } from "../components/Icon.tsx";
+import { revertBlockText } from "../errors.ts";
 import { Dialog } from "../components/Dialog.tsx";
 import { PageHeader } from "../components/PageHeader.tsx";
 import { SkeletonList, SkeletonPage } from "../components/Skeleton.tsx";
@@ -403,6 +404,14 @@ export function GraphHistory({
                   {r.reverted_at ? (
                     <span className="badge faint gh-reverted">
                       되돌림 <Time iso={r.reverted_at} />
+                    </span>
+                  ) : r.blocked ? (
+                    <span className="gh-blocked" title={revertBlockText(r.blocked)}>
+                      <button type="button" className="btn small ghost gh-revert" disabled aria-label={`되돌릴 수 없음: ${revertBlockText(r.blocked)}`}>
+                        <Icon name="rotate-ccw" size={14} />
+                        되돌리기
+                      </button>
+                      <span className="faint small gh-blocked-why">{revertBlockText(r.blocked)}</span>
                     </span>
                   ) : (
                     r.revertible && (

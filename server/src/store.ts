@@ -14,6 +14,7 @@ import {
   type Scope,
   type Source,
 } from "./db.ts";
+import { keywordRedundant, textWordSet } from "./words.ts";
 import { findSecrets, redactSecrets } from "./secrets.ts";
 
 export class HttpError extends Error {
@@ -147,16 +148,33 @@ function normalizeTags(tags: unknown): string[] {
   return [...new Set(tags.map((t) => String(t).trim()).filter(Boolean))].slice(0, 12);
 }
 
-/** Search-only words: deduplicated case-insensitively, each at most 60 chars, at most 16. */
-export function normalizeKeywords(words: unknown): string[] {
+/**
+ * Search-only words: deduplicated case-insensitively, each at most 60 chars, at most 16.
+ * With `redundantIn` (title + body), keywords whose search words all already
+ * occur there are dropped first — they add nothing to search (keywordRedundant) —
+ * except those in `keep` (already stored; compared case-insensitively).
+ */
+export function normalizeKeywords(words: unknown, redundantIn?: string[], keep: string[] = []): string[] {
   if (!Array.isArray(words)) return [];
+  const kept = new Set(keep.map((k) => k.toLowerCase()));
+  const textWords = redundantIn ? textWordSet(...redundantIn) : null;
   const out = new Map<string, string>();
   for (const w of words) {
     const v = String(w ?? "").replace(/\s+/g, " ").trim().slice(0, 60);
-    if (v && !out.has(v.toLowerCase())) out.set(v.toLowerCase(), v);
+    if (!v || out.has(v.toLowerCase())) continue;
+    if (textWords && !kept.has(v.toLowerCase()) && keywordRedundant(v, textWords)) continue;
+    out.set(v.toLowerCase(), v);
   }
   return [...out.values()].slice(0, 16);
 }
+
+/**
+ * Only machine-written keyword lists (curation LLM, agent) are filtered for
+ * words already in the title/body, and only for keywords new in that write: a
+ * human may want an explicit keyword, and neither a later body edit nor a
+ * machine resending the stored list silently removes stored keywords.
+ */
+const keywordFilterText = (meta: WriteMeta, title: string, body: string) => (meta.author === "human" ? undefined : [title, body]);
 
 /** A calendar date YYYY-MM-DD, or null for "no end". Anything else is a 400. */
 export function normalizeValidUntil(v: unknown): string | null {
@@ -282,7 +300,7 @@ export function createEntry(input: EntryInput, meta: WriteMeta): Entry {
   const category = normalizeCategory(input.category);
   const title = input.title?.trim() ?? "";
   const body = (input.body ?? "").trim();
-  const keywords = normalizeKeywords(input.keywords);
+  const keywords = normalizeKeywords(input.keywords, keywordFilterText(meta, title, body));
   const validUntil = normalizeValidUntil(input.valid_until);
   // Raw keywords are scanned: truncation could cut a secret below its detector's length.
   guardContent(title, body, meta.author, category, `${(input.tags ?? []).join("\n")}\n${entityText(input.entities)}\n${rawText(input.keywords)}`);
@@ -357,13 +375,15 @@ export function updateEntry(id: number, patch: EntryPatch, meta: WriteMeta): Ent
   const scope = patch.scope ?? cur.scope;
   const projectId = scope === "project" ? (patch.project_id ?? cur.project_id) : null;
   if (scope === "project" && !projectId) throw new HttpError(400, "project scope needs project_id");
+  const title = patch.title !== undefined ? patch.title.trim() : cur.title;
+  const body = patch.body !== undefined ? patch.body.trim() : cur.body;
   const next = {
     category: patch.category !== undefined ? normalizeCategory(patch.category) : cur.category,
-    title: patch.title !== undefined ? patch.title.trim() : cur.title,
-    body: patch.body !== undefined ? patch.body.trim() : cur.body,
+    title,
+    body,
     tags: patch.tags !== undefined ? normalizeTags(patch.tags) : cur.tags,
     pinned: patch.pinned !== undefined ? Boolean(patch.pinned) : cur.pinned,
-    keywords: patch.keywords !== undefined ? normalizeKeywords(patch.keywords) : cur.keywords,
+    keywords: patch.keywords !== undefined ? normalizeKeywords(patch.keywords, keywordFilterText(meta, title, body), cur.keywords) : cur.keywords,
     valid_until: patch.valid_until !== undefined ? normalizeValidUntil(patch.valid_until) : cur.valid_until,
   };
   guardContent(next.title, next.body, meta.author, next.category, `${next.tags.join("\n")}\n${entityText(patch.entities)}\n${patch.keywords !== undefined ? rawText(patch.keywords) : next.keywords.join("\n")}`);

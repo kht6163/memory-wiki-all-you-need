@@ -149,3 +149,15 @@ export function errorText(e: unknown): string {
   const d = describeError(e);
   return d.known || !d.raw ? d.text : `${d.text} (${d.raw})`;
 }
+
+/** Why a graph revision cannot be reverted now (GraphRevision.blocked from the server). */
+export interface RevertBlockLike {
+  code: string;
+  entry_id?: number;
+  message: string;
+}
+
+/** Korean reason for a disabled revert button: the same text the revert's 409 would show (RULES). */
+export function revertBlockText(b: RevertBlockLike): string {
+  return errorText(b.message);
+}

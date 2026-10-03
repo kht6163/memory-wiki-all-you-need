@@ -527,6 +527,7 @@ function ProposalCard({
         <span className="proposal-id">#{p.id}</span>
       </div>
       {body}
+      {p.data.warning && <Callout kind="danger">{p.data.warning}</Callout>}
       <div className="proposal-actions">
         <button className="btn small primary" disabled={Boolean(blocked) || busy} aria-busy={busy || undefined} onClick={onApply}>
           {k.action}

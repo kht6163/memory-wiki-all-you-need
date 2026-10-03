@@ -3,7 +3,7 @@ import { db, type Entry } from "./db.ts";
 import { entityNamesOf } from "./entities.ts";
 import { chatJson } from "./llm.ts";
 import {
-  DROPPED_KEPT, buildReviewBatches, combineUpdateProposals, finishReviewJob, inScope, isReviewJobCancelled, runningReviewJobs, saveReviewProgress, tryAddProposal, versionOf,
+  DROPPED_KEPT, buildReviewBatches, combineUpdateProposals, finishReviewJob, inScope, isReviewJobCancelled, markReasonDeletes, runningReviewJobs, saveReviewProgress, tryAddProposal, versionOf,
   type DroppedProposal, type ReviewJob,
 } from "./review.ts";
 import { confirmTrackingSince, confirmedTurns, entryState, getEntry, getProject, policyPrompt, projectLabel, usageOf } from "./store.ts";
@@ -17,13 +17,13 @@ Propose:
 - "merge": two or more memories say the same thing or belong together → one memory. ids: the memories (the FIRST id is kept), title/body/category: the merged memory, keeping every still-true detail. Only memories with the same scope (and project).
 - "update": one memory is unclear, too long, partly outdated or wrongly categorized → corrected title/body/category. Do not invent facts.
   For small changes to a long body, prefer "edits" instead of a full "body": [{"old":"...","new":"..."}, ...] where each "old" is copied verbatim from the body and occurs in it exactly once (include enough context to make it unique); only those passages are replaced, all together. Passages must not overlap. Put ALL changes to one memory in ONE "update" proposal (several entries in "edits"), never several updates for the same id. Give either "body" or "edits", not both.
-  "entities" (optional): the memory's full entity list after the change. Only names from its current "entities" may appear (you can remove, never add); use it when your change removes the only mention of an entity. Omit it to keep the entities as they are.
+  "entities" (optional): the memory's full entity list after the change. Only names from its current "entities" may appear (you can remove, never add); use it when your change removes the only mention of an entity. Omit it to keep the entities, except that an entity named only in a passage your edits remove is dropped; to keep such an entity, list it.
 - Memories marked body_truncated were cut for this review: never send a full "body" for them. "edits" whose "old" passages you can see are fine, as are title/category/entities changes and delete.
-- "delete": a memory is obsolete, transient (task progress, one-off), generic knowledge, or fully covered by another memory that stays. Never for pinned memories. A memory whose valid_until is before DATE has expired: propose delete unless it is still useful history.
+- "delete": a memory is obsolete, transient (task progress, one-off), generic knowledge, or fully covered by another memory that stays. Never for pinned memories. Never delete a memory that records a decision or its reason (category decision, or one with "reason_for") just because another memory now states the outcome: the reason would be lost. Propose "merge" (keeps both texts) or leave it. A memory whose valid_until is before DATE has expired: propose delete unless it is still useful history.
 - Multiple values are not a contradiction ("uses PostgreSQL" and "also uses Redis"); only report a conflict when both cannot be true at once.
 - "conflict": memories contradict each other and you cannot tell which is right → ids + note for a human.
 
-Signals: "used" = how often it was recalled into a prompt or returned by search, "last_used" = when, "in_prompt_block" = last day it was part of the always-injected block; a memory never used or injected for a long time and not updated is a stale candidate, but age alone is not a reason to delete conventions or preferences. "confirmed" (present only when tracked for the memory's whole current version) = how many conversation turns relied on it, re-stated it or corrected it; rarely confirmed + never used + old = stale candidate. A missing "confirmed" says nothing either way.
+Signals: "used" = how often it was recalled into a prompt or returned by search, "last_used" = when, "in_prompt_block" = last day it was part of the always-injected block; a memory never used or injected for a long time and not updated is a stale candidate, but age alone is not a reason to delete conventions or preferences. "confirmed" (present only when tracked for the memory's whole current version) = how many conversation turns relied on it, re-stated it or corrected it; rarely confirmed + never used + old = stale candidate. A missing "confirmed" says nothing either way. "reason_for" = memories that exist because of this one (it holds their reason).
 Write titles, bodies, reasons and notes in the memories' language (Korean memories → Korean reasons). Keep technical identifiers. No secrets.
 Categories: fact, convention, preference, decision, failure, correction, insight, tool-quirk.
 
@@ -46,9 +46,14 @@ function fmt(e: Entry, trackedSince: string | null): string {
   // Before tracking began nothing could confirm a memory, so a 0 there would read as "stale".
   const tracked = trackedSince != null && e.updated_at >= trackedSince;
   const p = e.project_id ? getProject(e.project_id) : null;
+  // Memories that exist because of this one (a "because" link to it): deleting it loses their reason.
+  const reasonFor = db
+    // Live memories only (G-017): a deleted one's link must not resurface here.
+    .prepare(`SELECT l.from_id FROM entry_links l JOIN entries f ON f.id = l.from_id WHERE l.to_id = ? AND l.type = 'because' AND f.deleted_at IS NULL ORDER BY l.from_id LIMIT 10`).all(e.id).map((r) => Number(r.from_id));
   return JSON.stringify({
     id: e.id, scope: e.scope, project: p?.name, category: e.category, pinned: e.pinned || undefined,
     title: e.title, body: e.body.slice(0, BODY_SHOWN), ...(e.valid_until ? { valid_until: e.valid_until } : {}), ...(e.body.length > BODY_SHOWN ? { body_truncated: true } : {}), entities: entityNamesOf(e.id),
+    ...(reasonFor.length ? { reason_for: reasonFor } : {}),
     updated: e.updated_at.slice(0, 10), used: u.recalled + u.searched, last_used: u.last_used_at?.slice(0, 10) ?? "never",
     in_prompt_block: u.shown_at?.slice(0, 10) ?? "never", ...(tracked ? { confirmed: confirmedTurns(e.id) } : {}),
   });
@@ -123,6 +128,8 @@ async function runReview(job: ReviewJob, between: () => Promise<void>) {
           if ("proposal" in r) progress.proposals++;
           else drop({ kind: String(p.kind ?? p.op ?? ""), ids, reason: r.reason });
         }
+        // After the whole batch: the delete and the update it would undercut may come in either order.
+        markReasonDeletes(job.id);
       }
       progress.done.push(...planned.map((e) => e.id));
       progress.chunks++;

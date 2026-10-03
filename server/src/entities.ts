@@ -124,3 +124,34 @@ export function pruneAllOrphanEntities() {
   const res = db.prepare(`DELETE FROM entities WHERE description = '' AND NOT EXISTS (SELECT 1 FROM entry_entities ee WHERE ee.entity_id = entities.id)`).run();
   if (res.changes) entitiesVersion++;
 }
+
+/**
+ * Entity names a body edit stops mentioning: written (case-insensitively) in one of
+ * the removed passages and nowhere in the text after the edit. An edit may drop
+ * only these; any other current entity stays (a one-line change must not rewrite
+ * the whole list). Pure: names are display names, texts are compared as written.
+ */
+export function entitiesDroppedByEdit(names: string[], removed: string[], after: string): string[] {
+  const gone = removed.join("\n").normalize("NFKC").toLowerCase();
+  const kept = after.normalize("NFKC").toLowerCase();
+  return names.filter((n) => {
+    const k = entityDisplayName(n).toLowerCase();
+    return k.length >= 2 && gone.includes(k) && !kept.includes(k);
+  });
+}
+
+/**
+ * entitiesDroppedByEdit over a memory's current entities, minus any the text after
+ * the edit still names by an alias (an old name kept on rename/merge). `after` is the
+ * title and body after the edit. Turn curation and review both use this, so one
+ * edit drops the same entities on either path (G-046, G-049).
+ */
+export function entryEntitiesDroppedByEdit(entryId: number, removed: string[], after: string): string[] {
+  const compact = after.normalize("NFKC").toLowerCase().replace(/[\s._-]+/g, "");
+  const aliases = db.prepare(
+    `SELECT a.norm FROM entry_entities ee JOIN entities n ON n.id = ee.entity_id JOIN entity_aliases a ON a.entity_id = n.id WHERE ee.entry_id = ? AND n.name = ?`,
+  );
+  return entitiesDroppedByEdit(entityNamesOf(entryId), removed, after).filter(
+    (n) => !aliases.all(entryId, n).some((a) => String(a.norm).length >= 2 && compact.includes(String(a.norm))),
+  );
+}

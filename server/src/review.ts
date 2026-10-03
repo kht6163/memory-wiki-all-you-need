@@ -1,6 +1,6 @@
 import { config, llmEnabled } from "./config.ts";
 import { CATEGORIES, db, now, rowToEntry, transaction, type Entry } from "./db.ts";
-import { entityNamesOf, entityNorm } from "./entities.ts";
+import { entryEntitiesDroppedByEdit, entityNamesOf, entityNorm } from "./entities.ts";
 import { moveLinks } from "./graph.ts";
 import { findSecrets } from "./secrets.ts";
 import { HttpError, NOT_SUPERSEDED_SQL, deleteEntry, entryState, getEntry, getProject, updateEntry, type ExactEditError } from "./store.ts";
@@ -55,6 +55,8 @@ export interface Proposal {
     edit?: ExactEdit;
     /** update only: the memory's new full entity list, a subset of its entities at proposal time (absent = keep). */
     entities?: string[];
+    /** delete only: why a person should look twice (Korean, shown on the card); set by markReasonDeletes. */
+    warning?: string;
     snap: Record<string, string>;
   };
   reason: string;
@@ -365,6 +367,16 @@ function entitySubset(id: number, raw: unknown): { names: string[]; same: boolea
 }
 
 /**
+ * The entity list an edit leaves when the LLM gave none: the current names minus those
+ * written only in a removed passage (entitiesDroppedByEdit). undefined = nothing dropped.
+ * `after`: the title and body after the edit (a name still in the title stays).
+ */
+function entitiesAfterEdits(id: number, edits: unknown[], after: string): string[] | undefined {
+  const gone = entryEntitiesDroppedByEdit(id, edits.map((e) => String((e as Record<string, unknown>)?.old ?? "")), after);
+  return gone.length ? entityNamesOf(id).filter((n) => !gone.includes(n)) : undefined;
+}
+
+/**
  * Fold the update proposals one LLM answer makes for the same single memory into
  * one proposal (the store keeps one pending update per memory and version, so the
  * others would be dropped as duplicates). Only rewrite-free updates fold (edits,
@@ -407,6 +419,8 @@ export function combineUpdateProposals(
     const keys = new Set<string>();
     const fields: { title?: string; category?: string; entities?: string[] } = {};
     const reasons: string[] = [];
+    // A part with edits but no entity list: its dropped entities are derived after folding (below).
+    let derive = false;
     for (const part of group) {
       // Each part is checked on its own first, so one bad part cannot sink the others.
       const drop = (reason: string) => dropped.push({ kind: "update", ids: [id], reason });
@@ -459,8 +473,16 @@ export function combineUpdateProposals(
       }
       const kept = own.entities && fields.entities ? fields.entities.filter((n) => own.entities!.includes(n)) : (own.entities ?? fields.entities);
       Object.assign(fields, own, kept ? { entities: kept } : {});
+      if (fresh.length && part.entities == null) derive = true;
       const why = String(part.reason ?? "").trim();
       if (why && !reasons.includes(why)) reasons.push(why);
+    }
+    // Some parts listed entities and some did not: also drop what the folded edits stop mentioning
+    // (intersection = union of removals). With no list at all, tryAddProposal derives it instead.
+    if (derive && fields.entities && edits.length) {
+      const r = applyExactEdits(body, edits);
+      const left = "body" in r ? entitiesAfterEdits(id, edits, `${fields.title ?? getEntry(id)?.title ?? ""}\n${r.body}`) : undefined;
+      if (left) fields.entities = fields.entities.filter((n) => left.includes(n));
     }
     proposals.push({ kind: "update", ids: [id], ...(edits.length ? { edits } : {}), ...fields, reason: reasons.join("; ") });
   }
@@ -534,6 +556,11 @@ export function tryAddProposal(jobId: number, raw: Record<string, unknown>, seen
         const ents = entitySubset(ids[0], raw.entities);
         if ("reason" in ents) return { reason: ents.reason };
         if (!ents.same) data.entities = ents.names;
+      } else if (edited !== undefined && data.edits) {
+        // No list from the LLM (it often omits it): drop only the entities a removed passage was
+        // the last mention of, so an edit that deletes a fixture passage takes its entity too.
+        const left = entitiesAfterEdits(ids[0], data.edits, `${data.title ?? entries[0].title}\n${edited}`);
+        if (left) data.entities = left;
       }
     }
     for (const k of ["title", "body", "category"] as const) if (data[k] === undefined) delete data[k];
@@ -573,6 +600,52 @@ export function tryAddProposal(jobId: number, raw: Record<string, unknown>, seen
 export function addProposal(jobId: number, raw: Record<string, unknown>, seen: Map<number, string>): Proposal | null {
   const r = tryAddProposal(jobId, raw, seen);
   return "proposal" in r ? r.proposal : null;
+}
+
+/** Shown on a delete proposal that would take away the reason behind a memory a pending proposal updates. */
+export const REASON_DELETE_WARNING =
+  "이 메모리는 대기 중인 다른 제안이 고치려는 메모리의 결정 이유를 담고 있습니다. 둘 다 적용하면 왜 그렇게 정했는지가 사라질 수 있으니, 삭제하기 전에 그대로 두거나 합치기를 고려하세요.";
+
+/**
+ * Flag the pending delete proposals (of the job's project) whose memory holds the reason for a
+ * memory a pending proposal updates (re-measure 35: "the update now states the outcome, delete the
+ * decision" loses why). Kept, not dropped: the delete may still be right (expired, obsolete),
+ * and a person decides (ADR-0013); data.warning tells them to look twice. A reason memory is
+ * the target of a "because" link from the updated memory, or a "decision" memory linked to it
+ * (any link, either way) or sharing an entity with it. Returns how many were flagged.
+ */
+export function markReasonDeletes(jobId: number): number {
+  // Every pending delete/update of the job's project, not just this job's: a re-run skips a
+  // delete still open from an earlier job as a duplicate, so the pair can span two jobs.
+  const rows = db
+    .prepare(
+      `SELECT * FROM review_proposals WHERE status = 'pending' AND kind IN ('delete','update') AND job_id IN (SELECT id FROM review_jobs WHERE IFNULL(project_id, 0) = (SELECT IFNULL(project_id, 0) FROM review_jobs WHERE id = ?))`,
+    )
+    .all(jobId)
+    .map(toProposal);
+  const updated = [...new Set(rows.filter((p) => p.kind === "update").map((p) => p.entry_ids[0]))];
+  if (!updated.length) return 0;
+  const ph = updated.map(() => "?").join(",");
+  const because = db.prepare(`SELECT 1 FROM entry_links WHERE to_id = ? AND type = 'because' AND from_id IN (${ph}) LIMIT 1`);
+  const linked = db.prepare(`SELECT 1 FROM entry_links WHERE (from_id = ? AND to_id IN (${ph})) OR (to_id = ? AND from_id IN (${ph})) LIMIT 1`);
+  const shared = db.prepare(
+    `SELECT 1 FROM entry_entities a JOIN entry_entities b ON b.entity_id = a.entity_id WHERE a.entry_id = ? AND b.entry_id IN (${ph}) LIMIT 1`,
+  );
+  let n = 0;
+  for (const p of rows) {
+    if (p.kind !== "delete" || p.data.warning) continue;
+    const id = p.entry_ids[0];
+    const others = updated.filter((u) => u !== id);
+    if (!others.length) continue;
+    const args = updated.map((u) => (u === id ? -1 : u)); // never match the memory itself
+    const isReason =
+      because.get(id, ...args) != null ||
+      (getEntry(id)?.category === "decision" && (linked.get(id, ...args, id, ...args) != null || shared.get(id, ...args) != null));
+    if (!isReason) continue;
+    db.prepare(`UPDATE review_proposals SET data = ? WHERE id = ?`).run(JSON.stringify({ ...p.data, warning: REASON_DELETE_WARNING }), p.id);
+    n++;
+  }
+  return n;
 }
 
 export function getProposal(id: number): Proposal | null {
