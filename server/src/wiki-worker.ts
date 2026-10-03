@@ -1,7 +1,7 @@
 import { config, llmEnabled } from "./config.ts";
 import { db, type Project, type Turn } from "./db.ts";
 import { chatJson } from "./llm.ts";
-import { getEntry, getProject } from "./store.ts";
+import { getEntry, getProject, policyPrompt, projectLabel } from "./store.ts";
 import { getTurn, renderTurn } from "./turns.ts";
 import {
   createPage,
@@ -17,6 +17,8 @@ import {
   updatePage,
   type WikiJob,
   type WikiPage,
+  isJobCancelled,
+  runningWikiJobs,
 } from "./wiki.ts";
 
 // Compose job: the LLM reads selected turn records (the real conversations and
@@ -60,7 +62,7 @@ Respond with ONLY a JSON object:
 ],"note":"one short sentence"}`;
 
 function scopeLabel(project: Project | null) {
-  return project ? `project wiki: ${project.name} (${project.key})` : "global wiki (cross-project knowledge, environment, the user's tools and habits)";
+  return project ? `project wiki: ${projectLabel(project)}` : "global wiki (cross-project knowledge, environment, the user's tools and habits)";
 }
 
 function turnBlock(t: Turn): string {
@@ -121,6 +123,7 @@ async function composeChunk(job: WikiJob, project: Project | null, chunk: { ids:
     blocks.push(`### [[${p.slug}]] ${p.title}${p.locked ? " (LOCKED — do not change)" : ""}\n${p.body}`);
   }
 
+  const policy = policyPrompt(job.project_id);
   const userPrompt = [
     `WIKI: ${scopeLabel(project)}`,
     `DATE: ${new Date().toISOString().slice(0, 10)}`,
@@ -134,12 +137,15 @@ async function composeChunk(job: WikiJob, project: Project | null, chunk: { ids:
     "",
     "TRANSCRIPTS:",
     chunk.text,
+    ...(policy ? ["", policy] : []),
   ].join("\n");
 
   const { data } = await chatJson([
     { role: "system", content: COMPOSE_PROMPT },
     { role: "user", content: userPrompt },
   ]);
+  // Cancelled while the LLM was answering: write nothing.
+  if (isJobCancelled(job.id)) return null;
   const obj = (data ?? {}) as { pages?: unknown; note?: unknown };
   const ops = Array.isArray(obj.pages) ? (obj.pages as Record<string, unknown>[]) : [];
 
@@ -201,8 +207,10 @@ async function runCompose(job: WikiJob, between: () => Promise<void>) {
   for (const [i, chunk] of chunks.entries()) {
     // Memory curation must not wait behind a long compose job.
     if (i > 0) await between();
+    if (isJobCancelled(job.id)) return;
     try {
       const r = await composeChunk(job, project, chunk, touched, job.payload.instruction);
+      if (!r) return;
       markComposed(job.project_id, chunk.ids, job.id);
       progress.done.push(...chunk.ids);
       progress.chunks++;
@@ -228,6 +236,7 @@ export async function processWikiJob(job: WikiJob, between: () => Promise<void> 
     console.error(`[wiki] job ${job.id} failed:`, (err as Error).message);
     finishJob(job.id, "error", job.result, (err as Error).message);
   } finally {
+    runningWikiJobs.delete(job.id);
     db.prepare(`UPDATE wiki_jobs SET result = json_set(COALESCE(result, '{}'), '$.ms', ?) WHERE id = ? AND status IN ('done','error','skipped')`).run(
       Date.now() - started,
       job.id,

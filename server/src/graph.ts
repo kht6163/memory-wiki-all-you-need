@@ -1,7 +1,8 @@
 import { config } from "./config.ts";
 import { db, now, rowToEntry, transaction, type Entry, type Source } from "./db.ts";
 import { ENTITY_KINDS, entitiesVersion, entityDisplayName, entityNorm, resolveEntityId } from "./entities.ts";
-import { HttpError, getEntry } from "./store.ts";
+import { getGraphRevision, markGraphRevisionReverted, recordGraphRevision, type GraphRevision } from "./graph-revisions.ts";
+import { ACTIVE_SQL, HttpError, getEntry } from "./store.ts";
 
 // Memory graph: memories ⇄ entities (mentions) and memory → memory typed links.
 // The curation LLM fills it as part of its normal per-turn call; people edit it
@@ -50,27 +51,104 @@ const toLink = (r: Row): Link => ({
 // ------------------------------------------------------------------ links
 
 /** Add a typed link between two live memories. Returns false when it already existed. */
-export function addLink(fromId: number, toId: number, type: LinkType, author: Source): boolean {
+export function addLink(fromId: number, toId: number, type: LinkType, author: Source, opts: { revertOf?: number } = {}): boolean {
   if (fromId === toId) throw new HttpError(400, "a memory cannot link to itself");
   if (!isLinkType(type)) throw new HttpError(400, `link type must be one of ${LINK_TYPES.join(", ")}`);
   const a = getEntry(fromId);
   const b = getEntry(toId);
   if (!a || a.deleted_at || !b || b.deleted_at) throw new HttpError(404, "both memories must exist");
+  if (type === "supersedes") {
+    // The replacement hides the old memory (G-026), so it must be visible
+    // wherever the old one is: a project memory cannot retire a global one, or
+    // another project's.
+    if (a.scope === "project" && a.project_id !== b.project_id) {
+      throw new HttpError(400, "a project memory can only supersede memories of the same project");
+    }
+    // A cycle (A supersedes B, B supersedes A) would retire both. Only retiring
+    // links count: a pre-v0.6 informational one (retires = 0) retires nothing.
+    const seen = new Set<number>([toId]);
+    let frontier = [toId];
+    for (let depth = 0; frontier.length && depth < 50; depth++) {
+      const next: number[] = [];
+      for (const id of frontier) {
+        for (const r of db.prepare(`SELECT to_id FROM entry_links WHERE from_id = ? AND type = 'supersedes' AND retires = 1`).all(id)) {
+          const t = Number(r.to_id);
+          if (t === fromId) throw new HttpError(409, `#${toId} already supersedes #${fromId} (directly or through others)`);
+          if (!seen.has(t)) {
+            seen.add(t);
+            next.push(t);
+          }
+        }
+      }
+      frontier = next;
+    }
+  }
   // "related" is symmetric: store it once.
   if (type === "related" && db.prepare(`SELECT 1 FROM entry_links WHERE from_id = ? AND to_id = ? AND type = 'related'`).get(toId, fromId)) return false;
-  const res = db.prepare(`INSERT OR IGNORE INTO entry_links (from_id, to_id, type, author) VALUES (?, ?, ?, ?)`).run(fromId, toId, type, author);
-  return res.changes > 0;
+  return transaction(() => {
+    const prior = db.prepare(`SELECT retires, author FROM entry_links WHERE from_id = ? AND to_id = ? AND type = ?`).get(fromId, toId, type);
+    let changed: boolean;
+    if (type === "supersedes") {
+      // Making a pre-v0.6 (informational) supersedes link again turns it into a retiring one.
+      const res = db
+        .prepare(
+          `INSERT INTO entry_links (from_id, to_id, type, author) VALUES (?, ?, 'supersedes', ?)
+           ON CONFLICT(from_id, to_id, type) DO UPDATE SET retires = 1 WHERE retires = 0`,
+        )
+        .run(fromId, toId, author);
+      changed = res.changes > 0;
+    } else {
+      changed = db.prepare(`INSERT OR IGNORE INTO entry_links (from_id, to_id, type, author) VALUES (?, ?, ?, ?)`).run(fromId, toId, type, author).changes > 0;
+    }
+    if (changed) {
+      recordGraphRevision({
+        target: "link",
+        action: "add",
+        // prior: null = the row was inserted; {retires: 0, author} = a legacy supersedes link was turned on.
+        snapshot: {
+          from_id: fromId, to_id: toId, type,
+          prior: prior ? { retires: Number(prior.retires), author: String(prior.author) } : null,
+          entity_ids: [], entry_ids: [fromId, toId],
+        },
+        author,
+        revertOf: opts.revertOf,
+      });
+    }
+    return changed;
+  });
 }
 
-export function removeLink(fromId: number, toId: number, type: LinkType): boolean {
-  const res = db.prepare(`DELETE FROM entry_links WHERE from_id = ? AND to_id = ? AND type = ?`).run(fromId, toId, type);
-  return res.changes > 0;
+export function removeLink(fromId: number, toId: number, type: LinkType, author: Source = "human", opts: { revertOf?: number } = {}): boolean {
+  return transaction(() => {
+    const row = db.prepare(`SELECT * FROM entry_links WHERE from_id = ? AND to_id = ? AND type = ?`).get(fromId, toId, type);
+    if (!row) return false;
+    const res = db.prepare(`DELETE FROM entry_links WHERE from_id = ? AND to_id = ? AND type = ?`).run(fromId, toId, type);
+    if (!res.changes) return false;
+    recordGraphRevision({
+      target: "link",
+      action: "remove",
+      snapshot: {
+        from_id: fromId, to_id: toId, type,
+        retires: Number(row.retires), link_author: String(row.author), link_created_at: String(row.created_at),
+        entity_ids: [], entry_ids: [fromId, toId],
+      },
+      author,
+      revertOf: opts.revertOf,
+    });
+    return true;
+  });
 }
 
-/** Re-point every link of `fromId` to `toId` (used when memories are merged); links between the two are dropped. */
+/**
+ * Re-point every link of `fromId` to `toId` (used when memories are merged); links between the two are dropped.
+ * Incoming retiring "supersedes" links are dropped, not moved: they say something replaced the
+ * merged-away memory's fact, not the kept memory's — moving one would retire (hide) the kept memory
+ * now or once its source is restored (G-026). Informational ones (retires = 0) move like any link.
+ */
 export function moveLinks(fromId: number, toId: number) {
   transaction(() => {
     db.prepare(`DELETE FROM entry_links WHERE (from_id = ? AND to_id = ?) OR (from_id = ? AND to_id = ?)`).run(fromId, toId, toId, fromId);
+    db.prepare(`DELETE FROM entry_links WHERE to_id = ? AND type = 'supersedes' AND retires = 1`).run(fromId);
     db.prepare(`UPDATE OR IGNORE entry_links SET from_id = ? WHERE from_id = ?`).run(toId, fromId);
     db.prepare(`UPDATE OR IGNORE entry_links SET to_id = ? WHERE to_id = ?`).run(toId, fromId);
     // Rows that would have duplicated an existing link stay behind; drop them.
@@ -139,21 +217,28 @@ export function findEntity(name: string): Entity | null {
   return id ? getEntity(id) : null;
 }
 
-/** Live memories mentioning an entity, optionally limited to what a project can see. */
-export function entityEntries(entityId: number, visibleFrom?: number | null): Entry[] {
+/**
+ * Live memories mentioning an entity, optionally limited to what a project can
+ * see. activeOnly drops superseded/expired ones in SQL, before `limit` applies
+ * (so inactive newer memories never crowd out active ones).
+ */
+export function entityEntries(entityId: number, visibleFrom?: number | null, opts: { activeOnly?: boolean; limit?: number } = {}): Entry[] {
   const vis = visibleFrom === undefined ? "" : "AND (e.scope IN ('global','user') OR e.project_id = ?)";
   const args: number[] = [entityId];
   if (visibleFrom !== undefined) args.push(visibleFrom ?? -1);
+  const active = opts.activeOnly ? `AND ${ACTIVE_SQL("e")}` : "";
+  const limit = opts.limit != null ? "LIMIT ?" : "";
+  if (opts.limit != null) args.push(opts.limit);
   return db
     .prepare(
       `SELECT e.* FROM entry_entities ee JOIN entries e ON e.id = ee.entry_id
-       WHERE ee.entity_id = ? AND e.deleted_at IS NULL ${vis} ORDER BY e.pinned DESC, e.updated_at DESC`,
+       WHERE ee.entity_id = ? AND e.deleted_at IS NULL ${vis} ${active} ORDER BY e.pinned DESC, e.updated_at DESC ${limit}`,
     )
     .all(...args)
     .map(rowToEntry);
 }
 
-export function updateEntity(id: number, patch: { name?: string; kind?: string; description?: string }): Entity {
+export function updateEntity(id: number, patch: { name?: string; kind?: string; description?: string }, author: Source = "human"): Entity {
   const cur = getEntity(id);
   if (!cur) throw new HttpError(404, "entity not found");
   const name = patch.name !== undefined ? entityDisplayName(patch.name) : cur.name;
@@ -163,41 +248,319 @@ export function updateEntity(id: number, patch: { name?: string; kind?: string; 
   if (!(ENTITY_KINDS as readonly string[]).includes(kind)) throw new HttpError(400, `kind must be one of ${ENTITY_KINDS.join(", ")}`);
   const other = resolveEntityId(name);
   if (other && other !== id) throw new HttpError(409, `"${name}" is already entity #${other} — merge instead`);
+  const description = patch.description !== undefined ? patch.description.trim().slice(0, 2000) : cur.description;
+  if (name === cur.name && kind === cur.kind && description === cur.description) return cur;
   transaction(() => {
     const oldNorm = entityNorm(cur.name);
+    const aliasesAdded: string[] = [];
+    const aliasesRemoved: string[] = [];
     // Keep the old spelling as an alias so the LLM's next mention still resolves here.
-    if (oldNorm !== norm) db.prepare(`INSERT OR REPLACE INTO entity_aliases (norm, entity_id) VALUES (?, ?)`).run(oldNorm, id);
-    db.prepare(`DELETE FROM entity_aliases WHERE norm = ?`).run(norm);
-    db.prepare(`UPDATE entities SET name = ?, norm = ?, kind = ?, description = ?, updated_at = ? WHERE id = ?`).run(
-      name, norm, kind, patch.description !== undefined ? patch.description.trim().slice(0, 2000) : cur.description, now(), id,
-    );
+    if (oldNorm !== norm) {
+      db.prepare(`INSERT OR REPLACE INTO entity_aliases (norm, entity_id) VALUES (?, ?)`).run(oldNorm, id);
+      aliasesAdded.push(oldNorm);
+    }
+    // Renaming back to an old spelling: that alias becomes the name again.
+    if (db.prepare(`DELETE FROM entity_aliases WHERE norm = ?`).run(norm).changes) aliasesRemoved.push(norm);
+    db.prepare(`UPDATE entities SET name = ?, norm = ?, kind = ?, description = ?, updated_at = ? WHERE id = ?`).run(name, norm, kind, description, now(), id);
+    recordGraphRevision({
+      target: "entity",
+      action: "update",
+      snapshot: {
+        entity_id: id,
+        before: { name: cur.name, kind: cur.kind, description: cur.description },
+        after: { name, kind, description },
+        aliases_added: aliasesAdded,
+        aliases_removed: aliasesRemoved,
+        entity_ids: [id], entry_ids: [],
+      },
+      author,
+    });
   });
   invalidateEntityNames();
   return getEntity(id)!;
 }
 
+const entityRow = (id: number) => db.prepare(`SELECT id, name, norm, kind, description, created_at, updated_at FROM entities WHERE id = ?`).get(id) as Row;
+const aliasNorms = (id: number) => db.prepare(`SELECT norm FROM entity_aliases WHERE entity_id = ? ORDER BY norm`).all(id).map((r) => String(r.norm));
+const mentionIds = (id: number) => db.prepare(`SELECT entry_id FROM entry_entities WHERE entity_id = ? ORDER BY entry_id`).all(id).map((r) => Number(r.entry_id));
+/** Pairs a person dismissed as "not the same" (entity_pair_dismissed), as the other entity's id. */
+const dismissedWith = (id: number) =>
+  db.prepare(`SELECT CASE WHEN a = ? THEN b ELSE a END AS other FROM entity_pair_dismissed WHERE a = ? OR b = ?`).all(id, id, id).map((r) => Number(r.other));
+
 /** Merge `fromId` into `intoId`: mentions move over, the old name becomes an alias. */
-export function mergeEntities(fromId: number, intoId: number): Entity {
+export function mergeEntities(fromId: number, intoId: number, author: Source = "human"): Entity {
   if (fromId === intoId) throw new HttpError(400, "cannot merge an entity into itself");
   const from = getEntity(fromId);
   const into = getEntity(intoId);
   if (!from || !into) throw new HttpError(404, "entity not found");
   transaction(() => {
+    const row = entityRow(fromId);
+    const entries = mentionIds(fromId);
+    const newMentions = db
+      .prepare(
+        `SELECT entry_id FROM entry_entities WHERE entity_id = ?
+           AND entry_id NOT IN (SELECT entry_id FROM entry_entities WHERE entity_id = ?) ORDER BY entry_id`,
+      )
+      .all(fromId, intoId)
+      .map((r) => Number(r.entry_id));
+    const aliases = aliasNorms(fromId);
+    const dismissed = dismissedWith(fromId);
+    const descriptionCopied = !into.description && !!from.description;
     db.prepare(`INSERT OR IGNORE INTO entry_entities (entry_id, entity_id) SELECT entry_id, ? FROM entry_entities WHERE entity_id = ?`).run(intoId, fromId);
     db.prepare(`UPDATE entity_aliases SET entity_id = ? WHERE entity_id = ?`).run(intoId, fromId);
     db.prepare(`INSERT OR REPLACE INTO entity_aliases (norm, entity_id) VALUES (?, ?)`).run(entityNorm(from.name), intoId);
-    if (!into.description && from.description) db.prepare(`UPDATE entities SET description = ? WHERE id = ?`).run(from.description, intoId);
+    if (descriptionCopied) db.prepare(`UPDATE entities SET description = ? WHERE id = ?`).run(from.description, intoId);
     db.prepare(`DELETE FROM entities WHERE id = ?`).run(fromId);
     db.prepare(`UPDATE entities SET updated_at = ? WHERE id = ?`).run(now(), intoId);
+    recordGraphRevision({
+      target: "entity",
+      action: "merge",
+      snapshot: {
+        entity_id: fromId,
+        into_id: intoId,
+        entity: row,
+        // Alias norms of the merged-away entity, all moved to the target; its
+        // own name norm was added to the target as well.
+        aliases,
+        name_alias: String(row.norm),
+        entries,
+        // Memories that did not mention the target before (revert drops the target mention there).
+        new_target_mentions: newMentions,
+        description_copied: descriptionCopied,
+        dismissed,
+        entity_ids: [fromId, intoId], entry_ids: entries,
+      },
+      author,
+    });
   });
   invalidateEntityNames();
   return getEntity(intoId)!;
 }
 
-export function deleteEntity(id: number) {
+export function deleteEntity(id: number, author: Source = "human") {
   if (!getEntity(id)) throw new HttpError(404, "entity not found");
-  db.prepare(`DELETE FROM entities WHERE id = ?`).run(id);
+  transaction(() => {
+    const row = entityRow(id);
+    const aliases = aliasNorms(id);
+    const entries = mentionIds(id);
+    const dismissed = dismissedWith(id);
+    db.prepare(`DELETE FROM entities WHERE id = ?`).run(id);
+    recordGraphRevision({
+      target: "entity",
+      action: "delete",
+      snapshot: { entity_id: id, entity: row, aliases, entries, dismissed, entity_ids: [id], entry_ids: entries },
+      author,
+    });
+  });
   invalidateEntityNames();
+}
+
+// ---------------------------------------------------------- graph history
+
+export function revertGraphRevision(id: number, author: Source = "human"): { revision: GraphRevision; revert: GraphRevision | null } {
+  const rev = getGraphRevision(id);
+  if (!rev) throw new HttpError(404, "revision not found");
+  if (rev.reverted_at) throw new HttpError(409, "this change was already reverted");
+  if (!rev.revertible) throw new HttpError(409, `a ${rev.target} "${rev.action}" cannot be reverted`);
+  const s = rev.snapshot;
+  const newId = transaction(() => {
+    let written: number | null = null;
+    if (rev.target === "link" && rev.action === "add") written = revertLinkAdd(s, author, id);
+    else if (rev.target === "link" && rev.action === "remove") {
+      if (Number(s.retires) === 0) written = restoreInformationalLink(s, author, id);
+      else {
+        if (!addLink(Number(s.from_id), Number(s.to_id), s.type, author, { revertOf: id })) {
+          throw new HttpError(409, "the link already exists");
+        }
+        written = lastRevisionId();
+      }
+    } else if (rev.action === "update") written = revertEntityUpdate(s, author, id);
+    else if (rev.action === "merge") written = revertEntityMerge(s, author, id);
+    else if (rev.action === "delete") written = revertEntityDelete(s, author, id);
+    if (!markGraphRevisionReverted(id)) throw new HttpError(409, "this change was already reverted");
+    return written;
+  });
+  invalidateEntityNames();
+  return { revision: getGraphRevision(id)!, revert: newId ? getGraphRevision(newId) : null };
+}
+
+type Snap = Record<string, any>;
+/** Id of the revision just recorded by addLink / removeLink (same connection, same transaction). */
+const lastRevisionId = () => Number((db.prepare(`SELECT MAX(id) AS id FROM graph_revisions`).get() as Row).id);
+
+/**
+ * Put back a removed pre-v0.6 informational supersedes link (retires = 0) as it
+ * was. It retires nothing, so addLink's cycle and same-project checks (which
+ * protect retiring links) do not apply: a v0.5 database may hold A⇄B pairs or
+ * project → global links, and their removal must stay revertible.
+ */
+function restoreInformationalLink(s: Snap, author: Source, revertOf: number): number {
+  const [from, to, type] = [Number(s.from_id), Number(s.to_id), s.type as LinkType];
+  const a = getEntry(from);
+  const b = getEntry(to);
+  if (!a || a.deleted_at || !b || b.deleted_at) throw new HttpError(404, "both memories must exist");
+  if (db.prepare(`SELECT 1 FROM entry_links WHERE from_id = ? AND to_id = ? AND type = ?`).get(from, to, type)) {
+    throw new HttpError(409, "the link already exists");
+  }
+  db.prepare(`INSERT INTO entry_links (from_id, to_id, type, author, created_at, retires) VALUES (?, ?, ?, ?, ?, 0)`).run(
+    from, to, type, String(s.link_author), String(s.link_created_at),
+  );
+  // prior: null → reverting this add removes the row again (removeLink snapshots retires = 0).
+  return recordGraphRevision({
+    target: "link",
+    action: "add",
+    snapshot: { from_id: from, to_id: to, type, prior: null, entity_ids: [], entry_ids: [from, to] },
+    author,
+    revertOf,
+  });
+}
+
+function revertLinkAdd(s: Snap, author: Source, revertOf: number): number {
+  const [from, to, type] = [Number(s.from_id), Number(s.to_id), s.type as LinkType];
+  const row = db.prepare(`SELECT * FROM entry_links WHERE from_id = ? AND to_id = ? AND type = ?`).get(from, to, type);
+  if (!row) throw new HttpError(409, "the link no longer exists");
+  if (!s.prior) {
+    removeLink(from, to, type, author, { revertOf });
+    return lastRevisionId();
+  }
+  // The add turned a legacy (informational) supersedes link on: turn it off again.
+  if (Number(row.retires) === 0) throw new HttpError(409, "the link no longer retires its target");
+  db.prepare(`UPDATE entry_links SET retires = ? WHERE from_id = ? AND to_id = ? AND type = ?`).run(Number(s.prior.retires), from, to, type);
+  // Recorded as a "remove" of the retiring link; reverting it turns it on again (addLink).
+  return recordGraphRevision({
+    target: "link",
+    action: "remove",
+    snapshot: {
+      from_id: from, to_id: to, type, retires: 1, downgrade: true,
+      link_author: String(row.author), link_created_at: String(row.created_at),
+      entity_ids: [], entry_ids: [from, to],
+    },
+    author,
+    revertOf,
+  });
+}
+
+function revertEntityUpdate(s: Snap, author: Source, revertOf: number): number {
+  const id = Number(s.entity_id);
+  const cur = getEntity(id);
+  if (!cur) throw new HttpError(404, "entity not found");
+  const before = s.before as { name: string; kind: string; description: string };
+  const after = s.after as { name: string };
+  const norm = entityNorm(before.name);
+  const other = resolveEntityId(before.name);
+  if (other && other !== id) throw new HttpError(409, `"${before.name}" is now entity #${other} — merge instead`);
+  const curNorm = entityNorm(cur.name);
+  const aliasesAdded: string[] = [];
+  const aliasesRemoved: string[] = [];
+  // Drop the aliases the change added (the old name is the name again)...
+  const delAlias = db.prepare(`DELETE FROM entity_aliases WHERE norm = ? AND entity_id = ?`);
+  for (const a of s.aliases_added as string[]) if (delAlias.run(a, id).changes) aliasesRemoved.push(a);
+  if (delAlias.run(norm, id).changes && !aliasesRemoved.includes(norm)) aliasesRemoved.push(norm);
+  // ...bring back the ones it removed, unless another entity owns them now...
+  const addAlias = db.prepare(`INSERT OR IGNORE INTO entity_aliases (norm, entity_id) VALUES (?, ?)`);
+  const taken = (n: string) => n === norm || db.prepare(`SELECT 1 FROM entities WHERE norm = ?`).get(n);
+  for (const a of s.aliases_removed as string[]) if (!taken(a) && addAlias.run(a, id).changes) aliasesAdded.push(a);
+  // ...and keep the current name as an alias only if it came from a later rename.
+  if (curNorm !== norm && curNorm !== entityNorm(after.name) && addAlias.run(curNorm, id).changes) aliasesAdded.push(curNorm);
+  // Already back at the old values (e.g. renamed back by hand): refuse rather than
+  // record a no-op revision (G-034). The throw rolls back the whole revert, so the
+  // original revision stays unreverted.
+  if (cur.name === before.name && cur.kind === before.kind && cur.description === before.description && !aliasesAdded.length && !aliasesRemoved.length) {
+    throw new HttpError(409, "nothing to revert: the entity already has these values");
+  }
+  db.prepare(`UPDATE entities SET name = ?, norm = ?, kind = ?, description = ?, updated_at = ? WHERE id = ?`).run(
+    before.name, norm, before.kind, before.description, now(), id,
+  );
+  return recordGraphRevision({
+    target: "entity",
+    action: "update",
+    snapshot: {
+      entity_id: id,
+      before: { name: cur.name, kind: cur.kind, description: cur.description },
+      after: before,
+      aliases_added: aliasesAdded,
+      aliases_removed: aliasesRemoved,
+      entity_ids: [id], entry_ids: [],
+    },
+    author,
+    revertOf,
+  });
+}
+
+/** Recreate a merged-away or deleted entity (same id when free). Returns its id. */
+function recreateEntity(row: Snap): number {
+  const norm = String(row.norm);
+  // The name must be free both as a name and as an alias (G-020).
+  const owner =
+    db.prepare(`SELECT id FROM entities WHERE norm = ?`).get(norm) ?? db.prepare(`SELECT entity_id AS id FROM entity_aliases WHERE norm = ?`).get(norm);
+  if (owner) throw new HttpError(409, `"${row.name}" is now entity #${owner.id} — merge instead`);
+  const free = !db.prepare(`SELECT 1 FROM entities WHERE id = ?`).get(row.id);
+  const res = free
+    ? db.prepare(`INSERT INTO entities (id, name, norm, kind, description, created_at) VALUES (?, ?, ?, ?, ?, ?)`).run(
+        row.id, row.name, norm, row.kind, row.description, row.created_at,
+      )
+    : db.prepare(`INSERT INTO entities (name, norm, kind, description, created_at) VALUES (?, ?, ?, ?, ?)`).run(row.name, norm, row.kind, row.description, row.created_at);
+  return free ? Number(row.id) : Number(res.lastInsertRowid);
+}
+
+function restoreMentionsAndPairs(entityId: number, entries: number[], dismissed: number[] | undefined) {
+  const ins = db.prepare(`INSERT OR IGNORE INTO entry_entities (entry_id, entity_id) SELECT id, ? FROM entries WHERE id = ?`);
+  for (const e of entries) ins.run(entityId, e);
+  const pair = db.prepare(
+    `INSERT OR IGNORE INTO entity_pair_dismissed (a, b) SELECT ?, ? WHERE EXISTS (SELECT 1 FROM entities WHERE id = ?)`,
+  );
+  for (const o of dismissed ?? []) if (o !== entityId) pair.run(Math.min(o, entityId), Math.max(o, entityId), o);
+}
+
+function revertEntityMerge(s: Snap, author: Source, revertOf: number): number {
+  const intoId = Number(s.into_id);
+  // The target was deleted after the merge: its aliases (including the merged-away
+  // entity's) went with it and live only in that delete's snapshot. Reverting the
+  // merge now would lose them, and a later delete revert would hand them to the
+  // target (old spelling resolving to the wrong entity, G-020). Restore it first.
+  if (!db.prepare(`SELECT 1 FROM entities WHERE id = ?`).get(intoId)) {
+    throw new HttpError(409, `the merge target #${intoId} no longer exists — restore the target first`);
+  }
+  const nameNorm = String(s.name_alias);
+  // The merged-away name must still point at the target (or nowhere) — G-020.
+  const aliasOwner = db.prepare(`SELECT entity_id FROM entity_aliases WHERE norm = ?`).get(nameNorm);
+  if (aliasOwner && Number(aliasOwner.entity_id) !== intoId) {
+    throw new HttpError(409, `"${s.entity.name}" now resolves to entity #${aliasOwner.entity_id} — revert that change first`);
+  }
+  db.prepare(`DELETE FROM entity_aliases WHERE norm = ? AND entity_id = ?`).run(nameNorm, intoId);
+  const id = recreateEntity(s.entity);
+  // Move its aliases back from the target (ones that vanished or moved elsewhere since stay as they are).
+  const move = db.prepare(`UPDATE entity_aliases SET entity_id = ? WHERE norm = ? AND entity_id = ?`);
+  const restored: string[] = [];
+  for (const a of s.aliases as string[]) if (move.run(id, a, intoId).changes) restored.push(a);
+  restoreMentionsAndPairs(id, s.entries as number[], s.dismissed);
+  const drop = db.prepare(`DELETE FROM entry_entities WHERE entry_id = ? AND entity_id = ?`);
+  for (const e of s.new_target_mentions as number[]) drop.run(e, intoId);
+  if (s.description_copied) db.prepare(`UPDATE entities SET description = '' WHERE id = ? AND description = ?`).run(intoId, s.entity.description);
+  db.prepare(`UPDATE entities SET updated_at = ? WHERE id = ?`).run(now(), intoId);
+  return recordGraphRevision({
+    target: "entity",
+    action: "unmerge",
+    snapshot: { entity_id: id, into_id: intoId, aliases: restored, entity_ids: [id, intoId], entry_ids: s.entries },
+    author,
+    revertOf,
+  });
+}
+
+function revertEntityDelete(s: Snap, author: Source, revertOf: number): number {
+  const id = recreateEntity(s.entity);
+  const add = db.prepare(`INSERT OR IGNORE INTO entity_aliases (norm, entity_id) SELECT ?, ? WHERE NOT EXISTS (SELECT 1 FROM entities WHERE norm = ?)`);
+  const restored: string[] = [];
+  for (const a of s.aliases as string[]) if (add.run(a, id, a).changes) restored.push(a);
+  restoreMentionsAndPairs(id, s.entries as number[], s.dismissed);
+  const entries = mentionIds(id);
+  return recordGraphRevision({
+    target: "entity",
+    action: "restore",
+    snapshot: { entity_id: id, aliases: restored, entity_ids: [id], entry_ids: entries },
+    author,
+    revertOf,
+  });
 }
 
 // ------------------------------------------------------- mention detection
@@ -381,7 +744,7 @@ export function graphStats() {
 
 export interface GraphJob {
   id: number;
-  status: "pending" | "processing" | "done" | "skipped" | "error";
+  status: "pending" | "processing" | "done" | "skipped" | "error" | "cancelled";
   payload: { entries: number[]; projectId?: number | null };
   result: { done?: number[]; chunks?: number; entities?: number; links?: number; ms?: number } | null;
   error: string | null;
@@ -429,24 +792,41 @@ export function getGraphJob(id: number): GraphJob | null {
 export function listGraphJobs(limit = 20): GraphJob[] {
   return db.prepare(`SELECT * FROM graph_jobs ORDER BY id DESC LIMIT ?`).all(limit).map(toJob);
 }
+/** Jobs the worker holds right now (a cancelled one stays here until its in-flight call returns). */
+export const runningGraphJobs = new Set<number>();
 export function claimGraphJob(): GraphJob | null {
   const r = db.prepare(`SELECT id FROM graph_jobs WHERE status = 'pending' ORDER BY id LIMIT 1`).get();
   if (!r) return null;
   const res = db.prepare(`UPDATE graph_jobs SET status = 'processing' WHERE id = ? AND status = 'pending'`).run(Number(r.id));
-  return res.changes ? getGraphJob(Number(r.id)) : null;
+  if (!res.changes) return null;
+  runningGraphJobs.add(Number(r.id));
+  return getGraphJob(Number(r.id));
 }
 export function saveGraphProgress(id: number, result: unknown) {
   db.prepare(`UPDATE graph_jobs SET result = ? WHERE id = ?`).run(JSON.stringify(result), id);
 }
 export function finishGraphJob(id: number, status: GraphJob["status"], result: unknown, error: string | null = null) {
-  db.prepare(`UPDATE graph_jobs SET status = ?, result = ?, error = ?, processed_at = ? WHERE id = ?`).run(
+  db.prepare(`UPDATE graph_jobs SET status = ?, result = ?, error = ?, processed_at = ? WHERE id = ? AND status = 'processing'`).run(
     status, result == null ? null : JSON.stringify(result), error, now(), id,
   );
+}
+/** Stop a queued or running backfill before its next chunk (see cancelJob in wiki.ts). */
+export function cancelGraphJob(id: number): GraphJob {
+  const res = db.prepare(`UPDATE graph_jobs SET status = 'cancelled', processed_at = ? WHERE id = ? AND status IN ('pending','processing')`).run(now(), id);
+  if (!res.changes) {
+    if (!getGraphJob(id)) throw new HttpError(404, "job not found");
+    throw new HttpError(409, "only queued or running jobs can be cancelled");
+  }
+  return getGraphJob(id)!;
+}
+export function isGraphJobCancelled(id: number): boolean {
+  return getGraphJob(id)?.status === "cancelled";
 }
 export function retryGraphJob(id: number): GraphJob {
   const j = getGraphJob(id);
   if (!j) throw new HttpError(404, "job not found");
-  if (j.status !== "error") throw new HttpError(409, "only failed jobs can be retried");
+  if (j.status !== "error" && j.status !== "cancelled") throw new HttpError(409, "only failed or cancelled jobs can be retried");
+  if (runningGraphJobs.has(id)) throw new HttpError(409, "job is still stopping; try again in a moment");
   db.prepare(`UPDATE graph_jobs SET status = 'pending', error = NULL WHERE id = ?`).run(id);
   wakeWorker?.();
   return getGraphJob(id)!;

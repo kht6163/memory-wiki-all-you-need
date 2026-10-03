@@ -1,4 +1,5 @@
 import { db, rowToEntry, type Entry, type Scope } from "./db.ts";
+import { ACTIVE_SQL, NOT_SUPERSEDED_SQL } from "./store.ts";
 
 // Search over a trigram FTS index. Trigram cannot match terms shorter than
 // three characters, which is common in Korean ("포트", "설정"), so short terms
@@ -50,6 +51,15 @@ export interface SearchOptions {
   excludeIds?: Set<number>;
   /** When true, search every project instead of only `projectId`. */
   allProjects?: boolean;
+  /** Also return superseded / expired memories (history). Default: only current ones. */
+  inactive?: boolean;
+  /** Only memories retired by a "supersedes" link (history with a replacement). Overrides `inactive`. */
+  supersededOnly?: boolean;
+  /**
+   * Entity ids named in the query (graph.mentionedEntities). Hits that mention
+   * one are boosted, less so for hub entities many memories mention.
+   */
+  boostEntities?: number[];
 }
 
 export interface SearchHit {
@@ -73,6 +83,8 @@ export function searchEntries(query: string, opts: SearchOptions = {}): SearchHi
     where.push("e.category = ?");
     args.push(opts.category);
   }
+  if (opts.supersededOnly) where.push(`NOT ${NOT_SUPERSEDED_SQL("e")}`);
+  else if (!opts.inactive) where.push(ACTIVE_SQL("e"));
 
   // Candidate set: FTS for long variants, LIKE for short ones.
   const candidates = new Map<number, Entry>();
@@ -88,10 +100,10 @@ export function searchEntries(query: string, opts: SearchOptions = {}): SearchHi
     for (const r of rows) candidates.set(Number(r.id), rowToEntry(r));
   }
   if (short.length) {
-    const likes = short.map(() => `(e.title LIKE ? ESCAPE '\\' OR e.body LIKE ? ESCAPE '\\' OR e.tags LIKE ? ESCAPE '\\')`);
+    const likes = short.map(() => `(e.title LIKE ? ESCAPE '\\' OR e.body LIKE ? ESCAPE '\\' OR e.tags LIKE ? ESCAPE '\\' OR e.keywords LIKE ? ESCAPE '\\')`);
     const likeArgs = short.flatMap((s) => {
       const p = `%${likeEscape(s)}%`;
-      return [p, p, p];
+      return [p, p, p, p];
     });
     const rows = db
       .prepare(`SELECT e.* FROM entries e WHERE ${where.join(" AND ")} AND (${likes.join(" OR ")}) LIMIT 300`)
@@ -105,6 +117,7 @@ export function searchEntries(query: string, opts: SearchOptions = {}): SearchHi
     const title = entry.title.toLowerCase();
     const body = entry.body.toLowerCase();
     const tags = entry.tags.join(" ").toLowerCase();
+    const keywords = entry.keywords.join(" ").toLowerCase();
     let score = 0;
     let matched = 0;
     for (const t of terms) {
@@ -114,6 +127,8 @@ export function searchEntries(query: string, opts: SearchOptions = {}): SearchHi
         let s = 0;
         if (title.includes(v)) s += 3;
         if (tags.includes(v)) s += 2;
+        // Keywords exist to bridge wording (synonyms, translations): as strong as a tag.
+        else if (keywords.includes(v)) s += 2;
         if (body.includes(v)) s += 1 + Math.min(body.split(v).length - 2, 3) * 0.2;
         best = Math.max(best, s * weight);
       }
@@ -127,8 +142,46 @@ export function searchEntries(query: string, opts: SearchOptions = {}): SearchHi
     if (entry.pinned) score *= 1.1;
     hits.push({ entry, score });
   }
+  if (opts.boostEntities?.length && hits.length)
+    applyEntityBoost(hits, opts.boostEntities, opts.allProjects ? undefined : (opts.projectId ?? -1));
   hits.sort((a, b) => b.score - a.score || b.entry.updated_at.localeCompare(a.entry.updated_at));
   return hits.slice(0, limit);
+}
+
+/**
+ * Entity boost with hub dampening: score *= 1 + 0.5 / (1 + 0.001 * (n - 1)^2),
+ * n = live memories mentioning the entity. A rare entity gives almost the full
+ * +50%; one mentioned by hundreds of memories says little about relevance.
+ * A memory naming several of the entities takes the strongest boost.
+ * n counts only memories visible from the caller's project (same filter as
+ * searchEntries), so another project's hub never dampens this one's boost.
+ */
+export function entityBoost(n: number): number {
+  return 1 + 0.5 / (1 + 0.001 * Math.max(0, n - 1) ** 2);
+}
+
+function applyEntityBoost(hits: SearchHit[], entityIds: number[], projectId?: number) {
+  const ents = [...new Set(entityIds)];
+  const eph = ents.map(() => "?").join(",");
+  const visible = projectId === undefined ? "" : "AND (e.scope != 'project' OR e.project_id = ?)";
+  const counts = new Map<number, number>();
+  for (const r of db
+    .prepare(
+      `SELECT ee.entity_id AS id, COUNT(*) AS n FROM entry_entities ee JOIN entries e ON e.id = ee.entry_id
+       WHERE ee.entity_id IN (${eph}) AND e.deleted_at IS NULL AND ${ACTIVE_SQL("e")} ${visible} GROUP BY ee.entity_id`,
+    )
+    .all(...ents, ...(projectId === undefined ? [] : [projectId])))
+    counts.set(Number(r.id), Number(r.n));
+  const ids = hits.map((h) => h.entry.id);
+  const best = new Map<number, number>();
+  for (const r of db
+    .prepare(`SELECT entry_id, entity_id FROM entry_entities WHERE entity_id IN (${eph}) AND entry_id IN (${ids.map(() => "?").join(",")})`)
+    .all(...ents, ...ids)) {
+    const f = entityBoost(counts.get(Number(r.entity_id)) ?? 1);
+    const id = Number(r.entry_id);
+    best.set(id, Math.max(best.get(id) ?? 1, f));
+  }
+  for (const h of hits) h.score *= best.get(h.entry.id) ?? 1;
 }
 
 export interface TurnHit {

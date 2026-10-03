@@ -7,8 +7,23 @@ function int(name: string, fallback: number): number {
   return Number.isFinite(n) && n > 0 ? n : fallback;
 }
 
+/** IANA zone for dates the LLM writes (TURN DATE); invalid names fall back to UTC. */
+function zone(name: string): string {
+  const raw = process.env[name]?.trim();
+  if (!raw) return "UTC";
+  try {
+    new Intl.DateTimeFormat("en-CA", { timeZone: raw });
+    return raw;
+  } catch {
+    console.warn(`[config] ${name}=${raw} is not a known time zone; using UTC`);
+    return "UTC";
+  }
+}
+
 export const config = {
   port: int("PORT", 8765),
+  /** Users' local time zone, so "yesterday" at 01:00 KST resolves to the right day. */
+  timezone: zone("TIMEZONE"),
   host: process.env.HOST ?? "0.0.0.0",
   dataDir: process.env.DATA_DIR ?? path.resolve("data"),
   webDir: process.env.WEB_DIR ?? path.resolve("../web/dist"),
@@ -49,6 +64,8 @@ export const config = {
     maxEntries: int("REVIEW_MAX_ENTRIES", 2000),
     /** No use and no edit for this many days → listed as stale. */
     staleDays: int("REVIEW_STALE_DAYS", 60),
+    /** Propose a review of each scope with changes at most every this many days (0 = off). Never applies anything. */
+    everyDays: int("REVIEW_EVERY_DAYS", 0),
   },
 };
 

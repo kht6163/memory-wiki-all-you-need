@@ -1,7 +1,7 @@
 import { config, llmEnabled } from "./config.ts";
 import { db, type Entry } from "./db.ts";
 import { ENTITY_KINDS, type EntityInput } from "./entities.ts";
-import { addLink, entitiesOf, finishGraphJob, isLinkType, listEntities, saveGraphProgress, type GraphJob } from "./graph.ts";
+import { addLink, entitiesOf, finishGraphJob, isGraphJobCancelled, isLinkType, runningGraphJobs, listEntities, saveGraphProgress, type GraphJob } from "./graph.ts";
 import { chatJson } from "./llm.ts";
 import { getEntry, getProject, updateEntry } from "./store.ts";
 
@@ -68,6 +68,7 @@ async function runBackfill(job: GraphJob, between: () => Promise<void>) {
 
   for (const [i, batch] of chunks.entries()) {
     if (i > 0) await between();
+    if (isGraphJobCancelled(job.id)) return;
     try {
       const known = listEntities({ limit: 150 }).map((n) => `${n.name} (${n.kind})`);
       const { data } = await chatJson([
@@ -77,6 +78,8 @@ async function runBackfill(job: GraphJob, between: () => Promise<void>) {
           content: ["KNOWN ENTITIES:", known.join(", ") || "(none yet)", "", "MEMORIES:", batch.map(fmt).join("\n")].join("\n"),
         },
       ]);
+      // Cancelled while the LLM was answering: write nothing.
+      if (isGraphJobCancelled(job.id)) return;
       const items = Array.isArray((data as { memories?: unknown })?.memories) ? ((data as { memories: Record<string, unknown>[] }).memories) : [];
       const ids = new Set(batch.map((e) => e.id));
       for (const it of items) {
@@ -118,6 +121,7 @@ export async function processGraphJob(job: GraphJob, between: () => Promise<void
     console.error(`[graph] job ${job.id} failed:`, (err as Error).message);
     finishGraphJob(job.id, "error", job.result, (err as Error).message);
   } finally {
+    runningGraphJobs.delete(job.id);
     db.prepare(`UPDATE graph_jobs SET result = json_set(COALESCE(result, '{}'), '$.ms', ?) WHERE id = ? AND status IN ('done','error','skipped')`).run(
       Date.now() - started,
       job.id,

@@ -14,7 +14,7 @@ import {
   type Scope,
   type Source,
 } from "./db.ts";
-import { findSecrets } from "./secrets.ts";
+import { findSecrets, redactSecrets } from "./secrets.ts";
 
 export class HttpError extends Error {
   status: number;
@@ -68,12 +68,39 @@ export function listProjects(): (Project & { entry_count: number; turn_count: nu
     .map((r) => ({ ...rowToProject(r), entry_count: Number(r.entry_count), turn_count: Number(r.turn_count) }));
 }
 
+/** Max length of a project description (it is injected into every prompt block). */
+export const PROJECT_DESCRIPTION_MAX = 500;
+
+/**
+ * The description as it may reach a prompt. updateProject bounds and scans new writes, but rows
+ * written before that check (or straight to the DB) may be long or hold credentials, so every
+ * reader goes through this: secrets redacted first (so a cut cannot split one), then capped.
+ */
+export function promptDescription(p: Pick<Project, "description">): string {
+  return redactSecrets((p.description ?? "").trim()).slice(0, PROJECT_DESCRIPTION_MAX).trim();
+}
+
+/** "name (key) — description" for LLM prompts; the description is cut to `max` characters. */
+export function projectLabel(p: Project, max = 300): string {
+  const d = promptDescription(p).replace(/\s+/g, " ");
+  if (!d) return `${p.name} (${p.key})`;
+  return `${p.name} (${p.key}) — ${d.length > max ? `${d.slice(0, max)}…` : d}`;
+}
+
 export function updateProject(id: number, patch: { name?: string; description?: string }): Project {
   const p = getProject(id);
   if (!p) throw new HttpError(404, "project not found");
+  let description = p.description;
+  if (patch.description != null) {
+    // Human-edited framing injected into the stable prompt block (G-005), so it is bounded and scanned.
+    description = String(patch.description).trim();
+    if (description.length > PROJECT_DESCRIPTION_MAX) throw new HttpError(400, `description is too long (max ${PROJECT_DESCRIPTION_MAX})`);
+    const secrets = findSecrets(description);
+    if (secrets.length) throw new HttpError(422, `description looks like it contains secrets: ${secrets.join(", ")}`);
+  }
   db.prepare(`UPDATE projects SET name = ?, description = ?, updated_at = ? WHERE id = ?`).run(
     patch.name?.trim() || p.name,
-    patch.description ?? p.description,
+    description,
     now(),
     id,
   );
@@ -82,6 +109,7 @@ export function updateProject(id: number, patch: { name?: string; description?: 
 
 export function deleteProject(id: number): void {
   db.prepare(`DELETE FROM projects WHERE id = ?`).run(id);
+  db.prepare(`DELETE FROM curation_policies WHERE project_id = ?`).run(id);
   pruneAllOrphanEntities();
 }
 
@@ -97,6 +125,9 @@ export interface EntryInput {
   pinned?: boolean;
   /** Graph: entity names (or {name, kind}) this memory mentions. */
   entities?: EntityInput[];
+  keywords?: string[];
+  /** YYYY-MM-DD, or null/"" for no end. */
+  valid_until?: string | null;
 }
 
 export interface WriteMeta {
@@ -116,6 +147,97 @@ function normalizeTags(tags: unknown): string[] {
   return [...new Set(tags.map((t) => String(t).trim()).filter(Boolean))].slice(0, 12);
 }
 
+/** Search-only words: deduplicated case-insensitively, each at most 60 chars, at most 16. */
+export function normalizeKeywords(words: unknown): string[] {
+  if (!Array.isArray(words)) return [];
+  const out = new Map<string, string>();
+  for (const w of words) {
+    const v = String(w ?? "").replace(/\s+/g, " ").trim().slice(0, 60);
+    if (v && !out.has(v.toLowerCase())) out.set(v.toLowerCase(), v);
+  }
+  return [...out.values()].slice(0, 16);
+}
+
+/** A calendar date YYYY-MM-DD, or null for "no end". Anything else is a 400. */
+export function normalizeValidUntil(v: unknown): string | null {
+  if (v == null || v === "") return null;
+  const s = String(v).trim();
+  const m = /^(\d{4})-(\d{2})-(\d{2})$/.exec(s);
+  const d = m ? new Date(`${s}T00:00:00Z`) : null;
+  if (!m || !d || Number.isNaN(d.getTime()) || d.toISOString().slice(0, 10) !== s) throw new HttpError(400, "valid_until must be a date (YYYY-MM-DD)");
+  return s;
+}
+
+/**
+ * SQL condition: the memory is current — not past its valid_until (UTC day)
+ * and not replaced by a live memory through a "supersedes" link. Inactive
+ * memories stay as history (search, graph, web) but are not injected.
+ */
+export const ACTIVE_SQL = (a = "e") =>
+  `((${a}.valid_until IS NULL OR ${a}.valid_until >= date('now')) AND NOT EXISTS (
+     SELECT 1 FROM entry_links sl JOIN entries sn ON sn.id = sl.from_id
+     WHERE sl.type = 'supersedes' AND sl.to_id = ${a}.id AND ${SUPERSEDER_OK(a)}))`;
+
+/** SQL condition: memory `a` is not retired by a "supersedes" link (expiry not considered). */
+export const NOT_SUPERSEDED_SQL = (a = "e") =>
+  `NOT EXISTS (SELECT 1 FROM entry_links sl JOIN entries sn ON sn.id = sl.from_id
+               WHERE sl.type = 'supersedes' AND sl.to_id = ${a}.id AND ${SUPERSEDER_OK(a)})`;
+
+/**
+ * When a "supersedes" link (sl, from sn) actually retires memory `a`: the
+ * replacement is live, visible wherever `a` is (global/user, or the same
+ * project), and not itself retired by `a` (a cycle of retiring links retires
+ * nobody; an informational retires = 0 link back does not count). addLink
+ * refuses the other cases; this also covers links made before those checks.
+ */
+const SUPERSEDER_OK = (a: string) =>
+  `sl.retires = 1 AND sn.deleted_at IS NULL AND (sn.scope IN ('global','user') OR sn.project_id = ${a}.project_id)
+   AND NOT EXISTS (SELECT 1 FROM entry_links rl WHERE rl.type = 'supersedes' AND rl.retires = 1 AND rl.from_id = ${a}.id AND rl.to_id = sn.id)`;
+
+export interface EntryState {
+  /** Live memory that replaces this one ("supersedes" link), if any. */
+  superseded_by: number | null;
+  /** valid_until is in the past (UTC). */
+  expired: boolean;
+}
+
+/** State of several memories at once (for lists). */
+export function entryStates(entries: Entry[]): Map<number, EntryState> {
+  const out = new Map<number, EntryState>();
+  if (!entries.length) return out;
+  const today = new Date().toISOString().slice(0, 10);
+  const by = new Map<number, number>();
+  for (let i = 0; i < entries.length; i += 500) {
+    const part = entries.slice(i, i + 500).map((e) => e.id);
+    for (const r of db
+      .prepare(
+        `SELECT e.id AS to_id, MAX(sl.from_id) AS from_id FROM entries e
+           JOIN entry_links sl ON sl.to_id = e.id AND sl.type = 'supersedes' JOIN entries sn ON sn.id = sl.from_id
+         WHERE e.id IN (${part.map(() => "?").join(",")}) AND ${SUPERSEDER_OK("e")} GROUP BY e.id`,
+      )
+      .all(...part))
+      by.set(Number(r.to_id), Number(r.from_id));
+  }
+  for (const e of entries) out.set(e.id, { superseded_by: by.get(e.id) ?? null, expired: e.valid_until != null && e.valid_until < today });
+  return out;
+}
+
+export function entryState(e: Entry): EntryState {
+  return entryStates([e]).get(e.id)!;
+}
+
+export const isActive = (e: Entry) => {
+  const s = entryState(e);
+  return !s.superseded_by && !s.expired;
+};
+
+/** Entries with their state, for API lists. */
+export function withStates<T extends Entry>(entries: T[]): (T & EntryState)[] {
+  const st = entryStates(entries);
+  return entries.map((e) => ({ ...e, ...st.get(e.id)! }));
+}
+
+const rawText = (list: unknown) => (Array.isArray(list) ? list.map((x) => String(x ?? "")).join("\n") : "");
 const entityText = (list: EntityInput[] | undefined) => (list ?? []).map((x) => (typeof x === "string" ? x : String(x?.name ?? ""))).join("\n");
 
 function guardContent(title: string, body: string, author: Source, category: Category, extra = "") {
@@ -132,8 +254,8 @@ function guardContent(title: string, body: string, author: Source, category: Cat
 
 function writeRevision(e: Entry, action: Revision["action"], meta: WriteMeta) {
   db.prepare(
-    `INSERT INTO revisions (entry_id, action, title, body, category, tags, pinned, author, turn_id, reason, entities)
-     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+    `INSERT INTO revisions (entry_id, action, title, body, category, tags, pinned, author, turn_id, reason, entities, keywords, valid_until)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
   ).run(
     e.id,
     action,
@@ -146,6 +268,8 @@ function writeRevision(e: Entry, action: Revision["action"], meta: WriteMeta) {
     meta.turnId ?? null,
     meta.reason ?? null,
     JSON.stringify(entityNamesOf(e.id)),
+    JSON.stringify(e.keywords),
+    e.valid_until,
   );
 }
 
@@ -158,14 +282,17 @@ export function createEntry(input: EntryInput, meta: WriteMeta): Entry {
   const category = normalizeCategory(input.category);
   const title = input.title?.trim() ?? "";
   const body = (input.body ?? "").trim();
-  guardContent(title, body, meta.author, category, `${(input.tags ?? []).join("\n")}\n${entityText(input.entities)}`);
+  const keywords = normalizeKeywords(input.keywords);
+  const validUntil = normalizeValidUntil(input.valid_until);
+  // Raw keywords are scanned: truncation could cut a secret below its detector's length.
+  guardContent(title, body, meta.author, category, `${(input.tags ?? []).join("\n")}\n${entityText(input.entities)}\n${rawText(input.keywords)}`);
   const projectId = input.scope === "project" ? input.project_id ?? null : null;
   if (input.scope === "project" && !projectId) throw new HttpError(400, "project scope needs project_id");
   const created = transaction(() => {
     const res = db
       .prepare(
-        `INSERT INTO entries (scope, project_id, category, title, body, tags, pinned, source)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+        `INSERT INTO entries (scope, project_id, category, title, body, tags, pinned, source, keywords, valid_until)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
       )
       .run(
         input.scope,
@@ -176,6 +303,8 @@ export function createEntry(input: EntryInput, meta: WriteMeta): Entry {
         JSON.stringify(normalizeTags(input.tags)),
         input.pinned ? 1 : 0,
         meta.author,
+        JSON.stringify(keywords),
+        validUntil,
       );
     const e = getEntry(Number(res.lastInsertRowid))!;
     if (input.entities?.length) writeEntryEntities(e.id, resolveEntityInputs(input.entities));
@@ -195,6 +324,28 @@ export interface EntryPatch {
   pinned?: boolean;
   /** Replaces the memory's entities when given. */
   entities?: EntityInput[];
+  keywords?: string[];
+  /** null or "" clears it. */
+  valid_until?: string | null;
+}
+
+export type ExactEditError = "edit_invalid" | "edit_not_found" | "edit_not_unique";
+
+/**
+ * Replace `old` with `next` in `body` only when `old` occurs exactly once
+ * (overlapping occurrences count). Line endings are normalized to LF in all
+ * three; nothing else is (no fuzzy matching). Empty `old` is invalid.
+ */
+export function replaceExactlyOnce(body: string, old: unknown, next: unknown): { body: string } | { error: ExactEditError } {
+  if (typeof old !== "string" || typeof next !== "string") return { error: "edit_invalid" };
+  const lf = (s: string) => s.replace(/\r\n/g, "\n");
+  const b = lf(body);
+  const o = lf(old);
+  if (!o) return { error: "edit_invalid" };
+  const at = b.indexOf(o);
+  if (at < 0) return { error: "edit_not_found" };
+  if (b.indexOf(o, at + 1) >= 0) return { error: "edit_not_unique" };
+  return { body: b.slice(0, at) + lf(next) + b.slice(at + o.length) };
 }
 
 export function updateEntry(id: number, patch: EntryPatch, meta: WriteMeta): Entry {
@@ -212,8 +363,10 @@ export function updateEntry(id: number, patch: EntryPatch, meta: WriteMeta): Ent
     body: patch.body !== undefined ? patch.body.trim() : cur.body,
     tags: patch.tags !== undefined ? normalizeTags(patch.tags) : cur.tags,
     pinned: patch.pinned !== undefined ? Boolean(patch.pinned) : cur.pinned,
+    keywords: patch.keywords !== undefined ? normalizeKeywords(patch.keywords) : cur.keywords,
+    valid_until: patch.valid_until !== undefined ? normalizeValidUntil(patch.valid_until) : cur.valid_until,
   };
-  guardContent(next.title, next.body, meta.author, next.category, `${next.tags.join("\n")}\n${entityText(patch.entities)}`);
+  guardContent(next.title, next.body, meta.author, next.category, `${next.tags.join("\n")}\n${entityText(patch.entities)}\n${patch.keywords !== undefined ? rawText(patch.keywords) : next.keywords.join("\n")}`);
   const unchanged =
     scope === cur.scope &&
     projectId === cur.project_id &&
@@ -221,6 +374,8 @@ export function updateEntry(id: number, patch: EntryPatch, meta: WriteMeta): Ent
     next.title === cur.title &&
     next.body === cur.body &&
     next.pinned === cur.pinned &&
+    next.valid_until === cur.valid_until &&
+    JSON.stringify(next.keywords) === JSON.stringify(cur.keywords) &&
     JSON.stringify(next.tags) === JSON.stringify(cur.tags);
   const sameNames = (a: string[], b: string[]) => a.length === b.length && a.every((x, i) => x === b[i]);
   return transaction(() => {
@@ -235,7 +390,7 @@ export function updateEntry(id: number, patch: EntryPatch, meta: WriteMeta): Ent
     }
     db.prepare(
       `UPDATE entries SET scope = ?, project_id = ?, category = ?, title = ?, body = ?, tags = ?, pinned = ?,
-         source = ?, updated_at = ? WHERE id = ?`,
+         keywords = ?, valid_until = ?, source = ?, updated_at = ? WHERE id = ?`,
     ).run(
       scope,
       projectId,
@@ -244,6 +399,8 @@ export function updateEntry(id: number, patch: EntryPatch, meta: WriteMeta): Ent
       next.body,
       JSON.stringify(next.tags),
       next.pinned ? 1 : 0,
+      JSON.stringify(next.keywords),
+      next.valid_until,
       meta.author,
       now(),
       id,
@@ -296,7 +453,12 @@ export function revertEntry(id: number, revisionId: number, meta: WriteMeta): En
   if (cur.deleted_at) restoreEntry(id, meta);
   return updateEntry(
     id,
-    { title: r.title, body: r.body, category: r.category, tags: r.tags, pinned: r.pinned, ...(r.entities ? { entities: r.entities } : {}) },
+    {
+      title: r.title, body: r.body, category: r.category, tags: r.tags, pinned: r.pinned,
+      ...(r.entities ? { entities: r.entities } : {}),
+      // Revisions from before v0.6.0 have no keywords/valid_until: keep the current ones.
+      ...(r.keywords ? { keywords: r.keywords, valid_until: r.valid_until } : {}),
+    },
     { ...meta, reason: meta.reason ?? `revision #${revisionId} 로 되돌림` },
   );
 }
@@ -310,6 +472,8 @@ export interface EntryFilter {
   projectId?: number;
   category?: string;
   deleted?: boolean;
+  /** Only current memories (see ACTIVE_SQL). */
+  activeOnly?: boolean;
   limit?: number;
 }
 
@@ -328,6 +492,7 @@ export function listEntries(f: EntryFilter = {}): Entry[] {
     where.push("category = ?");
     args.push(f.category);
   }
+  if (f.activeOnly) where.push(ACTIVE_SQL("entries"));
   args.push(f.limit ?? 1000);
   return db
     .prepare(
@@ -346,7 +511,7 @@ export function listEntries(f: EntryFilter = {}): Entry[] {
 const USAGE_DAY = `CASE WHEN substr(IFNULL(u.last_used_at, ''), 1, 10) < date('now') THEN substr(IFNULL(u.last_used_at, ''), 1, 10) ELSE IFNULL(u.rank_day, '') END`;
 
 /** Entries visible from a project: global + user + that project's own. */
-export function visibleEntries(projectId: number | null): Entry[] {
+export function visibleEntries(projectId: number | null, opts: { activeOnly?: boolean } = {}): Entry[] {
   // Recently written OR recently used first, so a memory that keeps helping
   // stays in the stable block even if nobody edits it. Usage only counts by
   // DAY, and a use only counts from the next day on (see USAGE_DAY): recall
@@ -356,7 +521,7 @@ export function visibleEntries(projectId: number | null): Entry[] {
   return db
     .prepare(
       `SELECT e.* FROM entries e LEFT JOIN entry_usage u ON u.entry_id = e.id
-       WHERE e.deleted_at IS NULL AND (e.scope IN ('global','user') OR e.project_id = ?)
+       WHERE e.deleted_at IS NULL AND (e.scope IN ('global','user') OR e.project_id = ?) ${opts.activeOnly ? `AND ${ACTIVE_SQL("e")}` : ""}
        ORDER BY e.pinned DESC, MAX(substr(e.updated_at, 1, 10), ${USAGE_DAY}) DESC, e.updated_at DESC`,
     )
     .all(projectId ?? -1)
@@ -442,6 +607,60 @@ export function usageOf(entryId: number): Usage {
   };
 }
 
+// ------------------------------------------------------- turn provenance
+
+export type ProvenanceKind = "add" | "update" | "confirm" | "duplicate";
+
+export interface Provenance {
+  /** Distinct turns that added, updated, re-stated or confirmed the memory. */
+  count: number;
+  last_at: string | null;
+  recent: { turn_id: number; kind: ProvenanceKind; created_at: string; session_id: string | null }[];
+}
+
+/** Record that a turn added, updated, re-stated (exact duplicate) or confirmed a memory. Never touches the memory itself. */
+export function recordEntryTurn(entryId: number, turnId: number, kind: ProvenanceKind) {
+  db.prepare(`INSERT OR IGNORE INTO entry_turns (entry_id, turn_id, kind, created_at) VALUES (?, ?, ?, ?)`).run(entryId, turnId, kind, now());
+}
+
+export function provenanceOf(entryId: number, limit = 10): Provenance {
+  const agg = db.prepare(`SELECT COUNT(DISTINCT turn_id) AS n, MAX(created_at) AS last FROM entry_turns WHERE entry_id = ?`).get(entryId);
+  const recent = db
+    .prepare(
+      `SELECT et.turn_id, et.kind, et.created_at, t.session_id FROM entry_turns et LEFT JOIN turns t ON t.id = et.turn_id
+       WHERE et.entry_id = ? ORDER BY et.created_at DESC, et.turn_id DESC LIMIT ?`,
+    )
+    .all(entryId, limit)
+    .map((r) => ({
+      turn_id: Number(r.turn_id),
+      kind: String(r.kind) as ProvenanceKind,
+      created_at: String(r.created_at),
+      session_id: r.session_id == null ? null : String(r.session_id),
+    }));
+  return { count: Number(agg?.n ?? 0), last_at: agg?.last == null ? null : String(agg.last), recent };
+}
+
+/**
+ * Distinct turns that reaffirmed the memory — confirmed it, re-stated it
+ * (exact duplicate) or corrected it. A review signal; "add" does not count.
+ */
+export function confirmedTurns(entryId: number): number {
+  const r = db
+    .prepare(`SELECT COUNT(DISTINCT turn_id) AS n FROM entry_turns WHERE entry_id = ? AND kind IN ('confirm','duplicate','update')`)
+    .get(entryId);
+  return Number(r?.n ?? 0);
+}
+
+/**
+ * When confirm tracking began: the earliest "confirm"/"duplicate" row (the
+ * migration backfill only writes add/update, so these exist only for turns
+ * curated since the upgrade). Null while nothing has been tracked yet.
+ */
+export function confirmTrackingSince(): string | null {
+  const r = db.prepare(`SELECT MIN(created_at) AS t FROM entry_turns WHERE kind IN ('confirm','duplicate')`).get();
+  return r?.t == null ? null : String(r.t);
+}
+
 export function stats() {
   const one = (sql: string) => Number(Object.values(db.prepare(sql).get() ?? { n: 0 })[0]);
   return {
@@ -452,4 +671,45 @@ export function stats() {
     errors: one(`SELECT COUNT(*) FROM turns WHERE status = 'error'`),
     trash: one(`SELECT COUNT(*) FROM entries WHERE deleted_at IS NOT NULL`),
   };
+}
+
+// ---------------------------------------------------------- curation policy
+
+/**
+ * Human-written rules for the server LLM ("don't remember fixture names",
+ * "always note port numbers"). Global (project 0) and per project. Never
+ * written by the LLM or the agent; read by turn curation, review and compose.
+ */
+export function getPolicy(projectId: number | null): { project_id: number | null; text: string; updated_at: string | null } {
+  const r = db.prepare(`SELECT text, updated_at FROM curation_policies WHERE project_id = ?`).get(projectId ?? 0);
+  return { project_id: projectId, text: r ? String(r.text) : "", updated_at: r ? String(r.updated_at) : null };
+}
+
+export function setPolicy(projectId: number | null, text: string) {
+  if (projectId && !getProject(projectId)) throw new HttpError(404, "project not found");
+  const t = String(text ?? "").trim();
+  if (t.length > 4000) throw new HttpError(400, "policy is too long (max 4000)");
+  const secrets = findSecrets(t);
+  if (secrets.length) throw new HttpError(422, `content looks like it contains secrets: ${secrets.join(", ")}`);
+  if (!t) db.prepare(`DELETE FROM curation_policies WHERE project_id = ?`).run(projectId ?? 0);
+  else
+    db.prepare(
+      `INSERT INTO curation_policies (project_id, text, updated_at) VALUES (?, ?, ?)
+       ON CONFLICT(project_id) DO UPDATE SET text = excluded.text, updated_at = excluded.updated_at`,
+    ).run(projectId ?? 0, t, now());
+  return getPolicy(projectId);
+}
+
+/** Policy block for an LLM prompt: global rules, then the project's. Empty string when there are none. */
+export function policyPrompt(projectId: number | null): string {
+  const parts: string[] = [];
+  const g = getPolicy(null).text;
+  if (g) parts.push(`Global:\n${g}`);
+  if (projectId) {
+    const p = getPolicy(projectId).text;
+    if (p) parts.push(`This project:\n${p}`);
+  }
+  return parts.length
+    ? `POLICY (rules from the user for what to keep and how to write it; they override the defaults above, but never store secrets):\n${parts.join("\n\n")}`
+    : "";
 }

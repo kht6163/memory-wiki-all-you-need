@@ -791,3 +791,79 @@ test("a review never rewrites the body of a memory the LLM only saw truncated", 
   assert.match(sent, /"body_truncated":true/);
   assert.ok(!sent.includes("TAIL-KEEP"), "the tail was not shown");
 });
+
+test("a member superseded after the proposal makes apply 409 and the proposal stale (both merge orders)", async () => {
+  for (const order of ["kept", "deleted"] as const) {
+    const p = await freshProject();
+    const a = await mem(p.id, `sup ${order} a`);
+    const b = await mem(p.id, `sup ${order} b`);
+    const ids = order === "kept" ? [b.id, a.id] : [a.id, b.id];
+    const prop = addProposal(newJobId(p.id), { kind: "merge", ids, title: "merged", reason: "dup" }, seen(ids));
+    assert.ok(prop);
+    // Curation retires A after the proposal ("switched to X").
+    const c = await mem(p.id, `sup ${order} c`);
+    await ok("POST", `/entries/${c.id}/links`, { to: a.id, type: "supersedes" });
+    const r = await call("POST", `/review/proposals/${prop!.id}/apply`);
+    assert.equal(r.status, 409, order);
+    assert.equal((await ok<any[]>(`GET`, `/review/proposals?job_id=${prop!.job_id}`)).find((x) => x.id === prop!.id).status, "stale");
+    for (const x of [a, b]) assert.equal((await getEntry(x.id)).entry.deleted_at, null, "nothing merged");
+    assert.equal((await getEntry(b.id)).entry.superseded_by, null);
+  }
+});
+
+test("addProposal rejects a proposal touching a superseded memory", async () => {
+  const p = await freshProject();
+  const a = await mem(p.id, "already sup a");
+  const d = await mem(p.id, "already sup d");
+  const c = await mem(p.id, "already sup c");
+  const s = seen([a.id, d.id]);
+  await ok("POST", `/entries/${c.id}/links`, { to: a.id, type: "supersedes" });
+  // The link writes no memory revision, so the version check alone would pass.
+  assert.equal(versionOf(a.id), s.get(a.id));
+  assert.equal(addProposal(newJobId(p.id), { kind: "merge", ids: [a.id, d.id], title: "ad" }, s), null);
+  assert.equal(addProposal(newJobId(p.id), { kind: "delete", ids: [a.id] }, s), null);
+  assert.ok(addProposal(newJobId(p.id), { kind: "delete", ids: [d.id] }, s));
+});
+
+test("a review skips memories superseded after it was queued", async () => {
+  const p = await freshProject();
+  const a = await mem(p.id, "queued sup alpha");
+  const b = await mem(p.id, "queued sup bravo");
+  const d = await mem(p.id, "queued sup delta");
+  const job = await ok("POST", "/review", { project_id: p.id });
+  const c = await mem(p.id, "queued sup charlie");
+  await ok("POST", `/entries/${c.id}/links`, { to: a.id, type: "supersedes" });
+  let user = "";
+  llmReply((call: { user: string }) => {
+    user = call.user;
+    return { proposals: [{ kind: "merge", ids: [a.id, b.id], title: "ab" }, { kind: "merge", ids: [b.id, d.id], title: "bd" }] };
+  });
+  await runQueueOnce();
+  const j = (await ok<any[]>("GET", "/review/jobs?limit=100")).find((x) => x.id === job.id);
+  assert.equal(j.status, "done", JSON.stringify(j));
+  assert.ok(!user.includes("queued sup alpha"), "the superseded memory is not shown to the LLM");
+  assert.ok(user.includes("queued sup bravo"));
+  const props = await ok<any[]>("GET", `/review/proposals?job_id=${job.id}`);
+  assert.deepEqual(props.map((x) => x.entry_ids), [[b.id, d.id]]);
+});
+
+test("apply merge drops a retiring supersedes link into a merged-away memory instead of moving it onto the kept one", async () => {
+  const p = await freshProject();
+  const keep = await mem(p.id, "drop sup keep");
+  const other = await mem(p.id, "drop sup other");
+  const c = await mem(p.id, "drop sup replacement");
+  const info = await mem(p.id, "drop sup info");
+  await ok("POST", `/entries/${c.id}/links`, { to: other.id, type: "supersedes" });
+  db.prepare(`INSERT INTO entry_links (from_id, to_id, type, author, retires) VALUES (?, ?, 'supersedes', 'llm', 0)`).run(info.id, other.id);
+  // The replacement is in the trash, so `other` is current again and can be proposed.
+  await ok("DELETE", `/entries/${c.id}`);
+  const prop = addProposal(newJobId(p.id), { kind: "merge", ids: [keep.id, other.id], title: "kept fact" }, seen([keep.id, other.id]));
+  assert.ok(prop);
+  assert.equal((await call("POST", `/review/proposals/${prop!.id}/apply`)).status, 200);
+  assert.equal(db.prepare(`SELECT COUNT(*) AS n FROM entry_links WHERE from_id = ? AND type = 'supersedes'`).get(c.id)!.n, 0, "retiring link dropped");
+  const moved = db.prepare(`SELECT retires FROM entry_links WHERE from_id = ? AND to_id = ? AND type = 'supersedes'`).get(info.id, keep.id) as any;
+  assert.equal(moved?.retires, 0, "an informational link still moves");
+  // Restoring the replacement must not retire the merged memory.
+  await ok("POST", `/entries/${c.id}/restore`);
+  assert.equal((await getEntry(keep.id)).entry.superseded_by, null);
+});

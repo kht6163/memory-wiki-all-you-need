@@ -1,9 +1,9 @@
-import { config } from "./config.ts";
+import { config, llmEnabled } from "./config.ts";
 import { CATEGORIES, db, now, rowToEntry, transaction, type Entry } from "./db.ts";
 import { entityNamesOf } from "./entities.ts";
 import { moveLinks } from "./graph.ts";
 import { findSecrets } from "./secrets.ts";
-import { HttpError, deleteEntry, getEntry, getProject, updateEntry } from "./store.ts";
+import { HttpError, NOT_SUPERSEDED_SQL, deleteEntry, entryState, getEntry, getProject, replaceExactlyOnce, updateEntry } from "./store.ts";
 
 // Memory review: an LLM pass over existing memories (cluster by cluster) that
 // PROPOSES merges, fixes, deletions and flags conflicts. Proposals wait for a
@@ -15,8 +15,9 @@ export type ProposalStatus = "pending" | "applied" | "dismissed" | "stale";
 export interface ReviewJob {
   id: number;
   project_id: number | null;
-  status: "pending" | "processing" | "done" | "skipped" | "error";
-  payload: { entries: number[] };
+  status: "pending" | "processing" | "done" | "skipped" | "error" | "cancelled";
+  /** scheduled: queued by scheduleDueReviews (REVIEW_EVERY_DAYS), not by a person. */
+  payload: { entries: number[]; scheduled?: boolean };
   result: { done?: number[]; chunks?: number; proposals?: number; ms?: number } | null;
   error: string | null;
   created_at: string;
@@ -29,7 +30,15 @@ export interface Proposal {
   kind: ProposalKind;
   entry_ids: number[];
   /** merge/update: the new title/body/category; snap: each memory's latest revision id when the LLM read it. */
-  data: { title?: string; body?: string; category?: string; note?: string; snap: Record<string, string> };
+  data: {
+    title?: string;
+    body?: string;
+    category?: string;
+    note?: string;
+    /** update only: replace this exact passage (occurring once in the body) instead of rewriting the body. */
+    edit?: { old: string; new: string };
+    snap: Record<string, string>;
+  };
   reason: string;
   status: ProposalStatus;
   created_at: string;
@@ -68,7 +77,12 @@ export const inScope = (e: Entry, projectId: number | null) => (projectId ? e.pr
 export function reviewScopeEntries(projectId: number | null): Entry[] {
   const where = projectId ? "e.project_id = ?" : "e.scope IN ('global','user')";
   return db
-    .prepare(`SELECT e.* FROM entries e WHERE e.deleted_at IS NULL AND e.category != 'standing' AND ${where} ORDER BY e.id`)
+    // Superseded memories are history kept on purpose; expired ones stay in (the LLM may propose deleting them).
+    .prepare(
+      `SELECT e.* FROM entries e WHERE e.deleted_at IS NULL AND e.category != 'standing' AND ${where}
+         AND ${NOT_SUPERSEDED_SQL("e")}
+       ORDER BY e.id`,
+    )
     .all(...(projectId ? [projectId] : []))
     .map(rowToEntry);
 }
@@ -140,7 +154,7 @@ export function onReviewJobQueued(fn: () => void) {
   wakeWorker = fn;
 }
 
-export function enqueueReview(projectId: number | null): ReviewJob {
+export function enqueueReview(projectId: number | null, opts: { scheduled?: boolean } = {}): ReviewJob {
   if (projectId && !getProject(projectId)) throw new HttpError(404, "project not found");
   if (db.prepare(`SELECT 1 FROM review_jobs WHERE status IN ('pending','processing') AND IFNULL(project_id, 0) = ?`).get(projectId ?? 0))
     throw new HttpError(409, "a review of this scope is already running");
@@ -152,9 +166,52 @@ export function enqueueReview(projectId: number | null): ReviewJob {
     .map((e) => e.id)
     .sort((a, b) => a - b);
   if (ids.length < 2) throw new HttpError(400, "not enough memories to review");
-  const res = db.prepare(`INSERT INTO review_jobs (project_id, payload) VALUES (?, ?)`).run(projectId, JSON.stringify({ entries: ids }));
+  const res = db.prepare(`INSERT INTO review_jobs (project_id, payload) VALUES (?, ?)`).run(projectId, JSON.stringify({ entries: ids, ...(opts.scheduled ? { scheduled: true } : {}) }));
   wakeWorker?.();
   return getReviewJob(Number(res.lastInsertRowid))!;
+}
+
+/**
+ * Scheduled review (REVIEW_EVERY_DAYS): queue a review of every scope — global +
+ * user, and each project with memories — whose last review is older than the
+ * period and whose memories changed since. Only enqueues; the worker loop runs
+ * it like any other job and its proposals still wait for a person.
+ * Off without an LLM: the job would only end 'skipped' and still restart the scope's period.
+ */
+export function scheduleDueReviews(at = new Date(), everyDays = config.review.everyDays): ReviewJob[] {
+  if (!(everyDays > 0) || !llmEnabled()) return [];
+  const cutoff = new Date(at.getTime() - everyDays * 86_400_000).toISOString();
+  const scopes: (number | null)[] = [
+    null,
+    ...db
+      .prepare(`SELECT DISTINCT project_id FROM entries WHERE project_id IS NOT NULL AND deleted_at IS NULL AND category != 'standing' ORDER BY project_id`)
+      .all()
+      .map((r) => Number(r.project_id)),
+  ];
+  const created: ReviewJob[] = [];
+  for (const pid of scopes) {
+    if (db.prepare(`SELECT 1 FROM review_jobs WHERE status IN ('pending','processing') AND IFNULL(project_id, 0) = ?`).get(pid ?? 0)) continue;
+    // Only a review that completed counts: an errored, cancelled or skipped run is tried
+    // again on the next (hourly) check instead of silencing the scope for a whole period.
+    // A run that failed or was skipped is retried; one a person cancelled counts (they chose to stop it).
+    const last = db.prepare(`SELECT MAX(created_at) AS t FROM review_jobs WHERE status IN ('done','cancelled') AND IFNULL(project_id, 0) = ?`).get(pid ?? 0)?.t;
+    if (last != null) {
+      if (String(last) > cutoff) continue;
+      // A deletion bumps updated_at too, so it counts as a change.
+      const where = pid ? "project_id = ?" : "scope IN ('global','user')";
+      const changed = db
+        .prepare(`SELECT 1 FROM entries WHERE category != 'standing' AND ${where} AND updated_at > ? LIMIT 1`)
+        .get(...(pid ? [pid] : []), String(last));
+      if (!changed) continue;
+    }
+    try {
+      created.push(enqueueReview(pid, { scheduled: true }));
+    } catch (err) {
+      // Too few memories in this scope (400) or a race with a person starting one (409): try next time.
+      if (!(err instanceof HttpError)) throw err;
+    }
+  }
+  return created;
 }
 
 export function getReviewJob(id: number): ReviewJob | null {
@@ -169,24 +226,43 @@ export function listReviewJobs(f: { projectId?: number | null; limit?: number } 
     .all(...args, f.limit ?? 20)
     .map((r) => ({ ...toJob(r), project_name: r.project_name == null ? null : String(r.project_name) }));
 }
+/** Jobs the worker holds right now (a cancelled one stays here until its in-flight call returns). */
+export const runningReviewJobs = new Set<number>();
 export function claimReviewJob(): ReviewJob | null {
   const r = db.prepare(`SELECT id FROM review_jobs WHERE status = 'pending' ORDER BY id LIMIT 1`).get();
   if (!r) return null;
   const res = db.prepare(`UPDATE review_jobs SET status = 'processing' WHERE id = ? AND status = 'pending'`).run(Number(r.id));
-  return res.changes ? getReviewJob(Number(r.id)) : null;
+  if (!res.changes) return null;
+  runningReviewJobs.add(Number(r.id));
+  return getReviewJob(Number(r.id));
 }
 export function saveReviewProgress(id: number, result: unknown) {
   db.prepare(`UPDATE review_jobs SET result = ? WHERE id = ?`).run(JSON.stringify(result), id);
 }
 export function finishReviewJob(id: number, status: ReviewJob["status"], result: unknown, error: string | null = null) {
-  db.prepare(`UPDATE review_jobs SET status = ?, result = ?, error = ?, processed_at = ? WHERE id = ?`).run(
+  db.prepare(`UPDATE review_jobs SET status = ?, result = ?, error = ?, processed_at = ? WHERE id = ? AND status = 'processing'`).run(
     status, result == null ? null : JSON.stringify(result), error, now(), id,
   );
+}
+/** Stop a queued or running review before its next batch (see cancelJob in wiki.ts). Proposals made so far stay. */
+export function cancelReviewJob(id: number): ReviewJob {
+  const res = db.prepare(`UPDATE review_jobs SET status = 'cancelled', processed_at = ? WHERE id = ? AND status IN ('pending','processing')`).run(now(), id);
+  if (!res.changes) {
+    if (!getReviewJob(id)) throw new HttpError(404, "job not found");
+    throw new HttpError(409, "only queued or running jobs can be cancelled");
+  }
+  return getReviewJob(id)!;
+}
+export function isReviewJobCancelled(id: number): boolean {
+  return getReviewJob(id)?.status === "cancelled";
 }
 export function retryReviewJob(id: number): ReviewJob {
   const j = getReviewJob(id);
   if (!j) throw new HttpError(404, "job not found");
-  if (j.status !== "error") throw new HttpError(409, "only failed jobs can be retried");
+  if (j.status !== "error" && j.status !== "cancelled") throw new HttpError(409, "only failed or cancelled jobs can be retried");
+  if (db.prepare(`SELECT 1 FROM review_jobs WHERE status IN ('pending','processing') AND IFNULL(project_id, 0) = ? AND id != ?`).get(j.project_id ?? 0, id))
+    throw new HttpError(409, "a review of this scope is already running");
+  if (runningReviewJobs.has(id)) throw new HttpError(409, "job is still stopping; try again in a moment");
   db.prepare(`UPDATE review_jobs SET status = 'pending', error = NULL WHERE id = ?`).run(id);
   wakeWorker?.();
   return getReviewJob(id)!;
@@ -219,6 +295,9 @@ export function addProposal(jobId: number, raw: Record<string, unknown>, seen: M
     .map((id) => getEntry(id))
     .filter((e): e is Entry => Boolean(e && !e.deleted_at && e.category !== "standing" && inScope(e, job?.project_id ?? null)));
   if (entries.length !== ids.length) return null;
+  // Superseded since the LLM saw it (a link writes no memory revision, so the version check misses it):
+  // it is history now, and a merge would hide or delete live content.
+  if (entries.some((e) => entryState(e).superseded_by)) return null;
   if ((kind === "merge" || kind === "conflict") && ids.length < 2) return null;
   if ((kind === "update" || kind === "delete") && ids.length !== 1) return null;
   // A merge keeps one memory, so all of them must live in the same place.
@@ -246,11 +325,23 @@ export function addProposal(jobId: number, raw: Record<string, unknown>, seen: M
       // In final order (a pinned member may have been moved first).
       data.body ??= [...new Set(ids.map((id) => entries.find((e) => e.id === id)!.body.trim()).filter(Boolean))].join("\n\n") || undefined;
     }
+    // Exact-substring edit: an "edit" decides the body; a full body next to it is ignored, and an
+    // edit that does not match exactly once is rejected outright (never falls back to the body —
+    // that body may come from a truncated view). Checked against the FULL current body.
+    let edited: string | undefined;
+    if (kind === "update" && raw.edit != null) {
+      const ed = raw.edit as Record<string, unknown>;
+      const r = typeof ed === "object" ? replaceExactlyOnce(entries[0].body, ed.old, ed.new) : null;
+      if (!r || "error" in r) return null;
+      edited = r.body;
+      delete data.body;
+      data.edit = { old: String(ed.old).replace(/\r\n/g, "\n"), new: String(ed.new).replace(/\r\n/g, "\n") };
+    }
     for (const k of ["title", "body", "category"] as const) if (data[k] === undefined) delete data[k];
     // Same limits the store enforces on apply, so an accepted proposal can actually be applied.
-    if ((data.body?.length ?? 0) > 20_000) return null;
-    if (findSecrets(`${data.title ?? ""}\n${data.body ?? ""}`).length) return null;
-    if (kind === "update" && data.title === undefined && data.body === undefined && data.category === undefined) return null;
+    if ((data.body?.length ?? 0) > 20_000 || (edited?.length ?? 0) > 20_000) return null;
+    if (findSecrets(`${data.title ?? ""}\n${data.body ?? ""}\n${data.edit?.new ?? ""}`).length) return null;
+    if (kind === "update" && data.title === undefined && data.body === undefined && data.category === undefined && data.edit === undefined) return null;
   }
   if (kind === "conflict" && raw.note != null) data.note = String(raw.note);
   // The same memories already have an open proposal of this kind: skip the duplicate.
@@ -304,7 +395,7 @@ export function listProposals(f: { status?: ProposalStatus; jobId?: number; proj
       ...p,
       entries: p.entry_ids.map((id) => {
         const e = getEntry(id);
-        return e ? { ...e, entities: entityNamesOf(id), changed: versionOf(id) !== p.data.snap[String(id)] } : null;
+        return e ? { ...e, entities: entityNamesOf(id), changed: versionOf(id) !== p.data.snap[String(id)] || entryState(e).superseded_by != null } : null;
       }),
     }));
 }
@@ -330,7 +421,10 @@ export function applyProposal(id: number): Proposal {
   if (!p) throw new HttpError(404, "proposal not found");
   if (p.status !== "pending") throw new HttpError(409, `proposal is already ${p.status}`);
   const entries = p.entry_ids.map((eid) => getEntry(eid));
-  const changed = entries.some((e, i) => !e || e.deleted_at || versionOf(p.entry_ids[i]) !== p.data.snap[String(p.entry_ids[i])]);
+  // Becoming superseded counts as a change too: versionOf (memory revisions) does not see a new link.
+  const changed = entries.some(
+    (e, i) => !e || e.deleted_at || versionOf(p.entry_ids[i]) !== p.data.snap[String(p.entry_ids[i])] || entryState(e).superseded_by != null,
+  );
   if (changed) {
     decide(id, "stale");
     throw new HttpError(409, "the memories changed since this was proposed; run the review again");
@@ -350,7 +444,16 @@ function applyInTransaction(p: Proposal, meta: { author: "llm"; reason: string }
   const id = p.id;
   transaction(() => {
     if (p.kind === "delete") deleteEntry(p.entry_ids[0], meta);
-    else if (p.kind === "update") updateEntry(p.entry_ids[0], { title: p.data.title, body: p.data.body, category: p.data.category }, meta);
+    else if (p.kind === "update") {
+      let body = p.data.body;
+      if (p.data.edit) {
+        // Re-check at apply time: the passage must still occur exactly once.
+        const r = replaceExactlyOnce(getEntry(p.entry_ids[0])!.body, p.data.edit.old, p.data.edit.new);
+        if ("error" in r) throw new HttpError(422, r.error === "edit_not_unique" ? "the edited passage now occurs more than once" : "the edited passage is no longer in the body");
+        body = r.body;
+      }
+      updateEntry(p.entry_ids[0], { title: p.data.title, body, category: p.data.category }, meta);
+    }
     else if (p.kind === "merge") {
       const [keep, ...rest] = p.entry_ids;
       // The kept memory gets the merged text, every entity of the group, and the others' links.
@@ -377,6 +480,8 @@ export function staleEntries(projectId: number | null, days = 60): (Entry & { la
     .prepare(
       `SELECT e.*, u.last_used_at FROM entries e LEFT JOIN entry_usage u ON u.entry_id = e.id
        WHERE e.deleted_at IS NULL AND e.category != 'standing' AND e.pinned = 0 AND ${where}
+         -- Superseded memories are never injected, so they always look unused; they are history, not stale.
+         AND ${NOT_SUPERSEDED_SQL("e")}
          AND e.updated_at < ? AND IFNULL(u.last_used_at, '') < ? AND IFNULL(u.shown_at, '') < ?
        ORDER BY MAX(e.updated_at, IFNULL(u.last_used_at, ''), IFNULL(u.shown_at, '')) LIMIT 200`,
     )
@@ -390,7 +495,7 @@ export function reviewScopeSummary(projectId: number | null) {
   const r = db
     .prepare(
       `SELECT COUNT(*) AS n, SUM(NOT EXISTS (SELECT 1 FROM entry_entities ee WHERE ee.entry_id = e.id)) AS unlinked
-       FROM entries e WHERE e.deleted_at IS NULL AND e.category != 'standing' AND ${where}`,
+       FROM entries e WHERE e.deleted_at IS NULL AND e.category != 'standing' AND ${where} AND ${NOT_SUPERSEDED_SQL("e")}`,
     )
     .get(...(projectId ? [projectId] : []));
   return { entries: Number(r?.n ?? 0), unlinked: Number(r?.unlinked ?? 0), staleDays: config.review.staleDays, maxEntries: config.review.maxEntries };

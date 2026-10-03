@@ -105,7 +105,7 @@ test("G-002: curation never shows standing to the LLM and cannot add, update or 
 
 test("G-002: applyMemoryOps with a standing id allowed is still rejected by the store", () => {
   const s = createEntry({ scope: "global", category: "standing", title: "ibis standing", body: "b" }, { author: "human" });
-  const applied = applyMemoryOps(
+  const { applied } = applyMemoryOps(
     [
       { op: "update", id: s.id, body: "changed by llm" },
       { op: "delete", id: s.id },

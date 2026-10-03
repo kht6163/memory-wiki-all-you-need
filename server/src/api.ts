@@ -18,6 +18,7 @@ import {
   recordShown,
   recordUsage,
   usageOf,
+  provenanceOf,
   restoreEntry,
   revertEntry,
   stats,
@@ -26,6 +27,11 @@ import {
   upsertProject,
   visibleEntries,
   type ProjectRef,
+  entryState,
+  entryStates,
+  getPolicy,
+  setPolicy,
+  withStates,
 } from "./store.ts";
 import { deleteTurn, enqueueTurn, getTurn, listTurns, retryTurn } from "./turns.ts";
 import { config, llmEnabled } from "./config.ts";
@@ -35,6 +41,7 @@ import {
   enqueueReview,
   listProposals,
   listReviewJobs,
+  cancelReviewJob,
   retryReviewJob,
   reviewScopeSummary,
   reviewStats,
@@ -57,9 +64,13 @@ import {
   mergeEntities,
   neighborhood,
   removeLink,
+  revertGraphRevision,
+  cancelGraphJob,
   retryGraphJob,
   updateEntity,
 } from "./graph.ts";
+import { dismissSimilarPair, similarEntities } from "./entity-similar.ts";
+import { listGraphRevisions } from "./graph-revisions.ts";
 import {
   backlinks,
   citedEntries,
@@ -70,10 +81,12 @@ import {
   getPageBySlug,
   listJobs,
   listPages,
+  lintWiki,
   missingLinks,
   pageRevisions,
   pagesCitingEntry,
   restorePage,
+  cancelJob,
   retryJob,
   revertPage,
   enqueueCompose,
@@ -146,10 +159,12 @@ api.get("/search", (c) => {
     category: c.req.query("category") || undefined,
     limit: num(c.req.query("limit")) ?? 20,
     allProjects: c.req.query("all") === "1",
+    inactive: c.req.query("inactive") === "1",
   });
   // via=agent: the memory_search tool (web searches do not count as use).
   if (c.req.query("via") === "agent") recordUsage(hits.map((h) => h.entry.id), "search");
-  return c.json(hits.map((h) => ({ ...h.entry, score: Math.round(h.score * 100) / 100 })));
+  const st = entryStates(hits.map((h) => h.entry));
+  return c.json(hits.map((h) => ({ ...h.entry, ...st.get(h.entry.id), score: Math.round(h.score * 100) / 100 })));
 });
 
 api.get("/session-search", (c) => {
@@ -220,6 +235,13 @@ api.post("/agent/memory", async (c) => {
 
 // ------------------------------------------------------------------ wiki
 
+/** Curation policy: human-written rules for the server LLM. project_id omitted/0 = global. */
+api.get("/policy", (c) => c.json(getPolicy(num(c.req.query("project_id")) || null)));
+api.put("/policy", async (c) => {
+  const b = await body<{ project_id?: number | null; text?: string }>(c);
+  return c.json(setPolicy(b.project_id || null, String(b.text ?? "")));
+});
+
 api.get("/meta", (c) => c.json({ categories: CATEGORIES, llm: llmEnabled() ? config.llm.model : null }));
 api.get("/stats", (c) => c.json({ ...stats(), ...wikiStats(), ...graphStats(), ...reviewStats() }));
 
@@ -237,27 +259,28 @@ api.delete("/projects/:id", (c) => {
 
 api.get("/entries", (c) =>
   c.json(
-    listEntries({
+    withStates(listEntries({
       scope: (c.req.query("scope") as Scope) || undefined,
       projectId: num(c.req.query("project_id")),
       category: c.req.query("category") || undefined,
       deleted: c.req.query("deleted") === "1",
       limit: num(c.req.query("limit")) ?? 1000,
-    }),
+    })),
   ),
 );
-api.get("/entries/visible", (c) => c.json(visibleEntries(num(c.req.query("project_id")) ?? null)));
+api.get("/entries/visible", (c) => c.json(withStates(visibleEntries(num(c.req.query("project_id")) ?? null))));
 api.get("/entries/:id", (c) => {
   const e = getEntry(idParam(c));
   if (!e) throw new HttpError(404, "entry not found");
   return c.json({
-    entry: e,
+    entry: { ...e, ...entryState(e) },
     project: e.project_id ? getProject(e.project_id) : null,
     revisions: listRevisions(e.id),
     citedBy: pagesCitingEntry(e.id),
     entities: entitiesOf(e.id),
     links: linksOf(e.id),
     usage: usageOf(e.id),
+    provenance: provenanceOf(e.id),
   });
 });
 api.post("/entries", async (c) => c.json(createEntry(await body(c), { author: "human" }), 201));
@@ -303,10 +326,17 @@ api.get("/graph/neighbors", (c) => {
 api.get("/entities", (c) =>
   c.json(listEntities({ q: c.req.query("q") || undefined, projectId: num(c.req.query("project_id")), limit: num(c.req.query("limit")) })),
 );
+// Registered before /entities/:id so "similar" is never read as an id.
+api.get("/entities/similar", (c) => c.json(similarEntities(Math.min(num(c.req.query("limit")) ?? 50, 500))));
+api.post("/entities/similar/dismiss", async (c) => {
+  const b = await body<{ a: number; b: number }>(c);
+  dismissSimilarPair(Number(b.a), Number(b.b));
+  return c.json({ ok: true });
+});
 api.get("/entities/:id", (c) => {
   const ent = getEntity(idParam(c));
   if (!ent) throw new HttpError(404, "entity not found");
-  const memories = entityEntries(ent.id).map((e) => ({ ...e, project_name: e.project_id ? getProject(e.project_id)?.name ?? null : null }));
+  const memories = withStates(entityEntries(ent.id)).map((e) => ({ ...e, project_name: e.project_id ? getProject(e.project_id)?.name ?? null : null }));
   return c.json({ entity: ent, memories });
 });
 api.patch("/entities/:id", async (c) => c.json(updateEntity(idParam(c), await body(c))));
@@ -325,6 +355,18 @@ api.post("/graph/backfill", async (c) => {
 });
 api.get("/graph/jobs", (c) => c.json(listGraphJobs(num(c.req.query("limit")) ?? 20)));
 api.post("/graph/jobs/:id/retry", (c) => c.json(retryGraphJob(idParam(c))));
+api.post("/graph/jobs/:id/cancel", (c) => c.json(cancelGraphJob(idParam(c))));
+/** Link and entity edit history, newest first (entity_id= / entry_id= narrow it). */
+api.get("/graph/revisions", (c) =>
+  c.json(
+    listGraphRevisions({
+      limit: Math.min(num(c.req.query("limit")) ?? 50, 500),
+      entityId: num(c.req.query("entity_id")),
+      entryId: num(c.req.query("entry_id")),
+    }),
+  ),
+);
+api.post("/graph/revisions/:id/revert", (c) => c.json(revertGraphRevision(idParam(c))));
 
 // ---------------------------------------------------------------- review
 
@@ -339,6 +381,7 @@ api.get("/review/jobs", (c) => {
 });
 api.get("/review/scope", (c) => c.json(reviewScopeSummary(num(c.req.query("project_id")) || null)));
 api.post("/review/jobs/:id/retry", (c) => c.json(retryReviewJob(idParam(c))));
+api.post("/review/jobs/:id/cancel", (c) => c.json(cancelReviewJob(idParam(c))));
 api.get("/review/proposals", (c) => {
   const pid = c.req.query("project_id");
   return c.json(
@@ -396,6 +439,7 @@ function wikiScope(c: Context): number | null {
 
 api.get("/wiki/pages", (c) => c.json(listPages(wikiScope(c), { deleted: c.req.query("deleted") === "1" })));
 api.get("/wiki/missing", (c) => c.json(missingLinks(wikiScope(c))));
+api.get("/wiki/lint", (c) => c.json(lintWiki(wikiScope(c))));
 api.get("/wiki/pages/:id", (c) => {
   const p = getPage(idParam(c));
   if (!p) throw new HttpError(404, "page not found");
@@ -404,7 +448,7 @@ api.get("/wiki/pages/:id", (c) => {
     project: p.project_id ? getProject(p.project_id) : null,
     revisions: pageRevisions(p.id),
     backlinks: backlinks(p),
-    cites: citedEntries(p),
+    cites: withStates(citedEntries(p)),
   });
 });
 api.get("/wiki/by-slug", (c) => {
@@ -517,3 +561,4 @@ api.post("/agent/wiki", async (c) => {
   return c.json({ action: b.mode === "append" ? "append" : "replace", page });
 });
 api.post("/wiki/jobs/:id/retry", (c) => c.json(retryJob(idParam(c))));
+api.post("/wiki/jobs/:id/cancel", (c) => c.json(cancelJob(idParam(c))));

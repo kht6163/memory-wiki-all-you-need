@@ -2,7 +2,7 @@ import { config } from "./config.ts";
 import { db, now, rowToEntry, transaction, type Entry, type Source } from "./db.ts";
 import { extractTerms } from "./search.ts";
 import { findSecrets } from "./secrets.ts";
-import { HttpError, getProject } from "./store.ts";
+import { HttpError, entryStates, getProject } from "./store.ts";
 
 // Wiki layer: long-form pages per project (project_id) or global (null).
 // Independent of memory: people and the agent write pages, and the LLM
@@ -40,7 +40,7 @@ export interface WikiJob {
   id: number;
   project_id: number | null;
   kind: WikiJobKind;
-  status: "pending" | "processing" | "done" | "skipped" | "error";
+  status: "pending" | "processing" | "done" | "skipped" | "error" | "cancelled";
   payload: ComposeJobPayload;
   first_at: string;
   run_after: string;
@@ -295,15 +295,120 @@ export function pagesCitingEntry(entryId: number): (Pick<WikiPage, "id" | "slug"
     .map((r) => ({ id: Number(r.id), slug: String(r.slug), title: String(r.title), project_id: r.project_id == null ? null : Number(r.project_id) }));
 }
 
-export function missingLinks(projectId: number | null): { from: string; to: string }[] {
+/** Links from live pages to slugs with no live page in the same wiki. */
+function unresolvedLinks(projectId: number | null): { from: PageRef; to: string }[] {
   return db
     .prepare(
-      `SELECT p.slug AS from_slug, l.to_slug FROM wiki_links l JOIN wiki_pages p ON p.id = l.page_id
+      `SELECT p.id, p.slug, p.title, l.to_slug FROM wiki_links l JOIN wiki_pages p ON p.id = l.page_id
        WHERE ${scopeWhere(projectId).replace("project_id", "p.project_id")} AND p.deleted_at IS NULL
-         AND NOT EXISTS (SELECT 1 FROM wiki_pages q WHERE q.slug = l.to_slug AND IFNULL(q.project_id, 0) = IFNULL(p.project_id, 0) AND q.deleted_at IS NULL)`,
+         AND NOT EXISTS (SELECT 1 FROM wiki_pages q WHERE q.slug = l.to_slug AND IFNULL(q.project_id, 0) = IFNULL(p.project_id, 0) AND q.deleted_at IS NULL)
+       ORDER BY l.to_slug, p.title COLLATE NOCASE`,
     )
     .all(...scopeArgs(projectId))
-    .map((r) => ({ from: String(r.from_slug), to: String(r.to_slug) }));
+    .map((r) => ({ from: toRef(r), to: String(r.to_slug) }));
+}
+
+export function missingLinks(projectId: number | null): { from: string; to: string }[] {
+  return unresolvedLinks(projectId).map((l) => ({ from: l.from.slug, to: l.to }));
+}
+
+// ------------------------------------------------------------------- lint
+
+export type PageRef = Pick<WikiPage, "id" | "slug" | "title">;
+const toRef = (r: Row): PageRef => ({ id: Number(r.id), slug: String(r.slug), title: String(r.title) });
+
+export type CitationState = "deleted" | "purged" | "superseded" | "expired";
+export interface WikiLint {
+  orphans: PageRef[];
+  missing: { slug: string; from: PageRef[] }[];
+  citations: { page: PageRef; entry_id: number; state: CitationState; superseded_by?: number }[];
+  empty: PageRef[];
+  counts: { orphans: number; missing: number; citations: number; empty: number };
+}
+
+/** Entry pages that are fine without inbound links. */
+const LINT_ROOTS = ["overview", "index"];
+/** Pages with less real text than this are reported as empty stubs. */
+const LINT_MIN_BODY = 40;
+
+/**
+ * Structural health of one wiki (project or global), no LLM: orphan pages,
+ * links to missing pages, citations of memories that are gone or history,
+ * and blank stubs. Only live pages count, as sources and as targets.
+ */
+export function lintWiki(projectId: number | null): WikiLint {
+  const scope = scopeWhere(projectId).replace("project_id", "p.project_id");
+  const args = scopeArgs(projectId);
+
+  // The linked-slug set is an uncorrelated subquery, built once per call. A
+  // correlated NOT EXISTS here rescans the wiki for every page (O(pages²);
+  // wiki_links has no to_slug index). Self-links don't count (l.to_slug <> q.slug).
+  const orphans = db
+    .prepare(
+      `SELECT p.id, p.slug, p.title FROM wiki_pages p
+       WHERE ${scope} AND p.deleted_at IS NULL AND p.slug NOT IN (${LINT_ROOTS.map(() => "?").join(",")})
+         AND p.slug NOT IN (SELECT l.to_slug FROM wiki_links l JOIN wiki_pages q ON q.id = l.page_id
+           WHERE ${scope.replace("p.project_id", "q.project_id")} AND q.deleted_at IS NULL AND l.to_slug <> q.slug)
+       ORDER BY p.title COLLATE NOCASE`,
+    )
+    .all(...args, ...LINT_ROOTS, ...args)
+    .map(toRef);
+
+  const bySlug = new Map<string, PageRef[]>();
+  for (const l of unresolvedLinks(projectId)) {
+    const list = bySlug.get(l.to) ?? [];
+    list.push(l.from);
+    bySlug.set(l.to, list);
+  }
+  const missing = [...bySlug].map(([slug, from]) => ({ slug, from }));
+
+  const citeRows = db
+    .prepare(
+      `SELECT p.id, p.slug, p.title, c.entry_id, e.id AS e_id FROM wiki_citations c
+       JOIN wiki_pages p ON p.id = c.page_id LEFT JOIN entries e ON e.id = c.entry_id
+       WHERE ${scope} AND p.deleted_at IS NULL ORDER BY p.title COLLATE NOCASE, c.entry_id`,
+    )
+    .all(...args);
+  const ids = [...new Set(citeRows.filter((r) => r.e_id != null).map((r) => Number(r.entry_id)))];
+  const entries = new Map<number, Entry>();
+  for (let i = 0; i < ids.length; i += 500) {
+    const part = ids.slice(i, i + 500);
+    for (const r of db.prepare(`SELECT * FROM entries WHERE id IN (${part.map(() => "?").join(",")})`).all(...part)) {
+      const e = rowToEntry(r);
+      entries.set(e.id, e);
+    }
+  }
+  const states = entryStates([...entries.values()].filter((e) => !e.deleted_at));
+  const citations: WikiLint["citations"] = [];
+  for (const r of citeRows) {
+    const page = toRef(r);
+    const entryId = Number(r.entry_id);
+    const e = entries.get(entryId);
+    if (!e) citations.push({ page, entry_id: entryId, state: "purged" });
+    else if (e.deleted_at) citations.push({ page, entry_id: entryId, state: "deleted" });
+    else {
+      const st = states.get(entryId)!;
+      if (st.superseded_by) citations.push({ page, entry_id: entryId, state: "superseded", superseded_by: st.superseded_by });
+      else if (st.expired) citations.push({ page, entry_id: entryId, state: "expired" });
+    }
+  }
+
+  const empty = db
+    .prepare(
+      `SELECT p.id, p.slug, p.title FROM wiki_pages p
+       WHERE ${scope} AND p.deleted_at IS NULL AND LENGTH(TRIM(p.body, ' ' || char(9, 10, 13))) < ?
+       ORDER BY p.title COLLATE NOCASE`,
+    )
+    .all(...args, LINT_MIN_BODY)
+    .map(toRef);
+
+  return {
+    orphans,
+    missing,
+    citations,
+    empty,
+    counts: { orphans: orphans.length, missing: missing.length, citations: citations.length, empty: empty.length },
+  };
 }
 
 // ----------------------------------------------------------------- search
@@ -454,13 +559,17 @@ export function getJob(id: number): WikiJob | null {
   return r ? toJob(r) : null;
 }
 
+/** Jobs the worker holds right now (a cancelled one stays here until its in-flight call returns). */
+export const runningWikiJobs = new Set<number>();
 export function claimDueJob(): WikiJob | null {
   const r = db
     .prepare(`SELECT id FROM wiki_jobs WHERE status = 'pending' AND run_after <= ? ORDER BY run_after, id LIMIT 1`)
     .get(now());
   if (!r) return null;
   const res = db.prepare(`UPDATE wiki_jobs SET status = 'processing' WHERE id = ? AND status = 'pending'`).run(Number(r.id));
-  return res.changes ? getJob(Number(r.id)) : null;
+  if (!res.changes) return null;
+  runningWikiJobs.add(Number(r.id));
+  return getJob(Number(r.id));
 }
 
 export function nextJobDueInMs(): number | null {
@@ -470,7 +579,7 @@ export function nextJobDueInMs(): number | null {
 }
 
 export function finishJob(id: number, status: WikiJob["status"], result: unknown, error: string | null = null) {
-  db.prepare(`UPDATE wiki_jobs SET status = ?, result = ?, error = ?, processed_at = ? WHERE id = ?`).run(
+  db.prepare(`UPDATE wiki_jobs SET status = ?, result = ?, error = ?, processed_at = ? WHERE id = ? AND status = 'processing'`).run(
     status,
     result == null ? null : JSON.stringify(result),
     error,
@@ -500,10 +609,28 @@ export function listJobs(f: { projectId?: number | null; status?: string; limit?
     .map((r) => ({ ...toJob(r), project_name: r.project_name == null ? null : String(r.project_name) }));
 }
 
+/**
+ * Stop a queued or running job. A running job stops before its next chunk (the
+ * LLM call in flight is not interrupted, and its result is thrown away); what
+ * earlier chunks wrote stays. "Retry" resumes after the finished chunks.
+ */
+export function cancelJob(id: number): WikiJob {
+  const res = db.prepare(`UPDATE wiki_jobs SET status = 'cancelled', processed_at = ? WHERE id = ? AND status IN ('pending','processing')`).run(now(), id);
+  if (!res.changes) {
+    if (!getJob(id)) throw new HttpError(404, "job not found");
+    throw new HttpError(409, "only queued or running jobs can be cancelled");
+  }
+  return getJob(id)!;
+}
+export function isJobCancelled(id: number): boolean {
+  return getJob(id)?.status === "cancelled";
+}
+
 export function retryJob(id: number): WikiJob {
   const j = getJob(id);
   if (!j) throw new HttpError(404, "job not found");
   if (j.status === "processing") throw new HttpError(409, "job is running");
+  if (runningWikiJobs.has(id)) throw new HttpError(409, "job is still stopping; try again in a moment");
   db.prepare(`UPDATE wiki_jobs SET status = 'pending', error = NULL, run_after = ? WHERE id = ?`).run(now(), id);
   wakeWorker?.();
   return getJob(id)!;

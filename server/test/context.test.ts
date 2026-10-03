@@ -325,9 +325,10 @@ test("G-018: supersedes is followed only toward the newer memory", async () => {
   const newM = await longMem(p.id, "the current log format");
   await link(newM.id, oldM.id, "supersedes");
 
-  // Recalling the old one brings in its replacement.
+  // Asking with the old wording brings in the replacement instead of the
+  // superseded memory itself (history is never injected).
   const fromOld = recallLines((await ctx(p, "marmotlog")).recall);
-  assert.equal(fromOld[0].id, oldM.id);
+  assert.ok(!fromOld.some((x) => x.id === oldM.id), "superseded memory is not recalled");
   const repl = fromOld.find((x) => x.id === newM.id);
   assert.ok(repl, "newer memory is added");
   assert.equal(repl!.via, `replaces #${oldM.id}`);
@@ -418,4 +419,45 @@ test("GET /entries/:id returns usage; unknown id is 404", async () => {
   assert.equal(d.entry.id, m.id);
   const missing = await call("GET", "/entries/999999");
   assert.equal(missing.status, 404);
+});
+
+test("G-018/G-026: entity extras skip inactive memories before the per-entity cap (newest 3 expired, an older active one is recalled)", async () => {
+  const p = await proj();
+  const active = await longMem(p.id, "alpha thing", 420, { entities: [{ name: "Zorblaxine", kind: "tech" }] });
+  db.prepare(`UPDATE entries SET updated_at = '2025-01-01T00:00:00.000Z' WHERE id = ?`).run(active.id);
+  for (let i = 0; i < 3; i++) {
+    const e = await longMem(p.id, `temporary workaround ${i}`, 300, { entities: [{ name: "Zorblaxine", kind: "tech" }] });
+    db.prepare(`UPDATE entries SET valid_until = '2020-01-01' WHERE id = ?`).run(e.id);
+  }
+  const r = await ctx(p, "what about zorblaxine");
+  const lines = recallLines(r.recall);
+  assert.deepEqual(lines.map((x) => [x.id, x.via]), [[active.id, "Zorblaxine"]]);
+});
+
+test("G-026: inactive hits do not take recall slots from active matches", async () => {
+  const p = await proj();
+  for (let i = 0; i < 6; i++) {
+    const e = await longMem(p.id, `quuxword old ${i}`, 20);
+    db.prepare(`UPDATE entries SET valid_until = '2020-01-01' WHERE id = ?`).run(e.id);
+  }
+  // Superseded ones outranking the active matches too (their replacement does not mention the term).
+  const repl = await longMem(p.id, "the replacement note");
+  const superseded: number[] = [];
+  for (let i = 0; i < 6; i++) {
+    const e = await longMem(p.id, `quuxword older ${i}`, 20);
+    await link(repl.id, e.id, "supersedes");
+    superseded.push(e.id);
+  }
+  const active: number[] = [];
+  for (let i = 0; i < config.recallLimit; i++) {
+    active.push((await entry({ scope: "project", project_id: p.id, title: `other ${i}`, body: `mentions quuxword ${pad(300)}` })).id);
+  }
+  const r = await ctx(p, "quuxword");
+  const lines = recallLines(r.recall);
+  assert.deepEqual(lines.filter((x) => x.via === null).map((x) => x.id).sort((a, b) => a - b), active, "every active match is recalled");
+  const replaced = lines.find((x) => x.id === repl.id);
+  assert.ok(replaced, "a superseded hit still brings in its replacement");
+  assert.match(replaced!.via!, /^replaces #\d+$/);
+  assert.ok(superseded.includes(Number(/#(\d+)/.exec(replaced!.via!)![1])));
+  assert.ok(lines.reduce((n, x) => n + x.line.length, 0) <= config.recallBudget);
 });

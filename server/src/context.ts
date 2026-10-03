@@ -2,7 +2,7 @@ import { config } from "./config.ts";
 import type { Entry, Project } from "./db.ts";
 import { entityEntries, getEntity, linkedNeighbors, mentionedEntities } from "./graph.ts";
 import { searchEntries } from "./search.ts";
-import { visibleEntries } from "./store.ts";
+import { entryState, getEntry, isActive, promptDescription, visibleEntries } from "./store.ts";
 import { listPages } from "./wiki.ts";
 
 // Builds what the pi extension injects:
@@ -45,6 +45,18 @@ function takeWithinBudget(entries: Entry[], budget: number, used: Set<number>): 
   return { lines, size, omitted };
 }
 
+/** Follow "supersedes" forward to the newest live memory (a few hops at most). */
+function currentVersion(id: number): number {
+  let cur = id;
+  for (let i = 0; i < 5; i++) {
+    const e = getEntry(cur);
+    const next = e ? entryState(e).superseded_by : null;
+    if (!next || next === id) break;
+    cur = next;
+  }
+  return cur;
+}
+
 export interface BuiltContext {
   system: string;
   recall: string;
@@ -53,7 +65,8 @@ export interface BuiltContext {
 }
 
 export function buildContext(project: Project | null, prompt: string): BuiltContext {
-  const all = visibleEntries(project?.id ?? null);
+  // Superseded and expired memories are history: never injected (they stay searchable).
+  const all = visibleEntries(project?.id ?? null, { activeOnly: true });
   const used = new Set<number>();
   const sections: string[] = [];
 
@@ -66,24 +79,32 @@ export function buildContext(project: Project | null, prompt: string): BuiltCont
 
   // Budget split: user profile 20%, project 50%, global 30%. Pinned entries first.
   const budget = config.contextBudget;
-  const groups: { tag: string; title: string; entries: Entry[]; share: number }[] = [
+  // The project description is human-edited framing (G-005 holds): first line of the
+  // project section, counted against the project share. Read through promptDescription so rows
+  // written before the PATCH bound/secret check are still capped and redacted.
+  const description = project ? promptDescription(project) : "";
+  const groups: { tag: string; title: string; entries: Entry[]; share: number; lead?: string }[] = [
     { tag: "user-profile", title: "About the user", entries: all.filter((e) => e.scope === "user" && e.category !== "standing"), share: 0.2 },
     {
       tag: "project-memory",
       title: project ? `Project ${project.name} (${project.key})` : "Project",
       entries: all.filter((e) => e.scope === "project" && e.category !== "standing"),
       share: 0.5,
+      lead: description ? `About this project: ${description}` : undefined,
     },
     { tag: "global-memory", title: "General", entries: all.filter((e) => e.scope === "global" && e.category !== "standing"), share: 0.3 },
   ];
   let carry = 0;
   for (const g of groups) {
-    if (!g.entries.length) {
+    const leadSize = g.lead ? g.lead.length + 1 : 0;
+    if (!g.entries.length && !g.lead) {
       carry += budget * g.share;
       continue;
     }
-    const { lines, size, omitted } = takeWithinBudget(g.entries, budget * g.share + carry, used);
-    carry = Math.max(0, budget * g.share + carry - size);
+    const avail = budget * g.share + carry - leadSize;
+    const { lines, size, omitted } = g.entries.length ? takeWithinBudget(g.entries, Math.max(0, avail), used) : { lines: [], size: 0, omitted: 0 };
+    carry = Math.max(0, avail - size);
+    if (g.lead) lines.unshift(g.lead);
     if (!lines.length) continue;
     const more = omitted ? `\n(${omitted} more not shown — use memory_search)` : "";
     sections.push(`<${g.tag} title="${g.title}">\n${lines.join("\n")}${more}\n</${g.tag}>`);
@@ -110,29 +131,58 @@ export function buildContext(project: Project | null, prompt: string): BuiltCont
     const pid = project?.id ?? null;
     const seen = new Set(used);
     const picks: { e: Entry; via?: string }[] = [];
-    for (const h of searchEntries(prompt, { projectId: pid, limit: config.recallLimit, excludeIds: used })) {
+    // Entities the prompt names: they boost matching hits (hub-dampened) and pull in extras.
+    const mentioned = mentionedEntities(prompt, 6);
+    // Active hits only: history never takes a recall slot (standing ones are all in `used`).
+    for (const h of searchEntries(prompt, { projectId: pid, limit: config.recallLimit, excludeIds: used, boostEntities: mentioned })) {
       if (h.entry.category === "standing" || seen.has(h.entry.id)) continue;
       picks.push({ e: h.entry });
       seen.add(h.entry.id);
+    }
+    // History is searched separately and never injected: a hit on a superseded memory
+    // brings in what replaced it (the prompt may still use the old name). Expired hits
+    // bring nothing, so only superseded ones are searched, at most GRAPH_RECALL_EXTRA
+    // (the most replacement extras addExtra takes anyway).
+    const replacedBy: { old: number; next: number }[] = [];
+    for (const h of searchEntries(prompt, { projectId: pid, limit: config.graph.recallExtra, excludeIds: used, supersededOnly: true, boostEntities: mentioned })) {
+      const st = entryState(h.entry);
+      if (st.superseded_by) replacedBy.push({ old: h.entry.id, next: currentVersion(st.superseded_by) });
     }
     // Graph extras (at most GRAPH_RECALL_EXTRA): memories about entities the
     // prompt names, then memories linked to what was recalled (why / what it
     // depends on / what replaced it). They only fill budget the hits left.
     const extras: { e: Entry; via: string }[] = [];
     const addExtra = (e: Entry, via: string) => {
-      if (extras.length >= config.graph.recallExtra || seen.has(e.id) || e.category === "standing") return;
+      if (extras.length >= config.graph.recallExtra || seen.has(e.id) || e.category === "standing" || !isActive(e)) return;
       extras.push({ e, via });
       seen.add(e.id);
     };
-    for (const entId of mentionedEntities(prompt, 6)) {
+    for (const r of replacedBy) {
+      const e = getEntry(r.next);
+      if (e && !e.deleted_at && (e.scope !== "project" || e.project_id === pid)) addExtra(e, `replaces #${r.old}`);
+    }
+    for (const entId of mentioned) {
       const name = getEntity(entId)?.name ?? "";
-      for (const e of entityEntries(entId, pid).slice(0, 3)) addExtra(e, name);
+      // Active ones only, filtered before the per-entity cap (newer expired memories must not hide them).
+      for (const e of entityEntries(entId, pid, { activeOnly: true, limit: 3 })) addExtra(e, name);
     }
     const base = [...picks.map((p) => p.e.id), ...extras.map((x) => x.e.id)];
+    const hop1: number[] = [];
     for (const n of linkedNeighbors(base, pid, ["because", "depends_on", "supersedes"])) {
       // A memory this one replaced is stale; only follow "supersedes" to the newer memory.
       if (n.type === "supersedes" && n.dir === "out") continue;
+      const before = extras.length;
       addExtra(n.entry, `${n.dir === "in" && n.type === "supersedes" ? "replaces" : n.type} #${n.via}`);
+      if (extras.length > before) hop1.push(n.entry.id);
+    }
+    // Second hop, only with slots left: why / what the linked memories depend
+    // on. Never "supersedes" (stale history) and never back toward the hit.
+    // Listed after every 1-hop item, so it only uses leftover budget.
+    if (extras.length < config.graph.recallExtra && hop1.length) {
+      for (const n of linkedNeighbors(hop1, pid, ["because", "depends_on"])) {
+        if (n.dir !== "out") continue;
+        addExtra(n.entry, `${n.type} #${n.via} (2-hop)`);
+      }
     }
     const lines: string[] = [];
     let size = 0;

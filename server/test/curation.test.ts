@@ -331,3 +331,33 @@ test("add with scope project but no project falls back to global; at most 20 ops
   assert.equal(first.entry.project_id, null);
   assert.match(llmCalls[0].user, /CURRENT PROJECT: none/);
 });
+
+test("the curation prompt dates the turn by when it happened, not when it is curated", async () => {
+  const p = await freshProject();
+  const t = await turn([{ role: "user", text: "yesterday the nightly build broke on the arm runner" }, { role: "assistant", text: "noted" }], p);
+  // A backlog: the turn was recorded days before the worker gets to it.
+  db.prepare("UPDATE turns SET created_at = ? WHERE id = ?").run("2026-03-04T10:00:00.000Z", t.id);
+  llmReply((c: { system: string; user: string }) => {
+    assert.match(c.user, /^TURN DATE: 2026-03-04 \(UTC\)$/m);
+    assert.match(c.user, new RegExp(`^TODAY: ${new Date().toISOString().slice(0, 10)}$`, "m"));
+    assert.match(c.system, /Resolve them against TURN DATE/);
+    return { ops: [] };
+  });
+  await runQueueOnce();
+  assert.equal(llmCalls.length, 1);
+  assert.equal((await getTurn(t.id)).status, "done");
+});
+
+test("TURN DATE uses TIMEZONE: 01:00 in Seoul is still the previous day in UTC", async () => {
+  const { config } = await import("../src/config.ts");
+  const { localDate } = await import("../src/worker.ts");
+  const prev = config.timezone;
+  try {
+    (config as { timezone: string }).timezone = "Asia/Seoul";
+    assert.equal(localDate("2026-03-03T16:30:00.000Z"), "2026-03-04");
+    (config as { timezone: string }).timezone = "UTC";
+    assert.equal(localDate("2026-03-03T16:30:00.000Z"), "2026-03-03");
+  } finally {
+    (config as { timezone: string }).timezone = prev;
+  }
+});
