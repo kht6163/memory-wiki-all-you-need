@@ -7,6 +7,7 @@ import { EntityChips, KIND_LABEL, KindIcon, LINK_LABEL, LINK_TYPES, LinkList } f
 import { ScopeTabs } from "./WikiPages.tsx";
 import { Icon } from "../components/Icon.tsx";
 import { SkeletonText } from "../components/Skeleton.tsx";
+import { fitViewport, isolatedIds, isolatedKey, placeIsolated, sortIsolated, type Insets } from "../graph-layout.ts";
 
 // The interactive graph (cytoscape). Loaded lazily so the rest of the UI does not pay for it.
 
@@ -14,6 +15,66 @@ const cssVar = (name: string, fallback: string) => getComputedStyle(document.doc
 
 const LEGEND_CATS = CATEGORY_ORDER.filter((c) => c !== "standing");
 const isRunning = (j: GraphJob) => j.status === "pending" || j.status === "processing";
+
+const COSE = { name: "cose", animate: false, nodeRepulsion: () => 9000, idealEdgeLength: () => 70, nodeOverlap: 20, componentSpacing: 120, padding: 40 };
+
+/** How far the floating toolbar/notices (top) and legend/hint (bottom) reach into the canvas. */
+function overlayInsets(c: Core): Insets {
+  const canvas = c.container();
+  const stage = canvas?.parentElement;
+  if (!canvas || !stage) return { top: 0, bottom: 0 };
+  const r = canvas.getBoundingClientRect();
+  let top = 0;
+  let bottom = 0;
+  for (const el of stage.querySelectorAll<HTMLElement>(".graph-top, .graph-legend, .graph-hint")) {
+    const b = el.getBoundingClientRect();
+    if (!b.height) continue;
+    if (b.top - r.top < r.height / 2) top = Math.max(top, b.bottom - r.top);
+    else bottom = Math.max(bottom, r.bottom - b.top);
+  }
+  return { top, bottom };
+}
+
+/** Fit `eles` into the part of the canvas the overlays leave free (cytoscape's fit pads evenly). */
+function fitClear(c: Core, eles = c.elements(), animate = false, pad = 40) {
+  if (!eles.length) return;
+  const bb = eles.boundingBox({});
+  const v = fitViewport(bb, { w: c.width(), h: c.height() }, overlayInsets(c), pad, { min: c.minZoom(), max: c.maxZoom() });
+  if (animate) c.animate({ zoom: v.zoom, pan: v.pan }, { duration: 250 });
+  else c.viewport({ zoom: v.zoom, pan: v.pan });
+}
+
+/**
+ * cose for the connected part only; nodes without edges go into a compact grid next to it
+ * (graph-layout.ts) so fit-to-screen keeps labels readable instead of shrinking a tall column.
+ */
+function runLayout(c: Core, randomize: boolean) {
+  const lone = new Set(
+    isolatedIds(
+      c.nodes().map((n) => n.id()),
+      c.edges().map((e) => ({ source: e.source().id(), target: e.target().id() })),
+    ),
+  );
+  const isolated = c.nodes().filter((n) => lone.has(n.id()));
+  if (!isolated.length) {
+    const all = c.layout({ ...COSE, randomize, fit: false } as cytoscape.LayoutOptions);
+    all.one("layoutstop", () => fitClear(c));
+    all.run();
+    return;
+  }
+  const connected = c.elements().not(isolated);
+  const place = () => {
+    const box = connected.nodes().length ? connected.nodes().boundingBox({}) : null;
+    const order = sortIsolated(isolated.map((n) => isolatedKey({ ...(n.data("raw") as GraphNode), id: n.id() }, CATEGORY_ORDER)));
+    const pos = placeIsolated(order, box, { w: c.width(), h: c.height() });
+    c.batch(() => isolated.forEach((n) => void n.position(pos.get(n.id()) ?? { x: 0, y: 0 })));
+    fitClear(c);
+  };
+  if (!connected.nodes().length) return place();
+  const layout = connected.layout({ ...COSE, randomize, fit: false } as cytoscape.LayoutOptions);
+  layout.one("layoutstop", place);
+  layout.run();
+}
 
 export function GraphPage({ projectId, initialFocus }: { projectId?: number; initialFocus?: string }) {
   const projects = useData(() => api.projects(), []);
@@ -94,16 +155,7 @@ export function GraphPage({ projectId, initialFocus }: { projectId?: number; ini
     });
     // Same set of nodes and edges (a plain refresh): keep the current picture.
     if (!changed || !c.nodes().length) return;
-    c.layout({
-      name: "cose",
-      animate: false,
-      randomize: fresh,
-      nodeRepulsion: () => 9000,
-      idealEdgeLength: () => 70,
-      nodeOverlap: 20,
-      componentSpacing: 120,
-      padding: 40,
-    } as cytoscape.LayoutOptions).run();
+    runLayout(c, fresh);
   }, [elements]);
 
   // Highlight search matches.
@@ -116,7 +168,7 @@ export function GraphPage({ projectId, initialFocus }: { projectId?: number; ini
     const hits = c.nodes().filter((n) => String((n.data("raw") as GraphNode).label).toLowerCase().includes(needle));
     c.nodes().not(hits).addClass("dim");
     hits.addClass("match");
-    if (hits.length) c.animate({ fit: { eles: hits, padding: 80 } }, { duration: 300 });
+    if (hits.length) fitClear(c, hits, true, 80);
   }, [q, elements]);
 
   // Esc closes the drawer (unless typing).
@@ -142,9 +194,8 @@ export function GraphPage({ projectId, initialFocus }: { projectId?: number; ini
     next.has(c) ? next.delete(c) : next.add(c);
     setHidden(next);
   };
-  const fit = () => cy.current?.animate({ fit: { eles: cy.current.elements(), padding: 40 } }, { duration: 250 });
-  const relayout = () =>
-    cy.current?.layout({ name: "cose", animate: false, randomize: true, nodeOverlap: 20, componentSpacing: 120, padding: 40 } as cytoscape.LayoutOptions).run();
+  const fit = () => cy.current && fitClear(cy.current, cy.current.elements(), true);
+  const relayout = () => cy.current && runLayout(cy.current, true);
   const startBackfill = () => act(() => api.backfill(projectId), { success: "그래프 붙이기를 시작했습니다" }).then((r) => r !== undefined && jobs.reload());
   const scopeName = projectId ? (project ? `"${project.name}"` : "이 프로젝트") : "전체";
 

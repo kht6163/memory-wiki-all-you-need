@@ -24,6 +24,7 @@ import {
   useData,
 } from "../lib.tsx";
 import { Icon } from "../components/Icon.tsx";
+import { Menu } from "../components/Menu.tsx";
 import { PageHeader } from "../components/PageHeader.tsx";
 import { SkeletonList } from "../components/Skeleton.tsx";
 import { ScopeTabs } from "./WikiPages.tsx";
@@ -453,45 +454,7 @@ function ProjectHeader({ project, onSaved }: { project: Project; onSaved: () => 
 
 /** "더 보기" menu in the page actions (project delete lives here, behind type-to-confirm). */
 function ProjectMenu({ project }: { project: Project }) {
-  const ref = useRef<HTMLDetailsElement>(null);
-  const [open, setOpen] = useState(false);
-
-  useEffect(() => {
-    if (!open) return;
-    const el = ref.current;
-    el?.querySelector<HTMLElement>(".more-menu-list button, .more-menu-list a")?.focus();
-    const onDown = (e: MouseEvent) => {
-      if (el && !el.contains(e.target as Node)) el.open = false;
-    };
-    const onKey = (e: globalThis.KeyboardEvent) => {
-      if (e.key === "Escape" && el) {
-        el.open = false;
-        el.querySelector<HTMLElement>("summary")?.focus();
-      }
-    };
-    document.addEventListener("mousedown", onDown);
-    document.addEventListener("keydown", onKey);
-    return () => {
-      document.removeEventListener("mousedown", onDown);
-      document.removeEventListener("keydown", onKey);
-    };
-  }, [open]);
-
-  const close = () => {
-    if (ref.current) ref.current.open = false;
-  };
-
-  const onListKey = (e: KeyboardEvent<HTMLDivElement>) => {
-    if (e.key !== "ArrowDown" && e.key !== "ArrowUp") return;
-    e.preventDefault();
-    const items = [...e.currentTarget.querySelectorAll<HTMLElement>("button, a")];
-    const i = items.indexOf(document.activeElement as HTMLElement);
-    const next = e.key === "ArrowDown" ? (i + 1) % items.length : (i - 1 + items.length) % items.length;
-    items[next]?.focus();
-  };
-
   const remove = async () => {
-    close();
     const ok = await confirmDialog({
       title: "프로젝트 삭제",
       body: <p>프로젝트 "{project.name}"와 모든 메모리·턴 기록·위키를 영구 삭제합니다. 되돌릴 수 없습니다.</p>,
@@ -503,25 +466,14 @@ function ProjectMenu({ project }: { project: Project }) {
   };
 
   return (
-    <details ref={ref} className="more-menu" onToggle={(e) => setOpen(e.currentTarget.open)}>
-      <summary className="btn" aria-label="더 보기" title="더 보기">
-        <Icon name="more-horizontal" />
-      </summary>
-      <div className="menu-list more-menu-list" role="menu" onKeyDown={onListKey}>
-        <button type="button" role="menuitem" className="menu-item" onClick={() => (close(), copyText(project.key))}>
-          <Icon name="copy" size={14} />
-          프로젝트 키 복사
-        </button>
-        <a role="menuitem" className="menu-item" href={`#/turns?project=${project.id}`} onClick={close}>
-          <Icon name="messages-square" size={14} />
-          턴 기록
-        </a>
-        <button type="button" role="menuitem" className="menu-item danger" onClick={remove}>
-          <Icon name="trash-2" size={14} />
-          프로젝트 삭제…
-        </button>
-      </div>
-    </details>
+    <Menu
+      label="더 보기"
+      items={[
+        { label: "프로젝트 키 복사", icon: "copy", run: () => copyText(project.key) },
+        { label: "턴 기록", icon: "messages-square", href: `#/turns?project=${project.id}` },
+        { label: "프로젝트 삭제…", icon: "trash-2", danger: true, run: remove },
+      ]}
+    />
   );
 }
 

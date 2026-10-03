@@ -122,20 +122,20 @@ export function removeLink(fromId: number, toId: number, type: LinkType, author:
     if (!row) return false;
     const res = db.prepare(`DELETE FROM entry_links WHERE from_id = ? AND to_id = ? AND type = ?`).run(fromId, toId, type);
     if (!res.changes) return false;
-    recordGraphRevision({
-      target: "link",
-      action: "remove",
-      snapshot: {
-        from_id: fromId, to_id: toId, type,
-        retires: Number(row.retires), link_author: String(row.author), link_created_at: String(row.created_at),
-        ...endpointStamps(fromId, toId),
-        entity_ids: [], entry_ids: [fromId, toId],
-      },
-      author,
-      revertOf: opts.revertOf,
-    });
+    recordGraphRevision({ target: "link", action: "remove", snapshot: removedLinkSnapshot(row), author, revertOf: opts.revertOf });
     return true;
   });
+}
+
+/** removeLink's snapshot of a link row (also used for the links moveLinks drops or moves). */
+function removedLinkSnapshot(row: Row) {
+  const [from, to] = [Number(row.from_id), Number(row.to_id)];
+  return {
+    from_id: from, to_id: to, type: String(row.type),
+    retires: Number(row.retires), link_author: String(row.author), link_created_at: String(row.created_at),
+    ...endpointStamps(from, to),
+    entity_ids: [], entry_ids: [from, to],
+  };
 }
 
 /**
@@ -143,9 +143,16 @@ export function removeLink(fromId: number, toId: number, type: LinkType, author:
  * Incoming retiring "supersedes" links are dropped, not moved: they say something replaced the
  * merged-away memory's fact, not the kept memory's — moving one would retire (hide) the kept memory
  * now or once its source is restored (G-026). Informational ones (retires = 0) move like any link.
+ *
+ * With `author`, each change is recorded in the same transaction with the existing link actions
+ * (G-034): a dropped link as a "remove", a moved one as a "remove" of the old row plus an "add" of
+ * the new one. Reverting the remove puts the link back on `fromId` once it is out of the trash
+ * (endpoint_trashed until then, G-041); reverting the add takes it off `toId`. Without `author`
+ * nothing is recorded (callers that have not opted in yet).
  */
-export function moveLinks(fromId: number, toId: number) {
+export function moveLinks(fromId: number, toId: number, opts: { author?: Source } = {}) {
   transaction(() => {
+    if (opts.author) recordLinkMoves(fromId, toId, opts.author);
     db.prepare(`DELETE FROM entry_links WHERE (from_id = ? AND to_id = ?) OR (from_id = ? AND to_id = ?)`).run(fromId, toId, toId, fromId);
     db.prepare(`DELETE FROM entry_links WHERE to_id = ? AND type = 'supersedes' AND retires = 1`).run(fromId);
     db.prepare(`UPDATE OR IGNORE entry_links SET from_id = ? WHERE from_id = ?`).run(toId, fromId);
@@ -153,6 +160,31 @@ export function moveLinks(fromId: number, toId: number) {
     // Rows that would have duplicated an existing link stay behind; drop them.
     db.prepare(`DELETE FROM entry_links WHERE from_id = ? OR to_id = ?`).run(fromId, fromId);
   });
+}
+
+/**
+ * What moveLinks is about to do, worked out on the rows before it runs (its statements
+ * in the same order) and recorded. Outgoing rows become (toId, x) and incoming ones
+ * (y, toId); neither can collide with the other once the links between the two are
+ * gone, so checking each new key against the rows as they are now is enough.
+ */
+function recordLinkMoves(fromId: number, toId: number, author: Source) {
+  const rows = db.prepare(`SELECT * FROM entry_links WHERE from_id = ? OR to_id = ? ORDER BY rowid`).all(fromId, fromId);
+  const exists = db.prepare(`SELECT 1 FROM entry_links WHERE from_id = ? AND to_id = ? AND type = ?`);
+  for (const row of rows) {
+    const [from, to, type] = [Number(row.from_id), Number(row.to_id), String(row.type)];
+    recordGraphRevision({ target: "link", action: "remove", snapshot: removedLinkSnapshot(row), author });
+    if (from === toId || to === toId) continue;
+    if (to === fromId && type === "supersedes" && Number(row.retires) === 1) continue;
+    const [nf, nt] = from === fromId ? [toId, to] : [from, toId];
+    if (exists.get(nf, nt, type)) continue;
+    recordGraphRevision({
+      target: "link",
+      action: "add",
+      snapshot: { from_id: nf, to_id: nt, type, prior: null, moved_from: fromId, entity_ids: [], entry_ids: [nf, nt] },
+      author,
+    });
+  }
 }
 
 /** Live links touching a memory, with the other memory's title. */
@@ -287,7 +319,7 @@ const dismissedWith = (id: number) =>
   db.prepare(`SELECT CASE WHEN a = ? THEN b ELSE a END AS other FROM entity_pair_dismissed WHERE a = ? OR b = ?`).all(id, id, id).map((r) => Number(r.other));
 
 /** Merge `fromId` into `intoId`: mentions move over, the old name becomes an alias. */
-export function mergeEntities(fromId: number, intoId: number, author: Source = "human"): Entity {
+export function mergeEntities(fromId: number, intoId: number, author: Source = "human", opts: { revertOf?: number } = {}): Entity {
   if (fromId === intoId) throw new HttpError(400, "cannot merge an entity into itself");
   const from = getEntity(fromId);
   const into = getEntity(intoId);
@@ -330,13 +362,14 @@ export function mergeEntities(fromId: number, intoId: number, author: Source = "
         entity_ids: [fromId, intoId], entry_ids: entries,
       },
       author,
+      revertOf: opts.revertOf,
     });
   });
   invalidateEntityNames();
   return getEntity(intoId)!;
 }
 
-export function deleteEntity(id: number, author: Source = "human") {
+export function deleteEntity(id: number, author: Source = "human", opts: { revertOf?: number } = {}) {
   if (!getEntity(id)) throw new HttpError(404, ENTITY_NOT_FOUND);
   transaction(() => {
     const row = entityRow(id);
@@ -349,6 +382,7 @@ export function deleteEntity(id: number, author: Source = "human") {
       action: "delete",
       snapshot: { entity_id: id, entity: row, aliases, entries, dismissed, entity_ids: [id], entry_ids: entries },
       author,
+      revertOf: opts.revertOf,
     });
   });
   invalidateEntityNames();
@@ -378,6 +412,14 @@ export function revertGraphRevision(id: number, author: Source = "human"): { rev
     } else if (rev.action === "update") written = revertEntityUpdate(s, author, id);
     else if (rev.action === "merge") written = revertEntityMerge(s, author, id);
     else if (rev.action === "delete") written = revertEntityDelete(s, author, id);
+    // A merge / delete revert's own revert merges / deletes again (checked by entityRevertBlock above).
+    else if (rev.action === "unmerge") {
+      mergeEntities(Number(s.entity_id), Number(s.into_id), author, { revertOf: id });
+      written = lastRevisionId();
+    } else if (rev.action === "restore") {
+      deleteEntity(Number(s.entity_id), author, { revertOf: id });
+      written = lastRevisionId();
+    }
     if (!markGraphRevisionReverted(id)) throw new HttpError(409, "this change was already reverted");
     return written;
   });

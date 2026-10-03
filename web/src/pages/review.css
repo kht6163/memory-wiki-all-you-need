@@ -280,3 +280,17 @@
     transition: none;
   }
 }
+
+/* Cross-scope proposal: the global/user memory (read-only in the review) that already says it. */
+.proposal-covered {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-1_5);
+}
+.proposal-covered .covered-label {
+  white-space: nowrap;
+}
+.pentry.covered-entry {
+  border-style: dashed;
+  background: transparent;
+}

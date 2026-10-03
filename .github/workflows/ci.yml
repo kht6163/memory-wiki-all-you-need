@@ -22,7 +22,7 @@ jobs:
   docker:
     runs-on: ubuntu-latest
     # hard ceiling so a hung build/curl cannot hold the runner for the 360-minute default
-    timeout-minutes: 15
+    timeout-minutes: 20
     env:
       IMAGE: memory-wiki-ci:${{ github.sha }}
       CONTAINER: memory-wiki-ci-${{ github.run_id }}-${{ github.run_attempt }}
@@ -74,6 +74,30 @@ jobs:
           get /pi-extension/index.ts ext.ts
           grep -q "$base" "$out/ext.ts"   # placeholder default URL replaced (G-008)
           test -s "$RUNNER_TEMP/memory-wiki-data/memory.db"   # DB lives on the mounted volume
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+      - name: Web smoke test (headless Chrome)
+        run: |
+          # playwright-core stays out of the repo's dependencies: pinned, installed into a temp dir,
+          # driving the runner's preinstalled Google Chrome. Seeds data through the API, opens the
+          # main routes at 1280/375px in light/dark, fails on console errors, 375px overflow,
+          # other-host requests (G-038), native dialogs and a broken delete → undo (G-036).
+          npm i --prefix "$RUNNER_TEMP/pw" --no-save --no-package-lock --no-audit --no-fund playwright-core@1.63.0
+          google-chrome --version
+          SMOKE_BASE="http://127.0.0.1:$HOST_PORT" \
+          SMOKE_PW_DIR="$RUNNER_TEMP/pw" \
+          SMOKE_CHROME="$(command -v google-chrome)" \
+          SMOKE_OUT="$RUNNER_TEMP/web-smoke" \
+            timeout 300 node web/e2e/smoke.mjs
+      - name: Upload smoke screenshots
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: web-smoke-screenshots
+          path: ${{ runner.temp }}/web-smoke
+          if-no-files-found: ignore
+          retention-days: 7
       - name: Container logs
         if: failure()
         run: docker logs "$CONTAINER" || true

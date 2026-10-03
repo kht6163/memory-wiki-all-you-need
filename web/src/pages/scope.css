@@ -154,25 +154,6 @@
   min-height: 84px;
 }
 
-/* more-menu (details-based popover) */
-.scope-page .more-menu {
-  position: relative;
-}
-.scope-page .more-menu > summary {
-  list-style: none;
-  display: inline-flex;
-  align-items: center;
-  justify-content: center;
-  cursor: pointer;
-}
-.scope-page .more-menu > summary::-webkit-details-marker {
-  display: none;
-}
-.scope-page .more-menu > summary.btn {
-  width: 32px;
-  padding: 0;
-}
-
 /* curation policy card */
 .scope-page .policy-card {
   padding: 0;

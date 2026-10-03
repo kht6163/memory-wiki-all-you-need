@@ -1,5 +1,5 @@
 import "./entry.css";
-import { useEffect, useRef, useState, type KeyboardEvent, type ReactNode } from "react";
+import { useRef, useState, type ReactNode } from "react";
 import { api, type Entry, type Provenance, type Revision } from "../api.ts";
 import {
   Diff,
@@ -21,6 +21,7 @@ import {
   toast,
   useData,
 } from "../lib.tsx";
+import { Menu } from "../components/Menu.tsx";
 import { Icon, type IconName } from "../components/Icon.tsx";
 import { PageHeader } from "../components/PageHeader.tsx";
 import { SkeletonPage } from "../components/Skeleton.tsx";
@@ -81,7 +82,7 @@ export function EntryPage({ id }: { id: number }) {
                 편집
                 <kbd className="ep-kbd">e</kbd>
               </a>
-              <MoreMenu
+              <Menu
                 label="메모리 작업 더 보기"
                 items={[
                   { label: e.pinned ? "고정 해제" : "고정", icon: "pin", run: () => togglePin(e) },
@@ -147,7 +148,7 @@ export function EntryPage({ id }: { id: number }) {
               <button
                 type="button"
                 role="switch"
-                className="ep-switch"
+                className="switch"
                 aria-checked={e.pinned}
                 aria-labelledby="ep-pin-label"
                 disabled={!live}
@@ -321,98 +322,6 @@ function Callout({ kind, icon, children }: { kind: "warn" | "danger" | "info"; i
     <div className={`callout ${kind} ep-callout`} role="status">
       <Icon name={icon} size={16} />
       <div className="callout-text ep-callout-text">{children}</div>
-    </div>
-  );
-}
-
-interface MenuItem {
-  label: string;
-  icon: IconName;
-  danger?: boolean;
-  run: () => void;
-}
-
-/** Small dropdown: Esc / outside click closes, ↑↓ moves between items, focus returns to the trigger. */
-function MoreMenu({ label, items }: { label: string; items: MenuItem[] }) {
-  const [open, setOpen] = useState(false);
-  const wrap = useRef<HTMLDivElement>(null);
-  const trigger = useRef<HTMLButtonElement>(null);
-  const list = useRef<HTMLDivElement>(null);
-
-  useEffect(() => {
-    if (!open) return;
-    list.current?.querySelector<HTMLElement>("[role=menuitem]")?.focus();
-    const onDown = (ev: MouseEvent) => {
-      if (!wrap.current?.contains(ev.target as Node)) setOpen(false);
-    };
-    document.addEventListener("mousedown", onDown);
-    return () => document.removeEventListener("mousedown", onDown);
-  }, [open]);
-
-  const close = (refocus = true) => {
-    setOpen(false);
-    if (refocus) trigger.current?.focus();
-  };
-
-  const onKey = (ev: KeyboardEvent) => {
-    const els = Array.from(list.current?.querySelectorAll<HTMLElement>("[role=menuitem]") ?? []);
-    const i = els.indexOf(document.activeElement as HTMLElement);
-    if (ev.key === "Escape") {
-      ev.preventDefault();
-      ev.stopPropagation();
-      close();
-    } else if (ev.key === "ArrowDown" || ev.key === "ArrowUp") {
-      ev.preventDefault();
-      const n = els.length;
-      els[(i + (ev.key === "ArrowDown" ? 1 : n - 1)) % n]?.focus();
-    } else if (ev.key === "Home" || ev.key === "End") {
-      ev.preventDefault();
-      els[ev.key === "Home" ? 0 : els.length - 1]?.focus();
-    } else if (ev.key === "Tab") {
-      close(false);
-    }
-  };
-
-  return (
-    <div className="ep-menu" ref={wrap}>
-      <button
-        ref={trigger}
-        type="button"
-        className="btn ep-menu-trigger"
-        aria-label={label}
-        title={label}
-        aria-haspopup="menu"
-        aria-expanded={open}
-        onClick={() => setOpen(!open)}
-        onKeyDown={(ev) => {
-          if (ev.key === "ArrowDown" && !open) {
-            ev.preventDefault();
-            setOpen(true);
-          }
-        }}
-      >
-        <Icon name="more-horizontal" />
-      </button>
-      {open && (
-        <div className="menu-list" role="menu" aria-label={label} ref={list} onKeyDown={onKey}>
-          {items.map((it) => (
-            <button
-              key={it.label}
-              type="button"
-              role="menuitem"
-              tabIndex={-1}
-              className={`menu-item${it.danger ? " danger" : ""}`}
-              onClick={() => {
-                close();
-                it.run();
-              }}
-            >
-              <Icon name={it.icon} size={14} />
-              {it.label}
-            </button>
-          ))}
-        </div>
-      )}
     </div>
   );
 }

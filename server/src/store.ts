@@ -401,7 +401,7 @@ export function updateEntry(id: number, patch: EntryPatch, meta: WriteMeta): Ent
   return transaction(() => {
     // Entities first, so the revision below snapshots them; an entity-only change still gets a revision.
     const before = entityNamesOf(id);
-    if (patch.entities !== undefined) writeEntryEntities(id, resolveEntityInputs(patch.entities));
+    if (patch.entities !== undefined) writeEntryEntities(id, resolveEntityInputs(patch.entities), "replace", meta.author);
     const entitiesChanged = !sameNames(before, entityNamesOf(id));
     if (unchanged && !entitiesChanged) return cur;
     if (unchanged) {

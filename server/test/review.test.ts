@@ -867,3 +867,20 @@ test("apply merge drops a retiring supersedes link into a merged-away memory ins
   await ok("POST", `/entries/${c.id}/restore`);
   assert.equal((await getEntry(keep.id)).entry.superseded_by, null);
 });
+
+test("apply merge: moving a member's links is recorded in graph history and can be reverted", async () => {
+  const p = await freshProject();
+  const keep = await mem(p.id, "history keep");
+  const gone = await mem(p.id, "history gone");
+  const z = await mem(p.id, "history target");
+  await ok("POST", `/entries/${gone.id}/links`, { to: z.id, type: "depends_on" });
+  const { proposals } = await runReview(p.id, {
+    proposals: [{ kind: "merge", ids: [keep.id, gone.id], title: "history merged", body: "merged", category: "fact", reason: "same" }],
+  });
+  await ok("POST", `/review/proposals/${proposals[0].id}/apply`);
+  const revs = (await ok("GET", `/graph/revisions?entry_id=${keep.id}&limit=20`)) as any[];
+  const moved = revs.find((r) => r.target === "link" && r.action === "add" && r.snapshot?.from_id === keep.id && r.snapshot?.to_id === z.id);
+  assert.ok(moved, "the moved link is in the history");
+  assert.equal(moved.author, "llm");
+  assert.equal(moved.revertible, true);
+});

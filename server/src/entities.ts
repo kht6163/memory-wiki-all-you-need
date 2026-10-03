@@ -1,7 +1,8 @@
-import { db, now } from "./db.ts";
+import { db, now, transaction, type Source } from "./db.ts";
 
 // Entity storage for the memory graph. Depends only on db.ts so store.ts can
-// attach entities inside its own transactions (graph.ts builds on this).
+// attach entities inside its own transactions (graph.ts builds on this). The
+// orphan prune writes its graph_revisions row itself, with plain SQL.
 
 export const ENTITY_KINDS = ["tech", "service", "tool", "file", "concept", "person"] as const;
 export type EntityKind = (typeof ENTITY_KINDS)[number];
@@ -84,8 +85,11 @@ export function resolveEntityInputs(inputs: EntityInput[]): number[] {
   return ids;
 }
 
-/** Replace (or extend) a memory's entities. Returns whether anything changed. Call inside a transaction. */
-export function writeEntryEntities(entryId: number, ids: number[], mode: "replace" | "add" = "replace"): boolean {
+/**
+ * Replace (or extend) a memory's entities. Returns whether anything changed. Call inside a transaction.
+ * `author` is who made the change, recorded on the history of an entity this prunes (pruneOrphanEntities).
+ */
+export function writeEntryEntities(entryId: number, ids: number[], mode: "replace" | "add" = "replace", author: Source = "llm"): boolean {
   const cur = new Set(
     db
       .prepare(`SELECT entity_id FROM entry_entities WHERE entry_id = ?`)
@@ -101,17 +105,46 @@ export function writeEntryEntities(entryId: number, ids: number[], mode: "replac
   for (const id of removed) del.run(entryId, id);
   const ins = db.prepare(`INSERT OR IGNORE INTO entry_entities (entry_id, entity_id) VALUES (?, ?)`);
   for (const id of added) ins.run(entryId, id);
-  if (removed.length) pruneOrphanEntities(removed);
+  if (removed.length) pruneOrphanEntities(removed, author);
   return true;
 }
 
-/** Entities nobody mentions any more and nobody described are dropped so the list stays clean. */
-export function pruneOrphanEntities(ids: number[]) {
-  const del = db.prepare(
-    `DELETE FROM entities WHERE id = ? AND description = '' AND NOT EXISTS (SELECT 1 FROM entry_entities WHERE entity_id = ?)`,
-  );
+/**
+ * Drop one entity if it is an orphan (no mention, no description). When it carries
+ * something re-creating it by name would not bring back — aliases (old spellings
+ * from a rename or merge) or "not the same" pairs — the prune is recorded in the
+ * same transaction as an entity "delete" with snapshot.reason = "orphan", so it is
+ * listed and reverted like a delete (graph-revisions.ts, G-034). A bare orphan is
+ * not recorded: the LLM creates and drops those every few turns, and its next
+ * mention of the name re-creates an equivalent entity. Returns whether it was dropped.
+ */
+function pruneOrphan(id: number, author: Source): boolean {
+  const row = db
+    .prepare(
+      `SELECT id, name, norm, kind, description, created_at, updated_at FROM entities
+       WHERE id = ? AND description = '' AND NOT EXISTS (SELECT 1 FROM entry_entities WHERE entity_id = ?)`,
+    )
+    .get(id, id);
+  if (!row) return false;
+  const aliases = db.prepare(`SELECT norm FROM entity_aliases WHERE entity_id = ? ORDER BY norm`).all(id).map((r) => String(r.norm));
+  const dismissed = db
+    .prepare(`SELECT CASE WHEN a = ? THEN b ELSE a END AS other FROM entity_pair_dismissed WHERE a = ? OR b = ?`)
+    .all(id, id, id)
+    .map((r) => Number(r.other));
+  db.prepare(`DELETE FROM entities WHERE id = ?`).run(id);
+  if (aliases.length || dismissed.length) {
+    // Same row shape as recordGraphRevision / deleteEntity's snapshot (graph.ts); written
+    // here because graph-revisions.ts depends on this module, not the other way round.
+    const snapshot = { entity_id: id, entity: { ...row }, aliases, entries: [], dismissed, reason: "orphan", entity_ids: [id], entry_ids: [] };
+    db.prepare(`INSERT INTO graph_revisions (target, action, snapshot, author) VALUES ('entity', 'delete', ?, ?)`).run(JSON.stringify(snapshot), author);
+  }
+  return true;
+}
+
+/** Entities nobody mentions any more and nobody described are dropped so the list stays clean. Call inside a transaction. */
+export function pruneOrphanEntities(ids: number[], author: Source = "llm") {
   let n = 0;
-  for (const id of ids) n += Number(del.run(id, id).changes);
+  for (const id of ids) if (pruneOrphan(id, author)) n++;
   if (n) entitiesVersion++;
 }
 
@@ -119,10 +152,18 @@ export function touchEntity(id: number) {
   db.prepare(`UPDATE entities SET updated_at = ? WHERE id = ?`).run(now(), id);
 }
 
-/** Drop every orphan entity (after cascading deletes: project removal, purge). */
-export function pruneAllOrphanEntities() {
-  const res = db.prepare(`DELETE FROM entities WHERE description = '' AND NOT EXISTS (SELECT 1 FROM entry_entities ee WHERE ee.entity_id = entities.id)`).run();
-  if (res.changes) entitiesVersion++;
+/**
+ * Drop every orphan entity (after cascading deletes: project removal, purge). Recorded
+ * like pruneOrphanEntities, so an orphan restored by a revert (it has its aliases back
+ * but no mention) is never dropped without a trace.
+ */
+export function pruneAllOrphanEntities(author: Source = "human") {
+  const ids = db
+    .prepare(`SELECT id FROM entities WHERE description = '' AND NOT EXISTS (SELECT 1 FROM entry_entities ee WHERE ee.entity_id = entities.id)`)
+    .all()
+    .map((r) => Number(r.id));
+  if (!ids.length) return;
+  transaction(() => pruneOrphanEntities(ids, author));
 }
 
 /**

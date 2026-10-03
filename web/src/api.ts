@@ -258,8 +258,9 @@ export interface Provenance {
 }
 
 /**
- * One memory-graph edit. link: add | remove; entity: update | merge | delete (revertible),
- * unmerge | restore (written by reverting a merge / delete). A revert's own row carries
+ * One memory-graph edit. link: add | remove; entity: update | merge | delete, and
+ * unmerge | restore (written by reverting a merge / delete; revertible too since v0.6.5).
+ * Whether one can be reverted now is in revertible / blocked. A revert's own row carries
  * snapshot.revert_of. Snapshot shape depends on target/action (see server/src/graph.ts).
  */
 export interface GraphRevision {
@@ -302,7 +303,17 @@ export interface ReviewJob {
   project_name: string | null;
   status: JobStatus;
   payload: { entries: number[]; scheduled?: boolean };
-  result: { done?: number[]; chunks?: number; proposals?: number; ms?: number } | null;
+  result: {
+    done?: number[];
+    chunks?: number;
+    proposals?: number;
+    ms?: number;
+    /** Global/user memories shown read-only to a project review (G-055). */
+    cross_scope?: number;
+    /** Memories longer than the review LLM is shown (first 50 ids, and the count) (G-056). */
+    truncated?: number[];
+    truncated_count?: number;
+  } | null;
   error: string | null;
   created_at: string;
   processed_at: string | null;
@@ -332,12 +343,17 @@ export interface Proposal {
     entities?: string[];
     /** Server-side caution in Korean (e.g. a delete of a memory holding a decision's reason). */
     warning?: string;
+    /** A REFERENCE (global/user) memory this proposal relies on or contradicts, and its version then (G-055). */
+    covered_by?: number;
+    covered_snap?: string;
   };
   reason: string;
   status: "pending" | "applied" | "dismissed" | "stale";
   created_at: string;
   decided_at: string | null;
   entries: ((Entry & { entities: string[]; changed: boolean }) | null)[];
+  /** The memory data.covered_by names, as it is now (changed = no longer the version the LLM saw). */
+  covered_by_entry?: (Entry & { changed: boolean }) | null;
 }
 
 export type PageRef = { id: number; slug: string; title: string; project_id?: number | null };

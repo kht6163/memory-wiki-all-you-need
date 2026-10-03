@@ -299,7 +299,14 @@ function revisionSummary(r: GraphRevision, name: (id: number) => ReactNode): Rea
         엔티티 합치기: {entityName(s.entity, s.entity_id)} → {name(Number(s.into_id))}
       </>
     );
-  if (r.action === "delete") return <>엔티티 삭제: {entityName(s.entity, s.entity_id)}</>;
+  if (r.action === "delete")
+    return s.reason === "orphan" ? (
+      <>
+        엔티티 자동 정리: {entityName(s.entity, s.entity_id)} <span className="faint">(언급하는 메모리가 없어짐)</span>
+      </>
+    ) : (
+      <>엔티티 삭제: {entityName(s.entity, s.entity_id)}</>
+    );
   if (r.action === "unmerge")
     return (
       <>
@@ -325,6 +332,7 @@ export function GraphHistory({
   hideEmpty = false,
   pageSize = 20,
   bare = false,
+  onReverted,
 }: {
   entityId?: number;
   entryId?: number;
@@ -333,6 +341,8 @@ export function GraphHistory({
   pageSize?: number;
   /** No heading (the caller provides one, e.g. a <summary>). */
   bare?: boolean;
+  /** After a successful revert (the page may need to refetch — a revert can remove this entity). */
+  onReverted?: () => void;
 }) {
   const [limit, setLimit] = useState(pageSize);
   const revs = useData(() => api.graphRevisions({ entity_id: entityId, entry_id: entryId, limit: limit + 1 }), [entityId, entryId, limit]);
@@ -373,7 +383,10 @@ export function GraphHistory({
     setBusy(r.id);
     const res = await act(() => api.revertGraphRevision(r.id), { success: "되돌렸습니다" });
     setBusy(null);
-    if (res !== undefined) revs.reload();
+    if (res !== undefined) {
+      revs.reload();
+      onReverted?.();
+    }
   };
 
   return (
@@ -756,7 +769,7 @@ function SimilarSide({ e }: { e: SimilarPair["a"] }) {
 // --------------------------------------------------------------- entity
 
 export function EntityPage({ id }: { id: number }) {
-  const { data, error, loading } = useData(() => api.entity(id), [id]);
+  const { data, error, loading, reload } = useData(() => api.entity(id), [id]);
   const [editing, setEditing] = useState(false);
   const [form, setForm] = useState({ name: "", kind: "concept", description: "" });
   const [merging, setMerging] = useState(false);
@@ -934,7 +947,12 @@ export function EntityPage({ id }: { id: number }) {
         </section>
       ))}
 
-      <GraphHistory entityId={n.id} title="변경 이력" />
+      <GraphHistory
+        entityId={n.id}
+        title="변경 이력"
+        // Reverting a restore or an unmerge deletes this entity again: leave the page then.
+        onReverted={() => void api.entity(id).then(reload, () => (location.hash = "#/entities"))}
+      />
 
       <MergePicker entity={n} memoryCount={data.memories.length} open={merging} onClose={() => setMerging(false)} />
     </article>

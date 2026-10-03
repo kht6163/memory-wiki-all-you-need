@@ -1,7 +1,7 @@
 {
   "name": "@memory-wiki-all-you-need/web",
   "private": true,
-  "version": "0.6.4",
+  "version": "0.6.5",
   "type": "module",
   "scripts": {
     "dev": "vite",

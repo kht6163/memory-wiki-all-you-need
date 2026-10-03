@@ -2,8 +2,9 @@ import { config, llmEnabled } from "./config.ts";
 import { CATEGORIES, db, now, rowToEntry, transaction, type Entry } from "./db.ts";
 import { entryEntitiesDroppedByEdit, entityNamesOf, entityNorm } from "./entities.ts";
 import { moveLinks } from "./graph.ts";
+import { searchEntries } from "./search.ts";
 import { findSecrets } from "./secrets.ts";
-import { HttpError, NOT_SUPERSEDED_SQL, deleteEntry, entryState, getEntry, getProject, updateEntry, type ExactEditError } from "./store.ts";
+import { ACTIVE_SQL, HttpError, NOT_SUPERSEDED_SQL, deleteEntry, entryState, getEntry, getProject, updateEntry, type ExactEditError } from "./store.ts";
 
 // Memory review: an LLM pass over existing memories (cluster by cluster) that
 // PROPOSES merges, fixes, deletions and flags conflicts. Proposals wait for a
@@ -19,7 +20,19 @@ export interface ReviewJob {
   /** scheduled: queued by scheduleDueReviews (REVIEW_EVERY_DAYS), not by a person. */
   payload: { entries: number[]; scheduled?: boolean };
   /** dropped: LLM proposals that were not stored and why (first DROPPED_KEPT); dropped_count: all of them. */
-  result: { done?: number[]; chunks?: number; proposals?: number; dropped?: DroppedProposal[]; dropped_count?: number; ms?: number } | null;
+  result: {
+    done?: number[];
+    chunks?: number;
+    proposals?: number;
+    dropped?: DroppedProposal[];
+    dropped_count?: number;
+    /** Global/user memories shown as read-only context (project reviews; summed over batches). */
+    cross_scope?: number;
+    /** Memories whose body was longer than the LLM was shown (first DROPPED_KEPT ids; truncated_count counts all). */
+    truncated?: number[];
+    truncated_count?: number;
+    ms?: number;
+  } | null;
   error: string | null;
   created_at: string;
   processed_at: string | null;
@@ -57,6 +70,12 @@ export interface Proposal {
     entities?: string[];
     /** delete only: why a person should look twice (Korean, shown on the card); set by markReasonDeletes. */
     warning?: string;
+    /**
+     * delete/update of a project review only: the global/user memory (shown read-only) that already
+     * states what the project memory repeats, and its version then. Apply checks it is unchanged.
+     */
+    covered_by?: number;
+    covered_snap?: string;
     snap: Record<string, string>;
   };
   reason: string;
@@ -165,6 +184,71 @@ export function buildReviewBatches(entries: Entry[], fmt: (e: Entry) => string, 
   }
   flush();
   return batches;
+}
+
+// ------------------------------------------------------------ cross scope
+
+/** Global/user memories shown read-only next to one project batch (count cap). */
+export const CROSS_SCOPE_MAX = 8;
+/** ...and their characters: at most this, and never more than a quarter of REVIEW_CHUNK_CHARS. */
+export const CROSS_SCOPE_CHARS = 6000;
+export const crossScopeBudget = (chunk = config.review.chunkChars) => Math.min(CROSS_SCOPE_CHARS, Math.floor(chunk / 4));
+
+/**
+ * Cross-scope context of a project review batch: the global/user memories most likely
+ * to repeat what the batch says, shown to the LLM READ-ONLY (it may propose deleting or
+ * trimming the project copy, never touching them). Current ones only (an expired or
+ * superseded global memory must not justify deleting a project memory), never standing.
+ * Ranked by shared entities first, then by keyword search on the batch's titles.
+ * Bounded by `max` memories and `chars` characters of `fmt` output.
+ */
+export function crossScopeContext(
+  batch: Entry[],
+  fmt: (e: Entry) => string,
+  opts: { max?: number; chars?: number } = {},
+): Entry[] {
+  const max = opts.max ?? CROSS_SCOPE_MAX;
+  const chars = opts.chars ?? crossScopeBudget();
+  if (!batch.length || max <= 0 || chars <= 0) return [];
+  const ids = batch.slice(0, 500).map((e) => e.id);
+  const order: number[] = [];
+  const byId = new Map<number, Entry>();
+  const rows = db
+    .prepare(
+      `SELECT e.*, COUNT(DISTINCT b.entity_id) AS shared FROM entry_entities a
+         JOIN entry_entities b ON b.entity_id = a.entity_id
+         JOIN entries e ON e.id = b.entry_id
+       WHERE a.entry_id IN (${ids.map(() => "?").join(",")}) AND e.scope IN ('global','user')
+         AND e.deleted_at IS NULL AND e.category != 'standing' AND ${ACTIVE_SQL("e")}
+       GROUP BY e.id ORDER BY shared DESC, e.updated_at DESC, e.id LIMIT ?`,
+    )
+    .all(...ids, max * 3);
+  for (const r of rows) {
+    const e = rowToEntry(r);
+    order.push(e.id);
+    byId.set(e.id, e);
+  }
+  // Keyword overlap: each batch memory's title (and keywords) searched in global/user, best two each.
+  const score = new Map<number, number>();
+  for (const m of batch) {
+    for (const h of searchEntries(`${m.title} ${m.keywords.join(" ")}`, { scopes: ["global", "user"], limit: 2, excludeIds: new Set(order) })) {
+      if (h.entry.category === "standing") continue;
+      score.set(h.entry.id, (score.get(h.entry.id) ?? 0) + h.score);
+      byId.set(h.entry.id, h.entry);
+    }
+  }
+  order.push(...[...score.entries()].sort((a, b) => b[1] - a[1] || a[0] - b[0]).map(([id]) => id));
+  const out: Entry[] = [];
+  let size = 0;
+  for (const id of order) {
+    if (out.length >= max) break;
+    const e = byId.get(id)!;
+    const n = fmt(e).length + 1;
+    if (size + n > chars) continue; // a smaller one further down may still fit
+    out.push(e);
+    size += n;
+  }
+  return out;
 }
 
 // ------------------------------------------------------------------- jobs
@@ -421,6 +505,8 @@ export function combineUpdateProposals(
     const reasons: string[] = [];
     // A part with edits but no entity list: its dropped entities are derived after folding (below).
     let derive = false;
+    // Cross-scope evidence (a global/user memory it repeats): the first part that cites one.
+    let covered: unknown;
     for (const part of group) {
       // Each part is checked on its own first, so one bad part cannot sink the others.
       const drop = (reason: string) => dropped.push({ kind: "update", ids: [id], reason });
@@ -476,6 +562,7 @@ export function combineUpdateProposals(
       if (fresh.length && part.entities == null) derive = true;
       const why = String(part.reason ?? "").trim();
       if (why && !reasons.includes(why)) reasons.push(why);
+      if (covered == null && part.covered_by != null) covered = part.covered_by;
     }
     // Some parts listed entities and some did not: also drop what the folded edits stop mentioning
     // (intersection = union of removals). With no list at all, tryAddProposal derives it instead.
@@ -484,16 +571,58 @@ export function combineUpdateProposals(
       const left = "body" in r ? entitiesAfterEdits(id, edits, `${fields.title ?? getEntry(id)?.title ?? ""}\n${r.body}`) : undefined;
       if (left) fields.entities = fields.entities.filter((n) => left.includes(n));
     }
-    proposals.push({ kind: "update", ids: [id], ...(edits.length ? { edits } : {}), ...fields, reason: reasons.join("; ") });
+    proposals.push({ kind: "update", ids: [id], ...(edits.length ? { edits } : {}), ...fields, ...(covered != null ? { covered_by: covered } : {}), reason: reasons.join("; ") });
   }
   return { proposals, dropped };
 }
 
-/** addProposal, but says why a proposal was not stored (reported on the job result). */
-export function tryAddProposal(jobId: number, raw: Record<string, unknown>, seen: Map<number, string>): { proposal: Proposal } | { reason: string } {
+/**
+ * addProposal, but says why a proposal was not stored (reported on the job result).
+ * `context`: the other-scope memories shown read-only in that batch (cross-scope context of a
+ * project review), id → version when shown. A proposal naming one in "ids" is refused —
+ * a merge as "mixed_scope", anything else as "cross_scope" (they belong to their own scope's
+ * review); a delete/update may cite one in "covered_by" as the memory that already states it.
+ */
+export function tryAddProposal(
+  jobId: number,
+  raw: Record<string, unknown>,
+  seen: Map<number, string>,
+  context: Map<number, string> = new Map(),
+): { proposal: Proposal } | { reason: string } {
   const kind = String(raw.kind ?? raw.op ?? "") as ProposalKind;
   if (!["merge", "update", "delete", "conflict"].includes(kind)) return { reason: "unknown_kind" };
-  const ids = [...new Set((Array.isArray(raw.ids) ? raw.ids : raw.id != null ? [raw.id] : []).map(Number))].filter((id) => seen.has(id));
+  let rawIds = (Array.isArray(raw.ids) ? raw.ids : raw.id != null ? [raw.id] : []).map(Number);
+  // A conflict between a project memory and a REFERENCE memory: the REFERENCE one is cited, never a
+  // target (the LLM sometimes lists it in "ids"). Only one REFERENCE id, and the rest must be this batch's.
+  if (kind === "conflict" && raw.covered_by == null) {
+    const refs = rawIds.filter((id) => context.has(id) && !seen.has(id));
+    if (refs.length === 1) {
+      raw = { ...raw, covered_by: refs[0] };
+      rawIds = rawIds.filter((id) => id !== refs[0]);
+    }
+  }
+  // Checked before the seen filter below, which would otherwise strip them silently.
+  if (rawIds.some((id) => context.has(id) && !seen.has(id))) return { reason: kind === "merge" ? "mixed_scope" : "cross_scope" };
+  // The LLM often names the REFERENCE memory in its reason ("전역 메모리 #2") but leaves out
+  // covered_by: take it from the reason when exactly one REFERENCE id is cited there, so the
+  // apply-time check (G-055) still guards the proposal.
+  if ((kind === "delete" || kind === "update") && (raw.covered_by == null || String(raw.covered_by).trim() === "") && context.size) {
+    const cited = [...new Set([...String(raw.reason ?? "").matchAll(/#(\d+)/g)].map((m) => Number(m[1])))].filter((id) => context.has(id));
+    if (cited.length === 1) raw = { ...raw, covered_by: cited[0] };
+  }
+  let coveredBy: number | undefined;
+  if ((kind === "delete" || kind === "update" || kind === "conflict") && raw.covered_by != null && String(raw.covered_by).trim() !== "") {
+    const cited = Number(raw.covered_by);
+    // Only a REFERENCE memory makes a cross-scope proposal. One from the same batch (an ordinary
+    // in-project duplicate), or any id in a review with no REFERENCE section, is just ignored.
+    if (context.has(cited)) {
+      coveredBy = cited;
+      if (versionOf(coveredBy) !== context.get(coveredBy)) return { reason: "changed_meanwhile" };
+      const ref = getEntry(coveredBy);
+      if (!ref || ref.deleted_at || entryState(ref).superseded_by || entryState(ref).expired) return { reason: "covered_by_inactive" };
+    } else if (context.size && !seen.has(cited)) return { reason: "covered_by_not_shown" };
+  }
+  const ids = [...new Set(rawIds)].filter((id) => seen.has(id));
   // A memory that changed while the LLM was reading it: the proposal is built on old text.
   if (ids.some((id) => versionOf(id) !== seen.get(id))) return { reason: "changed_meanwhile" };
   const job = getReviewJob(jobId);
@@ -504,7 +633,9 @@ export function tryAddProposal(jobId: number, raw: Record<string, unknown>, seen
   // Superseded since the LLM saw it (a link writes no memory revision, so the version check misses it):
   // it is history now, and a merge would hide or delete live content.
   if (entries.some((e) => entryState(e).superseded_by)) return { reason: "superseded" };
-  if ((kind === "merge" || kind === "conflict") && ids.length < 2) return { reason: "too_few_ids" };
+  // A conflict needs two sides: two memories here, or one here and the REFERENCE memory it contradicts.
+  if (kind === "merge" && ids.length < 2) return { reason: "too_few_ids" };
+  if (kind === "conflict" && ids.length < (coveredBy !== undefined ? 1 : 2)) return { reason: "too_few_ids" };
   if ((kind === "update" || kind === "delete") && ids.length !== 1) return { reason: ids.length ? "too_many_ids" : "no_ids" };
   // A merge keeps one memory, so all of them must live in the same place.
   if (kind === "merge" && new Set(entries.map((e) => `${e.scope}/${e.project_id ?? 0}`)).size > 1) return { reason: "mixed_scope" };
@@ -538,7 +669,11 @@ export function tryAddProposal(jobId: number, raw: Record<string, unknown>, seen
     if (kind === "update") {
       const eds = rawEdits(raw);
       if (eds === null) return { reason: "edit_invalid" };
-      const unique = eds.filter((e, i) => eds.findIndex((x) => editKey(x) === editKey(e)) === i);
+      // An edit that only changes whitespace is no change (the LLM sometimes "fixes" a space).
+      const ws = (t: string) => t.replace(/\s+/g, " ").trim();
+      const unique = eds
+        .filter((e, i) => eds.findIndex((x) => editKey(x) === editKey(e)) === i)
+        .filter((e) => ws((e as ExactEdit).old) !== ws((e as ExactEdit).new));
       if (unique.length) {
         const r = applyExactEdits(entries[0].body, unique);
         if ("error" in r) return { reason: r.error };
@@ -571,6 +706,13 @@ export function tryAddProposal(jobId: number, raw: Record<string, unknown>, seen
       return { reason: "no_change" };
   }
   if (kind === "conflict" && raw.note != null) data.note = String(raw.note);
+  let reason = String(raw.reason ?? "");
+  if (coveredBy !== undefined) {
+    data.covered_by = coveredBy;
+    data.covered_snap = context.get(coveredBy);
+    // The reason cites the memory it relies on, so the card and the revision note say where it is.
+    if (!new RegExp(`#${coveredBy}(?!\\d)`).test(reason)) reason = `${reason.trim()} (#${coveredBy})`.trim();
+  }
   // The same memories already have an open proposal of this kind: skip the duplicate.
   // entry_ids keeps the LLM's order (a merge keeps the first). Skip a duplicate of an open
   // proposal, and of a dismissed one whose memories have not changed since (no re-asking).
@@ -589,7 +731,7 @@ export function tryAddProposal(jobId: number, raw: Record<string, unknown>, seen
   }
   const res = db
     .prepare(`INSERT INTO review_proposals (job_id, kind, entry_ids, data, reason) VALUES (?, ?, ?, ?, ?)`)
-    .run(jobId, kind, JSON.stringify(ids), JSON.stringify(data), String(raw.reason ?? "").slice(0, 500));
+    .run(jobId, kind, JSON.stringify(ids), JSON.stringify(data), reason.slice(0, 500));
   return { proposal: getProposal(Number(res.lastInsertRowid))! };
 }
 
@@ -597,8 +739,8 @@ export function tryAddProposal(jobId: number, raw: Record<string, unknown>, seen
  * Validate and store one LLM proposal. `seen` = ids shown in that batch with the version the LLM saw.
  * Returns null (and stores nothing) when the proposal breaks a rule; tryAddProposal says which.
  */
-export function addProposal(jobId: number, raw: Record<string, unknown>, seen: Map<number, string>): Proposal | null {
-  const r = tryAddProposal(jobId, raw, seen);
+export function addProposal(jobId: number, raw: Record<string, unknown>, seen: Map<number, string>, context?: Map<number, string>): Proposal | null {
+  const r = tryAddProposal(jobId, raw, seen, context);
   return "proposal" in r ? r.proposal : null;
 }
 
@@ -679,7 +821,23 @@ export function listProposals(f: { status?: ProposalStatus; jobId?: number; proj
         const e = getEntry(id);
         return e ? { ...e, entities: entityNamesOf(id), changed: versionOf(id) !== p.data.snap[String(id)] || entryState(e).superseded_by != null } : null;
       }),
+      // The global/user memory a cross-scope proposal relies on (null = gone); changed = apply would refuse.
+      ...(p.data.covered_by != null
+        ? (() => {
+            const e = getEntry(p.data.covered_by);
+            return { covered_by_entry: e ? { ...e, changed: coveredByChanged(p) } : null };
+          })()
+        : {}),
     }));
+}
+
+/** The memory a cross-scope proposal cites is gone, changed, superseded or expired since it was shown. */
+function coveredByChanged(p: Proposal): boolean {
+  if (p.data.covered_by == null) return false;
+  const e = getEntry(p.data.covered_by);
+  if (!e || e.deleted_at || versionOf(e.id) !== p.data.covered_snap) return true;
+  const st = entryState(e);
+  return st.superseded_by != null || st.expired;
 }
 
 function decide(id: number, status: ProposalStatus) {
@@ -710,6 +868,11 @@ export function applyProposal(id: number): Proposal {
   if (changed) {
     decide(id, "stale");
     throw new HttpError(409, "the memories changed since this was proposed; run the review again");
+  }
+  // Deleting or trimming a project copy is only right while the global/user memory still says it.
+  if (coveredByChanged(p)) {
+    decide(id, "stale");
+    throw new HttpError(409, `memory #${p.data.covered_by} this relies on changed since it was proposed; run the review again`);
   }
   const meta = { author: "llm" as const, reason: `메모리 점검 제안 #${p.id} 승인: ${p.reason}`.slice(0, 500) };
   try {
@@ -759,7 +922,7 @@ function applyInTransaction(p: Proposal, meta: { author: "llm"; reason: string }
       const entities = [...freq.entries()].sort((a, b) => b[1] - a[1]).map(([n]) => n);
       updateEntry(keep, { title: p.data.title, body: p.data.body, category: p.data.category, entities }, meta);
       for (const other of rest) {
-        moveLinks(other, keep);
+        moveLinks(other, keep, { author: meta.author }); // recorded in graph history (revertible)
         deleteEntry(other, { ...meta, reason: `#${keep}에 합쳐짐 (점검 제안 #${p.id})` });
       }
     }

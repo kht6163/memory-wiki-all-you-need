@@ -81,6 +81,7 @@ const RULES: Rule[] = [
   [/^not enough memories to review$/, () => "점검할 메모리가 2개 이상 있어야 합니다"],
   [/^proposal is already (\w+)$/, (s) => `이미 ${PROPOSAL_STATUS[s] ?? s} 제안입니다`],
   [/^the memories changed since this was proposed/, () => "제안 뒤 메모리가 바뀌었습니다. 무시하고 점검을 다시 실행하세요"],
+  [/^memory #(\d+) this relies on changed since it was proposed/, (id) => `이 제안이 기대는 메모리(#${id})가 제안 뒤 바뀌었습니다. 무시하고 점검을 다시 실행하세요`],
   [/^the edited passage now occurs more than once/, () => "고칠 구절이 이제 본문에 여러 번 나옵니다. 무시하고 점검을 다시 실행하세요"],
   [/^the edited passage is no longer in the body/, () => "고칠 구절이 이제 본문에 없습니다. 무시하고 점검을 다시 실행하세요"],
   [/^the edited passages now overlap/, () => "고칠 구절들이 이제 서로 겹칩니다. 무시하고 점검을 다시 실행하세요"],

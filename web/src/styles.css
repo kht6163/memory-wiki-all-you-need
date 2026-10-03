@@ -1589,6 +1589,16 @@ dialog {
 }
 .callout.info > .icon { color: var(--color-info-text); }
 
+/* Overflow menu (components/Menu.tsx): wrapper + square "더 보기" trigger. */
+.menu {
+  position: relative;
+  display: inline-flex;
+}
+.menu-trigger {
+  width: 32px;
+  padding: 0;
+  justify-content: center;
+}
 /* Dropdown menu: a popover list anchored to a relatively positioned wrapper. */
 .menu-list {
   position: absolute;
@@ -1631,6 +1641,63 @@ dialog {
 .menu-item.danger > .icon { color: var(--color-danger-text); }
 .menu-item.danger:hover,
 .menu-item.danger:focus-visible { background: var(--color-danger-soft); }
+/* Search input with a leading icon (graph toolbar, entity list). */
+.search-field {
+  position: relative;
+  display: inline-flex;
+  align-items: center;
+}
+.search-field > .icon {
+  position: absolute;
+  left: 9px;
+  color: var(--color-text-3);
+  pointer-events: none;
+}
+.search-field input {
+  padding-left: 28px;
+  width: 220px;
+}
+/* Toggle switch: <button role="switch" aria-checked> (memory detail "고정"). */
+.switch {
+  position: relative;
+  width: 32px;
+  height: 18px;
+  padding: 0;
+  border-radius: var(--radius-full);
+  border: 1px solid var(--color-border-strong);
+  background: var(--color-surface-3);
+  cursor: pointer;
+  vertical-align: middle;
+  transition: background var(--dur-fast) var(--ease-out), border-color var(--dur-fast) var(--ease-out);
+}
+.switch::after {
+  content: "";
+  position: absolute;
+  top: 1px;
+  left: 1px;
+  width: 14px;
+  height: 14px;
+  border-radius: 50%;
+  background: var(--color-surface);
+  box-shadow: var(--shadow-xs);
+  transition: transform var(--dur-fast) var(--ease-out);
+}
+.switch[aria-checked="true"] {
+  background: var(--color-accent);
+  border-color: var(--color-accent);
+}
+.switch[aria-checked="true"]::after {
+  transform: translateX(14px);
+  background: var(--color-accent-fg);
+}
+.switch:focus-visible {
+  outline: 2px solid var(--color-ring);
+  outline-offset: 2px;
+}
+.switch:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
 .clamp-2 {
   overflow: hidden;
   display: -webkit-box;

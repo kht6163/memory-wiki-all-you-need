@@ -33,6 +33,15 @@ const KIND: Record<Proposal["kind"], { label: string; action: string }> = {
 
 type PEntry = NonNullable<Proposal["entries"][number]>;
 
+/**
+ * The global/user memory a project review proposal relies on (it already states what the project
+ * memory repeats) or contradicts (G-055). null entry = it was deleted. No entities on it.
+ */
+type CoveredBy = { id: number; entry: NonNullable<Proposal["covered_by_entry"]> | null };
+function coveredBy(p: Proposal): CoveredBy | null {
+  return p.data.covered_by == null ? null : { id: p.data.covered_by, entry: p.covered_by_entry ?? null };
+}
+
 const isActive = (j: ReviewJob) => j.status === "pending" || j.status === "processing";
 
 /** Why a proposal can't be applied (shown inline next to the disabled button), or null when it can. */
@@ -41,6 +50,9 @@ function blockedReason(p: Proposal): string | null {
   if (missing >= 0) return `메모리 #${p.entry_ids[missing]}이(가) 삭제되어 적용할 수 없습니다`;
   const changed = p.entries.find((e) => e?.changed);
   if (changed) return `제안 뒤 #${changed.id}이(가) 바뀌어 적용할 수 없습니다. 무시하고 다시 점검하세요`;
+  const cov = coveredBy(p);
+  if (cov && (!cov.entry || cov.entry.deleted_at)) return `근거인 메모리 #${cov.id}이(가) 삭제되어 적용할 수 없습니다`;
+  if (cov?.entry?.changed) return `제안 뒤 근거인 메모리 #${cov.id}이(가) 바뀌어 적용할 수 없습니다. 무시하고 다시 점검하세요`;
   return null;
 }
 
@@ -293,6 +305,8 @@ function JobRow({ j, reload }: { j: ReviewJob; reload: () => void }) {
   const [busy, setBusy] = useState(false);
   const total = j.payload.entries.length;
   const done = j.result?.done?.length ?? 0;
+  // Recorded on the job result by the server (no silent cap): how much was only partly seen.
+  const extra = j.result;
   const run = async (fn: () => Promise<unknown>, success: string) => {
     setBusy(true);
     await act(fn, { success });
@@ -311,6 +325,12 @@ function JobRow({ j, reload }: { j: ReviewJob; reload: () => void }) {
         #{j.id} · <Time iso={j.created_at} /> · 메모리 {isActive(j) || j.status === "cancelled" || j.status === "error" ? `${done}/${total}` : total}개
         {j.result?.proposals !== undefined && ` · 제안 ${j.result.proposals}개`}
         {j.result?.ms !== undefined && j.status === "done" && ` · ${Math.round(j.result.ms / 1000)}초`}
+        {(extra?.cross_scope ?? 0) > 0 && ` · 전역·사용자 메모리 ${extra!.cross_scope}개 참고`}
+        {(extra?.truncated_count ?? 0) > 0 && (
+          <span title="본문이 길어 LLM이 앞부분만 보았습니다. 이 메모리들은 본문 전체를 고쳐 쓰거나 다른 메모리와 겹친다는 이유로 지우는 제안을 받지 않습니다">
+            {` · ${extra!.truncated_count}개는 길어서 앞 4000자만 검토`}
+          </span>
+        )}
       </span>
       <span className="right row">
         {isActive(j) && (
@@ -359,6 +379,40 @@ const EDIT_PROBLEM: Record<EditProblem, string> = {
   repeated: "바꿀 구절이 현재 본문에 여러 번 나옵니다. 적용하면 실패할 수 있습니다.",
   overlap: "다른 수정 구절과 겹칩니다. 적용하면 실패할 수 있습니다.",
 };
+
+/** Cross-scope evidence: the global/user memory (read-only in the review) that already says it. */
+function CoveredByBox({ p }: { p: Proposal }) {
+  const cov = coveredBy(p);
+  if (!cov) return null;
+  const e = cov.entry;
+  return (
+    <div className="proposal-covered">
+      <div className="change-label">
+        <span className="covered-label">{p.kind === "conflict" ? "맞서는 메모리" : "근거"}</span>{" "}
+        <span className="change-note">
+          {p.kind === "conflict"
+            ? `이 프로젝트 메모리가 ${e ? SCOPE_LABEL[e.scope] : "전역·사용자"} 메모리와 다르게 말합니다. 어느 쪽이 맞는지 정해 고친 뒤 해결로 표시하세요. 전역 메모리는 이 점검에서 바꾸지 않습니다`
+            : `이미 ${e ? SCOPE_LABEL[e.scope] : "전역·사용자"} 메모리에 있는 내용이라 이 프로젝트 메모리만 ${p.kind === "delete" ? "지웁니다" : "고칩니다"}. 근거 메모리는 바꾸지 않습니다`}
+        </span>
+      </div>
+      {e ? (
+        <div className={`pentry covered-entry${isHistory(e) ? " is-history" : ""}`}>
+          <div className="pentry-meta">
+            <span className="badge faint">{SCOPE_LABEL[e.scope]}</span>
+            <CategoryBadge category={e.category} />
+            <a href={`#/e/${e.id}`}>#{e.id}</a>
+            <StateBadge e={e} />
+            {e.changed && <span className="error-text">제안 뒤 바뀜</span>}
+          </div>
+          <div className="pentry-title">{e.title}</div>
+          {e.body && <div className="pentry-body">{e.body}</div>}
+        </div>
+      ) : (
+        <MissingBox id={cov.id} />
+      )}
+    </div>
+  );
+}
 
 function MissingBox({ id }: { id: number }) {
   return <div className="pentry is-missing">#{id} (삭제됨)</div>;
@@ -527,6 +581,7 @@ function ProposalCard({
         <span className="proposal-id">#{p.id}</span>
       </div>
       {body}
+      <CoveredByBox p={p} />
       {p.data.warning && <Callout kind="danger">{p.data.warning}</Callout>}
       <div className="proposal-actions">
         <button className="btn small primary" disabled={Boolean(blocked) || busy} aria-busy={busy || undefined} onClick={onApply}>

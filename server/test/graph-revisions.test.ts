@@ -158,7 +158,7 @@ test("merge is recorded and reverted: entity, aliases and mentions come back (G-
   const r = await revert(merge.id);
   assert.equal(r.status, 200, JSON.stringify(r.data));
   assert.equal(r.data.revert.action, "unmerge");
-  assert.equal(r.data.revert.revertible, false);
+  assert.equal(r.data.revert.revertible, true, "an unmerge can be reverted (merges again)");
 
   const back = (await ok<Any>("GET", `/entities/${from}`)).entity;
   assert.equal(back.id, from, "same id when free");
@@ -175,7 +175,15 @@ test("merge is recorded and reverted: entity, aliases and mentions come back (G-
   for (const n of ["Gannet MQ", "gannet-queue"]) assert.equal((await resolve(n)).id, from, n);
   assert.equal((await resolve("Tern Queue")).id, into);
   assert.equal((await revert(merge.id)).status, 409);
-  assert.equal((await revert(r.data.revert.id)).status, 409, "an unmerge is not revertible");
+  // Reverting the unmerge merges again, recorded as a new merge that is itself revertible.
+  const again = await revert(r.data.revert.id);
+  assert.equal(again.status, 200, JSON.stringify(again.data));
+  assert.equal(again.data.revert.action, "merge");
+  assert.equal(again.data.revert.snapshot.revert_of, r.data.revert.id);
+  assert.equal(again.data.revert.revertible, true);
+  assert.equal((await call("GET", `/entities/${from}`)).status, 404);
+  assert.equal((await resolve("Gannet MQ")).id, into);
+  assert.equal((await revert(r.data.revert.id)).status, 409, "reverting the unmerge twice is 409");
 });
 
 test("merge revert is 409 when the target took the merged-away name", async () => {
@@ -215,7 +223,7 @@ test("delete is recorded and reverted with aliases and mentions of live memories
   assert.equal((await revert(del.id)).status, 409);
 });
 
-test("orphan prune is not recorded as a revertible change", async () => {
+test("a bare orphan prune (no aliases, no dismissed pairs) is not recorded", async () => {
   const m = await entry({ title: "rev prune", entities: ["Shearwater Tmp"] });
   const [id] = await entityIdsOf(m.id);
   await ok("PATCH", `/entries/${m.id}`, { entities: [] });

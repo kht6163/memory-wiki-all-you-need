@@ -5,21 +5,6 @@
 :is(.graph-page, .entities-page, .entity-page, .entry-graph, .merge-dialog) .mono-num {
   font-variant-numeric: tabular-nums;
 }
-:is(.graph-page, .entities-page) .search-field {
-  position: relative;
-  display: inline-flex;
-  align-items: center;
-}
-:is(.graph-page, .entities-page) .search-field > .icon {
-  position: absolute;
-  left: 9px;
-  color: var(--color-text-3);
-  pointer-events: none;
-}
-:is(.graph-page, .entities-page) .search-field input {
-  padding-left: 28px;
-  width: 220px;
-}
 .kind-icon {
   flex: none;
   color: var(--color-text-3);

@@ -9,14 +9,16 @@ import { entityNorm, resolveEntityId } from "./entities.ts";
 //
 // Actions:
 //   link:   add | remove
-//   entity: update | merge | delete          — revertible
-//           unmerge | restore                — written by reverting a merge /
-//                                              delete; not revertible (merge or
-//                                              delete again instead)
+//   entity: update | merge | delete | unmerge | restore
+//           unmerge / restore are written by reverting a merge / delete;
+//           reverting them merges / deletes again (recorded as a new merge /
+//           delete), so every action is revertible.
 // A write made by a revert keeps its real action and carries
-// snapshot.revert_of = <reverted revision id>, so reverting a revert of a link
-// add/remove or an entity update works like any other revision. The automatic
-// orphan-entity prune is not a user action and is not recorded.
+// snapshot.revert_of = <reverted revision id>, so reverting a revert works like
+// any other revision. The automatic orphan-entity prune (entities.ts) is
+// recorded as a "delete" with snapshot.reason = "orphan" when the entity had
+// aliases or dismissed pairs; a bare orphan is not recorded. Creating an entity
+// is not recorded: it carries nothing a mention of the name would not re-create.
 //
 // Every snapshot carries entity_ids / entry_ids (the entities and memories it
 // touches) so the list can be filtered with one SQL shape. Entities are named
@@ -26,7 +28,7 @@ import { entityNorm, resolveEntityId } from "./entities.ts";
 export type GraphRevisionTarget = "link" | "entity";
 export const REVERTIBLE: Record<GraphRevisionTarget, readonly string[]> = {
   link: ["add", "remove"],
-  entity: ["update", "merge", "delete"],
+  entity: ["update", "merge", "delete", "unmerge", "restore"],
 };
 
 export interface GraphRevision {
@@ -255,6 +257,10 @@ export function recreateBlock(row: Record<string, any>, aliasOf?: number): Rever
  *   included, would otherwise be lost — restore it first); the merged-away name
  *   must still point at the target or nowhere; no entity may carry that name.
  * - delete: the name must be free (recreateBlock).
+ * - restore (a delete revert): the entity must still exist (entity_gone); the
+ *   revert deletes it again like deleteEntity.
+ * - unmerge (a merge revert): the entity must still exist (entity_gone), then the
+ *   target (merge_target_gone); the revert merges it again like mergeEntities.
  * A merge or delete revert recreates the gone entity, so "gone" is its normal state there, not a block.
  */
 export function entityRevertBlock(action: string, s: Record<string, any>): RevertBlock | null {
@@ -279,6 +285,15 @@ export function entityRevertBlock(action: string, s: Record<string, any>): Rever
     return recreateBlock(s.entity, intoId);
   }
   if (action === "delete") return recreateBlock(s.entity);
+  if (action === "restore" || action === "unmerge") {
+    const exists = db.prepare(`SELECT 1 FROM entities WHERE id = ?`);
+    const id = Number(s.entity_id);
+    if (!exists.get(id)) return { code: "entity_gone", entity_id: id, status: 404, message: ENTITY_NOT_FOUND };
+    const intoId = Number(s.into_id);
+    if (action === "unmerge" && !exists.get(intoId)) {
+      return { code: "merge_target_gone", entity_id: intoId, message: `the merge target #${intoId} no longer exists — restore the target first` };
+    }
+  }
   return null;
 }
 
