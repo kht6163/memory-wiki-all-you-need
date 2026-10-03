@@ -4,7 +4,7 @@
 import assert from "node:assert/strict";
 import { readdirSync, readFileSync } from "node:fs";
 import { test } from "node:test";
-import { ApiError, describeError, errorText } from "../../web/src/errors.ts";
+import { ApiError, describeError, errorText, revertBlockText } from "../../web/src/errors.ts";
 import { missingLinks, slugify } from "../../web/src/wikilinks.ts";
 import { editProblems, entityChange, entityKey, proposalEdits } from "../../web/src/proposal.ts";
 import { entityNorm } from "../src/entities.ts";
@@ -41,6 +41,18 @@ test("G-048: graph revert 409 messages are shown in Korean", () => {
     assert.match(d.text, want, msg);
     assert.equal(d.raw, msg);
   }
+});
+
+test("G-041: blocked-revert hints say what lifts the block (trash, gone entity)", () => {
+  const trashed = revertBlockText({ code: "endpoint_trashed", entry_id: 5, message: "both memories must exist" });
+  assert.match(trashed, /메모리 #5.*휴지통.*먼저 휴지통에서 되살리세요/);
+  const gone = revertBlockText({ code: "entity_gone", entity_id: 9, message: "entity not found" });
+  assert.match(gone, /엔티티 #9.*없습니다.*먼저 되돌리세요/);
+  // Other codes: the same Korean text as the revert's error (RULES).
+  const other = revertBlockText({ code: "link_exists", message: "the link already exists" });
+  assert.equal(other, describeError(new ApiError(409, "the link already exists")).text);
+  // Their raw messages also have rules (the revert's 404 toast).
+  for (const msg of ["both memories must exist", "entity not found"]) assert.equal(describeError(new ApiError(404, msg)).known, true, msg);
 });
 
 test("G-048: review apply 422 wrapping translates the inner message", () => {
@@ -107,6 +119,8 @@ test("G-048: every 4xx HttpError message in server/src has a Korean rule", () =>
     if (f === "graph-revisions.ts") {
       for (const m of src.matchAll(/message: "([^"]*)"/g)) msgs.push(m[1]);
       for (const m of src.matchAll(/message: `/g)) msgs.push(sampleTemplate(src, m.index + m[0].length).text);
+      // Shared 404 texts (MEMORIES_MISSING, ENTITY_NOT_FOUND) that graph.ts throws by name.
+      for (const m of src.matchAll(/export const [A-Z_]+ = "([^"]*)"/g)) msgs.push(m[1]);
     }
     for (const msg of msgs) {
       if (msg.startsWith("could not apply: ") || AGENT_ONLY.some((re) => re.test(msg))) continue;

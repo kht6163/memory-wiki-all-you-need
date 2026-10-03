@@ -130,17 +130,16 @@ test("G-041: a delete whose name is now another entity's alias is listed as name
   await assertBlocked(del, "name_taken");
 });
 
-test("G-041: a retiring supersedes removal that would close a cycle is listed as supersedes_cycle; a trashed memory is not blocked", async () => {
+test("G-041: a retiring supersedes removal that would close a cycle is listed as supersedes_cycle; a trashed memory is endpoint_trashed until restored", async () => {
   const a = await entry({ title: "g3 cycle A" });
   const b = await entry({ title: "g3 cycle B" });
   await ok("POST", `/entries/${a.id}/links`, { to: b.id, type: "supersedes" });
   await ok("DELETE", `/entries/${a.id}/links?to=${b.id}&type=supersedes`);
   await ok("POST", `/entries/${b.id}/links`, { to: a.id, type: "supersedes" });
   const rm = async () => (await revisions(`&entry_id=${a.id}`)).find((r) => r.action === "remove" && r.snapshot.from_id === a.id)!;
-  // In the trash: restore first (addLink's 404), as G-041 documents.
+  // In the trash: restore first (addLink's 404), listed as endpoint_trashed.
   await ok("DELETE", `/entries/${b.id}`);
-  assert.equal((await rm()).revertible, true);
-  assert.equal((await revert((await rm()).id)).status, 404);
+  await assertBlocked(await rm(), "endpoint_trashed", 404);
   await ok("POST", `/entries/${b.id}/restore`);
   await assertBlocked(await rm(), "supersedes_cycle");
   assert.equal(db.prepare(`SELECT 1 FROM entry_links WHERE from_id = ? AND to_id = ?`).get(a.id, b.id), undefined);

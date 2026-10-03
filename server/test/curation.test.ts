@@ -333,6 +333,18 @@ test("add with scope project but no project falls back to global; at most 20 ops
 });
 
 test("the curation prompt dates the turn by when it happened, not when it is curated", async () => {
+  // Pinned to UTC so the expected date does not follow a TIMEZONE set in the developer's shell.
+  const { config } = await import("../src/config.ts");
+  const prev = config.timezone;
+  (config as { timezone: string }).timezone = "UTC";
+  try {
+    await turnDatedByCreation();
+  } finally {
+    (config as { timezone: string }).timezone = prev;
+  }
+});
+
+async function turnDatedByCreation() {
   const p = await freshProject();
   const t = await turn([{ role: "user", text: "yesterday the nightly build broke on the arm runner" }, { role: "assistant", text: "noted" }], p);
   // A backlog: the turn was recorded days before the worker gets to it.
@@ -346,7 +358,7 @@ test("the curation prompt dates the turn by when it happened, not when it is cur
   await runQueueOnce();
   assert.equal(llmCalls.length, 1);
   assert.equal((await getTurn(t.id)).status, "done");
-});
+}
 
 test("TURN DATE uses TIMEZONE: 01:00 in Seoul is still the previous day in UTC", async () => {
   const { config } = await import("../src/config.ts");

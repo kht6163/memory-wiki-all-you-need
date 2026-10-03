@@ -566,6 +566,20 @@ function CurationSummary({ t }: { t: TurnDetail }) {
               </ul>
             </>
           )}
+          {(r.inferred?.length ?? 0) > 0 && (
+            <>
+              <h3>본문의 기한으로 유효 기한 설정 {r.inferred!.length}</h3>
+              <ul className="op-list">
+                {r.inferred!.map((x, i) => (
+                  <li key={i}>
+                    <span className="op-chip faint">기한</span>
+                    <a href={`#/e/${x.entryId}`}>{x.title}</a>
+                    <span className="reason mono">{x.valid_until}까지</span>
+                  </li>
+                ))}
+              </ul>
+            </>
+          )}
           {(r.model || r.ms) && (
             <p className="row-meta" style={{ marginTop: "var(--space-3)" }}>
               {r.model && <span className="mono">{r.model}</span>}

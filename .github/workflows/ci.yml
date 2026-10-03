@@ -18,3 +18,65 @@ jobs:
       - run: npm run typecheck
       - run: npm test
       - run: npm run build
+
+  docker:
+    runs-on: ubuntu-latest
+    # hard ceiling so a hung build/curl cannot hold the runner for the 360-minute default
+    timeout-minutes: 15
+    env:
+      IMAGE: memory-wiki-ci:${{ github.sha }}
+      CONTAINER: memory-wiki-ci-${{ github.run_id }}-${{ github.run_attempt }}
+      HOST_PORT: "18765"
+    steps:
+      - uses: actions/checkout@v4
+      - name: Build image
+        run: docker build -t "$IMAGE" .
+      - name: Check image contents
+        run: |
+          # tests stay out of the image; web build (with self-hosted fonts, G-038) and extension are in
+          docker run --rm --entrypoint sh "$IMAGE" -c '
+            set -e
+            test ! -e /app/server/test
+            test -f /app/web/dist/index.html
+            ls /app/web/dist/assets | grep -q "\.woff2$"
+            test -f /app/pi-extension/index.ts
+            test -f /app/pi-extension/project.ts
+          '
+      - name: Start container
+        run: |
+          # data dir must be writable by the image's USER (node); a fresh temp dir is not
+          DATA="$RUNNER_TEMP/memory-wiki-data"
+          mkdir -p "$DATA" && chmod 0777 "$DATA"
+          docker run -d --name "$CONTAINER" -p "127.0.0.1:$HOST_PORT:8765" -v "$DATA:/data" "$IMAGE"
+      - name: Wait for /api/health
+        run: |
+          # deadline-based so per-request time (max 2s each) counts toward the 60s budget
+          deadline=$((SECONDS + 60))
+          while [ "$SECONDS" -lt "$deadline" ]; do
+            if curl -fsS --connect-timeout 1 --max-time 2 "http://127.0.0.1:$HOST_PORT/api/health"; then echo; exit 0; fi
+            if [ "$(docker inspect -f '{{.State.Running}}' "$CONTAINER")" != "true" ]; then
+              echo "container exited"; exit 1
+            fi
+            sleep 1
+          done
+          echo "health check timed out after 60s"; exit 1
+      - name: Check web, install script and data volume
+        run: |
+          set -eu
+          base="http://127.0.0.1:$HOST_PORT"
+          out="$RUNNER_TEMP/http"
+          mkdir -p "$out"
+          get() { code=$(curl -s --connect-timeout 2 --max-time 10 -o "$out/$2" -w '%{http_code}' "$base$1" || true); echo "GET $1 -> $code"; test "$code" = 200; }
+          get / index.html
+          grep -q '<div id="root"' "$out/index.html"
+          get /install.sh install.sh
+          grep -q "$base/pi-extension/index.ts" "$out/install.sh"
+          get /pi-extension/index.ts ext.ts
+          grep -q "$base" "$out/ext.ts"   # placeholder default URL replaced (G-008)
+          test -s "$RUNNER_TEMP/memory-wiki-data/memory.db"   # DB lives on the mounted volume
+      - name: Container logs
+        if: failure()
+        run: docker logs "$CONTAINER" || true
+      - name: Remove container
+        if: always()
+        run: docker rm -f "$CONTAINER" || true

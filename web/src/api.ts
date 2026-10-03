@@ -99,6 +99,8 @@ export interface TurnDetail extends Omit<TurnSummary, "prompt" | "applied" | "no
     applied: TurnSummary["applied"];
     /** Ops dropped on purpose, e.g. an add identical to an existing memory. */
     skipped?: { op: string; title: string; reason: string; entryId?: number }[];
+    /** valid_until the server took from a deadline in the body (the LLM left it empty). */
+    inferred?: { op: string; entryId: number; title: string; valid_until: string; from: "body" }[];
     note?: string;
     model?: string;
     ms?: number;
@@ -275,6 +277,7 @@ export interface GraphRevision {
     code:
       | "endpoint_purged"
       | "endpoint_replaced"
+      | "endpoint_trashed"
       | "link_exists"
       | "link_gone"
       | "link_not_retiring"
@@ -283,10 +286,11 @@ export interface GraphRevision {
       | "name_taken"
       | "name_moved"
       | "merge_target_gone"
-      | "nothing_to_revert";
+      | "nothing_to_revert"
+      | "entity_gone";
     entry_id?: number;
     entity_id?: number;
-    /** HTTP status the revert answers with (default 409; cross_project 400). */
+    /** HTTP status the revert answers with (default 409; cross_project 400; endpoint_trashed / entity_gone 404). */
     status?: number;
     message: string;
   } | null;

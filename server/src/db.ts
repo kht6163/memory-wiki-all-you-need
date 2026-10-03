@@ -104,6 +104,8 @@ export interface TurnResult {
   applied: { op: string; entryId: number; title: string }[];
   /** Ops dropped on purpose (e.g. an exact duplicate of an existing memory). */
   skipped?: { op: string; title: string; reason: string; entryId?: number }[];
+  /** valid_until the worker took from a deadline written in the body (the LLM left it empty). */
+  inferred?: { op: string; entryId: number; title: string; valid_until: string; from: "body" }[];
   note?: string;
   model?: string;
   ms?: number;

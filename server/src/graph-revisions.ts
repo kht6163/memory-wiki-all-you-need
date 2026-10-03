@@ -39,13 +39,19 @@ export interface GraphRevision {
   reverted_at: string | null;
   /** False when already reverted, the action is never revertible, or `blocked` is set. */
   revertible: boolean;
-  /** Why a revert would fail now (the revert route throws 409 with `message`). */
+  /** Why a revert would fail now (the revert route throws `status` (default 409) with `message`). */
   blocked: RevertBlock | null;
 }
+
+/** addLink's 404 for a missing or trashed end, shared with endpoint_trashed (G-041). */
+export const MEMORIES_MISSING = "both memories must exist";
+/** The entity routes' 404, shared with entity_gone (G-041). */
+export const ENTITY_NOT_FOUND = "entity not found";
 
 export type RevertBlockCode =
   | "endpoint_purged"
   | "endpoint_replaced"
+  | "endpoint_trashed"
   | "link_exists"
   | "link_gone"
   | "link_not_retiring"
@@ -54,14 +60,15 @@ export type RevertBlockCode =
   | "name_taken"
   | "name_moved"
   | "merge_target_gone"
-  | "nothing_to_revert";
+  | "nothing_to_revert"
+  | "entity_gone";
 export interface RevertBlock {
   code: RevertBlockCode;
   /** The memory the code is about (endpoint_*). */
   entry_id?: number;
-  /** The entity the code is about (name_taken / name_moved: the owner now; merge_target_gone: the target). */
+  /** The entity the code is about (name_taken / name_moved: the owner now; merge_target_gone: the target; entity_gone: the gone one). */
   entity_id?: number;
-  /** HTTP status the revert answers with (default 409; cross_project keeps addLink's 400). */
+  /** HTTP status the revert answers with (default 409; cross_project keeps addLink's 400; endpoint_trashed / entity_gone 404). */
   status?: number;
   /** English, the same text the revert route's error carries. */
   message: string;
@@ -112,13 +119,17 @@ export function supersedesBlock(fromId: number, toId: number): RevertBlock | nul
  *   from before AUTOINCREMENT): the snapshot's creation times must match, and
  *   older snapshots without them fall back to "created after the removal" (the
  *   original existed when it was removed). Never links an unrelated memory.
+ *   Purged / replaced is checked on both ends before the trash, so a link with
+ *   one end purged is never shown as "restore from the trash first".
+ *   A memory in the trash blocks it with the 404 the revert answers
+ *   (addLink / restoreInformationalLink check the trash before anything else):
+ *   endpoint_trashed — restore the memory from the trash, and it is revertible again.
  *   The link must not be back already (added again since): the revert would
  *   find it and refuse. A legacy informational supersedes row (retires = 0) is
  *   no obstacle to restoring a retiring one (addLink turns it on), and a
  *   "related" link counts in either direction (stored once).
  *   A retiring link is put back with addLink, so its supersedes checks apply
- *   too (supersedesBlock) — once both memories are live: a memory in the trash
- *   is not blocked (restore it first; addLink answers 404 meanwhile).
+ *   too (supersedesBlock).
  * - add: the link must still be there (purging a memory drops its links), and
  *   a legacy link the add turned on must still be retiring.
  * Entity revisions are checked by entityRevertBlock.
@@ -126,9 +137,14 @@ export function supersedesBlock(fromId: number, toId: number): RevertBlock | nul
 export function linkRevertBlock(target: GraphRevisionTarget, action: string, s: Record<string, any>, createdAt: string): RevertBlock | null {
   if (target !== "link") return null;
   if (action === "remove") {
-    for (const end of ["from", "to"] as const) {
+    const ends = (["from", "to"] as const).map((end) => {
       const id = Number(s[`${end}_id`]);
-      const e = db.prepare(`SELECT created_at FROM entries WHERE id = ?`).get(id) as { created_at: string } | undefined;
+      const e = db.prepare(`SELECT created_at, deleted_at FROM entries WHERE id = ?`).get(id) as
+        | { created_at: string; deleted_at: string | null }
+        | undefined;
+      return { end, id, e };
+    });
+    for (const { end, id, e } of ends) {
       if (!e) return { code: "endpoint_purged", entry_id: id, message: `memory #${id} was permanently deleted — this link cannot be restored` };
       const stamp = s[`${end}_created_at`];
       if (stamp ? e.created_at !== stamp : e.created_at > createdAt) {
@@ -139,6 +155,10 @@ export function linkRevertBlock(target: GraphRevisionTarget, action: string, s: 
         };
       }
     }
+    // Same 404 as addLink / restoreInformationalLink (their first check).
+    for (const { id, e } of ends) {
+      if (e?.deleted_at) return { code: "endpoint_trashed", entry_id: id, status: 404, message: MEMORIES_MISSING };
+    }
     const [from, to, type] = [Number(s.from_id), Number(s.to_id), String(s.type)];
     const informational = Number(s.retires) === 0;
     const row = db.prepare(`SELECT retires FROM entry_links WHERE from_id = ? AND to_id = ? AND type = ?`).get(from, to, type) as
@@ -148,10 +168,7 @@ export function linkRevertBlock(target: GraphRevisionTarget, action: string, s: 
       (row && (informational || type !== "supersedes" || Number(row.retires) !== 0)) ||
       (!informational && type === "related" && db.prepare(`SELECT 1 FROM entry_links WHERE from_id = ? AND to_id = ? AND type = 'related'`).get(to, from));
     if (back) return { code: "link_exists", message: "the link already exists" };
-    if (!informational && type === "supersedes") {
-      const live = db.prepare(`SELECT count(*) AS n FROM entries WHERE id IN (?, ?) AND deleted_at IS NULL`).get(from, to) as { n: number };
-      if (Number(live.n) === 2) return supersedesBlock(from, to);
-    }
+    if (!informational && type === "supersedes") return supersedesBlock(from, to);
     return null;
   }
   if (action === "add") {
@@ -230,15 +247,22 @@ export function recreateBlock(row: Record<string, any>, aliasOf?: number): Rever
 
 /**
  * The entity side of the shared check (G-041), in the order the revert runs it.
- * - update: planEntityUpdateRevert (name taken, nothing to revert).
+ * - update: the entity must still exist (deleted or merged away → entity_gone,
+ *   the revert's 404; revert that delete / merge first and it is revertible
+ *   again — entity ids are never reused), then planEntityUpdateRevert (name
+ *   taken, nothing to revert).
  * - merge: the target must still exist (its aliases, the merged-away name's
  *   included, would otherwise be lost — restore it first); the merged-away name
  *   must still point at the target or nowhere; no entity may carry that name.
  * - delete: the name must be free (recreateBlock).
- * A gone entity (update) is not blocked: restore it first, the revert answers 404.
+ * A merge or delete revert recreates the gone entity, so "gone" is its normal state there, not a block.
  */
 export function entityRevertBlock(action: string, s: Record<string, any>): RevertBlock | null {
-  if (action === "update") return planEntityUpdateRevert(s)?.block ?? null;
+  if (action === "update") {
+    const plan = planEntityUpdateRevert(s);
+    if (!plan) return { code: "entity_gone", entity_id: Number(s.entity_id), status: 404, message: ENTITY_NOT_FOUND };
+    return plan.block;
+  }
   if (action === "merge") {
     const intoId = Number(s.into_id);
     if (!db.prepare(`SELECT 1 FROM entities WHERE id = ?`).get(intoId)) {

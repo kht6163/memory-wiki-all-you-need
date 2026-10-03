@@ -2,6 +2,8 @@ import { config } from "./config.ts";
 import { db, now, rowToEntry, transaction, type Entry, type Source } from "./db.ts";
 import { ENTITY_KINDS, entitiesVersion, entityDisplayName, entityNorm, resolveEntityId } from "./entities.ts";
 import {
+  ENTITY_NOT_FOUND,
+  MEMORIES_MISSING,
   entityRevertBlock,
   getGraphRevision,
   markGraphRevisionReverted,
@@ -73,7 +75,7 @@ export function addLink(fromId: number, toId: number, type: LinkType, author: So
   if (!isLinkType(type)) throw new HttpError(400, `link type must be one of ${LINK_TYPES.join(", ")}`);
   const a = getEntry(fromId);
   const b = getEntry(toId);
-  if (!a || a.deleted_at || !b || b.deleted_at) throw new HttpError(404, "both memories must exist");
+  if (!a || a.deleted_at || !b || b.deleted_at) throw new HttpError(404, MEMORIES_MISSING);
   if (type === "supersedes") {
     // Same project, no cycle (G-026) — shared with the revision list (G-041).
     const refused = supersedesBlock(fromId, toId);
@@ -237,7 +239,7 @@ export function entityEntries(entityId: number, visibleFrom?: number | null, opt
 
 export function updateEntity(id: number, patch: { name?: string; kind?: string; description?: string }, author: Source = "human"): Entity {
   const cur = getEntity(id);
-  if (!cur) throw new HttpError(404, "entity not found");
+  if (!cur) throw new HttpError(404, ENTITY_NOT_FOUND);
   const name = patch.name !== undefined ? entityDisplayName(patch.name) : cur.name;
   if (!name) throw new HttpError(400, "name is required");
   const norm = entityNorm(name);
@@ -289,7 +291,7 @@ export function mergeEntities(fromId: number, intoId: number, author: Source = "
   if (fromId === intoId) throw new HttpError(400, "cannot merge an entity into itself");
   const from = getEntity(fromId);
   const into = getEntity(intoId);
-  if (!from || !into) throw new HttpError(404, "entity not found");
+  if (!from || !into) throw new HttpError(404, ENTITY_NOT_FOUND);
   transaction(() => {
     const row = entityRow(fromId);
     const entries = mentionIds(fromId);
@@ -335,7 +337,7 @@ export function mergeEntities(fromId: number, intoId: number, author: Source = "
 }
 
 export function deleteEntity(id: number, author: Source = "human") {
-  if (!getEntity(id)) throw new HttpError(404, "entity not found");
+  if (!getEntity(id)) throw new HttpError(404, ENTITY_NOT_FOUND);
   transaction(() => {
     const row = entityRow(id);
     const aliases = aliasNorms(id);
@@ -397,7 +399,7 @@ function restoreInformationalLink(s: Snap, author: Source, revertOf: number): nu
   const [from, to, type] = [Number(s.from_id), Number(s.to_id), s.type as LinkType];
   const a = getEntry(from);
   const b = getEntry(to);
-  if (!a || a.deleted_at || !b || b.deleted_at) throw new HttpError(404, "both memories must exist");
+  if (!a || a.deleted_at || !b || b.deleted_at) throw new HttpError(404, MEMORIES_MISSING);
   if (db.prepare(`SELECT 1 FROM entry_links WHERE from_id = ? AND to_id = ? AND type = ?`).get(from, to, type)) {
     throw new HttpError(409, "the link already exists");
   }
@@ -444,7 +446,7 @@ function revertEntityUpdate(s: Snap, author: Source, revertOf: number): number {
   const id = Number(s.entity_id);
   // The list's `blocked` comes from the same plan (G-041); this runs it.
   const plan = planEntityUpdateRevert(s);
-  if (!plan) throw new HttpError(404, "entity not found");
+  if (!plan) throw new HttpError(404, ENTITY_NOT_FOUND);
   if (plan.block) throw new HttpError(plan.block.status ?? 409, plan.block.message);
   const cur = getEntity(id)!;
   const before = s.before as { name: string; kind: string; description: string };

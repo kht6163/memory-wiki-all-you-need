@@ -11,12 +11,12 @@ const revisions = (q = "") => ok<Any[]>("GET", `/graph/revisions?limit=500${q}`)
 const revert = (id: number) => call<Any>("POST", `/graph/revisions/${id}/revert`);
 const find = async (q: string, action: string) => (await revisions(q)).find((r) => r.target === "link" && r.action === action)!;
 
-/** List and revert agree: blocked ⇔ 409 with the same message. */
-async function assertBlocked(rev: Any, code: string) {
+/** List and revert agree: blocked ⇔ the same status (default 409) and message. */
+async function assertBlocked(rev: Any, code: string, status = 409) {
   assert.equal(rev.revertible, false);
   assert.equal(rev.blocked?.code, code);
   const r = await revert(rev.id);
-  assert.equal(r.status, 409);
+  assert.equal(r.status, status);
   assert.equal(r.data.error, rev.blocked.message);
 }
 
@@ -31,7 +31,8 @@ test("G-041: a link remove whose memory was purged is listed as not revertible, 
 
   await ok("DELETE", `/entries/${b.id}`);
   rm = await find(`&entry_id=${a.id}`, "remove");
-  assert.equal(rm.revertible, true, "a memory in the trash can be restored first: not blocked");
+  assert.equal(rm.blocked?.entry_id, b.id);
+  await assertBlocked(rm, "endpoint_trashed", 404);
 
   await ok("DELETE", `/entries/${b.id}/purge`);
   rm = await find(`&entry_id=${a.id}`, "remove");

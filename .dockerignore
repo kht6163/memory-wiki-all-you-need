@@ -1,7 +1,14 @@
 **/node_modules
 **/dist
 data
+**/data
 .git
 server/test
 docs
 .github
+.env
+**/.env
+.claude
+AGENTS.md
+CLAUDE.md
+**/*.log

@@ -68,7 +68,7 @@ Scopes:
 
 Rules:
 - Prefer updating an existing memory over adding a near-duplicate. Memories from earlier turns of this session are among the candidates: extend them instead of repeating them. But merge only facts about the SAME subject whose title still fits; a different component or concern (DB vs CI auth vs cache) gets its own add — never let one memory grow into a grab bag.
-- Topic split: when one turn yields several memories (adds, or adds plus updates) that are parts of the same change or the same system, link them "related" (never merely because they came from the same turn or project) — give each add a short "ref" ("a", "b", ...) and a later op links to an earlier add of this response with {"to":"a","type":"related"}; link to existing memories by id.
+- Topic split: when one turn yields several memories (adds, or adds plus updates) that are parts of the same change or the same system, link them "related" (never merely because they came from the same turn or project; sharing a deploy target is not enough either — e.g. DB pool settings and CI auth are different systems) — give each add a short "ref" ("a", "b", ...) and a later op links to an earlier add of this response with {"to":"a","type":"related"}; link to existing memories by id.
 - When the world changed (switched library, moved a path, upgraded a version, reversed a decision): add the new memory with a "supersedes" link to the old one. The old one is then kept as history and no longer injected — do not also delete it. Use update for corrections/refinements of the same fact, delete only for memories that were wrong from the start or are noise.
 - Multiple values are not a contradiction: "uses PostgreSQL" and "also uses Redis" can both be true; only replace/supersede when the new fact makes the old one false.
 - valid_until (YYYY-MM-DD): for facts that are true only until a known date (a temporary workaround, a freeze, a deadline like "until next Wednesday"): set it to that resolved date, in addition to writing the date in the body. Leave it out for lasting facts.
@@ -212,9 +212,19 @@ export function applyMemoryOps(
   meta: WriteMeta,
   label: string,
   turnText?: string,
-): { applied: TurnResult["applied"]; skipped: NonNullable<TurnResult["skipped"]> } {
+  turnDate?: string,
+): { applied: TurnResult["applied"]; skipped: NonNullable<TurnResult["skipped"]>; inferred: InferredValidUntil[] } {
   const applied: TurnResult["applied"] = [];
   const skipped: NonNullable<TurnResult["skipped"]> = [];
+  // valid_until taken from a deadline the body states (turn curation only: turnDate is given).
+  const inferred: InferredValidUntil[] = [];
+  const inferUntil = (body: string, has: unknown): string | undefined => {
+    if (turnDate === undefined || has) return undefined;
+    return deadlineFromBody(body, turnDate);
+  };
+  const noteInferred = (op: string, e: Entry, until: string | undefined) => {
+    if (until && e.valid_until === until) inferred.push({ op, entryId: e.id, title: e.title, valid_until: until, from: "body" });
+  };
   // Links may only point at memories the LLM was shown (or just created in this batch).
   const linkable = new Set(allowed);
   // An add may carry a short "ref" label so a later op of this response can link to it
@@ -300,6 +310,7 @@ export function applyMemoryOps(
           }
           return;
         }
+        const fallbackUntil = inferUntil(String(op.body ?? ""), validUntil);
         const e = createEntry(
           {
             scope,
@@ -310,10 +321,11 @@ export function applyMemoryOps(
             tags,
             entities,
             keywords,
-            valid_until: validUntil,
+            valid_until: validUntil ?? fallbackUntil,
           },
           { ...meta, reason: op.reason ? String(op.reason) : meta.reason ?? null },
         );
+        noteInferred("add", e, fallbackUntil);
         linkable.add(e.id);
         setRef(op, e.id);
         linkFrom(e.id, op.links);
@@ -355,6 +367,9 @@ export function applyMemoryOps(
             return;
           }
           const reason = op.reason ? String(op.reason) : meta.reason ?? null;
+          // A held update's explicit valid_until counts as "already given" even when the edit is
+          // retried alone (that update is applied after it, or refused): the body is never read then.
+          const sideUntil = (heldSide.get(id) ?? []).map(validUntilOf).filter((v) => v).at(-1);
           const commit = (group: Op[]) => {
             // In response order the last op that names a field wins, as if applied one by one.
             group.sort((a, b) => batch.indexOf(a) - batch.indexOf(b));
@@ -365,8 +380,11 @@ export function applyMemoryOps(
             const drop = group.flatMap((o) => (Array.isArray(o.drop_entities) ? o.drop_entities : []));
             const { kept, dropped } = keptEntities(id, String(op.old), `${getEntry(id)?.title ?? ""}\n${r.body}`, drop, mentioned);
             const ents = given || dropped ? [...kept, ...(given ?? [])] : undefined;
-            const until = group.map(validUntilOf).filter((v) => v).at(-1);
+            const givenUntil = group.map(validUntilOf).filter((v) => v).at(-1);
+            const fallback = inferUntil(r.body, givenUntil ?? sideUntil ?? getEntry(id)?.valid_until);
+            const until = givenUntil ?? fallback;
             const e = updateEntry(id, { body: r.body, entities: ents, ...(until ? { valid_until: until } : {}) }, { ...meta, reason });
+            noteInferred("edit", e, fallback);
             for (const o of group) linkFrom(e.id, o.links);
             return e;
           };
@@ -400,6 +418,9 @@ export function applyMemoryOps(
           const after = `${op.title != null ? String(op.title) : current.title}\n${op.body != null ? String(op.body) : current.body}`;
           const { kept, dropped } = keptEntities(id, before, after, op.drop_entities, mentioned);
           const ents = entities || dropped ? [...kept, ...(entities ?? [])] : undefined;
+          // Only a body the op writes is read for a deadline (an entities-only update leaves it alone).
+          const fallbackUntil = op.body != null ? inferUntil(String(op.body), validUntil ?? current.valid_until) : undefined;
+          const until = validUntil ?? fallbackUntil;
           const e = updateEntry(
             id,
             {
@@ -409,10 +430,11 @@ export function applyMemoryOps(
               tags,
               entities: ents,
               keywords,
-              ...(validUntil ? { valid_until: validUntil } : {}),
+              ...(until ? { valid_until: until } : {}),
             },
             { ...meta, reason: op.reason ? String(op.reason) : meta.reason ?? null },
           );
+          noteInferred("update", e, fallbackUntil);
           linkFrom(e.id, op.links);
           applied.push({ op: "update", entryId: e.id, title: e.title });
           if (meta.turnId != null) recordEntryTurn(e.id, meta.turnId, "update");
@@ -426,7 +448,37 @@ export function applyMemoryOps(
     }
   };
   for (const op of batch) if (!held.has(op)) applyOp(op);
-  return { applied, skipped };
+  return { applied, skipped, inferred };
+}
+
+/** A valid_until the worker set from the body because the LLM left it out (shown in the turn result). */
+export interface InferredValidUntil {
+  op: string;
+  entryId: number;
+  title: string;
+  valid_until: string;
+  from: "body";
+}
+
+// "2026-10-07까지" / "2026-10-07 까지" / "until|through|till 2026-10-07" — a deadline with an absolute date.
+const DEADLINE_RES = [/(?<![\d-])(\d{4}-\d{2}-\d{2})\s?까지/g, /\b(?:until|through|till)\s+(\d{4}-\d{2}-\d{2})(?![\d-])/gi];
+
+/**
+ * The deadline date a body states, when it states exactly one (repeats of the same date count once),
+ * that date is a real calendar day and it is not before the turn's date. Otherwise undefined:
+ * two different deadlines are ambiguous, a past one is history, a condition ("리허설 끝날 때까지") has no date.
+ */
+export function deadlineFromBody(body: string, turnDate: string): string | undefined {
+  const dates = new Set<string>();
+  for (const re of DEADLINE_RES) for (const m of body.matchAll(re)) dates.add(m[1]);
+  if (dates.size !== 1) return undefined;
+  const [d] = dates;
+  try {
+    if (normalizeValidUntil(d) !== d) return undefined;
+  } catch {
+    return undefined;
+  }
+  return d >= turnDate ? d : undefined;
 }
 
 /**
@@ -519,11 +571,20 @@ export async function processTurn(turn: Turn) {
   }
   const obj = (data ?? {}) as { ops?: unknown; note?: unknown };
   const ops = Array.isArray(obj.ops) ? (obj.ops as Op[]) : [];
-  const { applied, skipped } = applyMemoryOps(ops, project, new Set(candidates.map((c) => c.id)), { author: "llm", turnId: turn.id, origin: "turn" }, `turn ${turn.id}`, renderTurn(turn.payload));
+  const { applied, skipped, inferred } = applyMemoryOps(
+    ops,
+    project,
+    new Set(candidates.map((c) => c.id)),
+    { author: "llm", turnId: turn.id, origin: "turn" },
+    `turn ${turn.id}`,
+    renderTurn(turn.payload),
+    localDate(turn.created_at),
+  );
   finishTurn(turn.id, "done", {
     ops,
     applied,
     ...(skipped.length ? { skipped } : {}),
+    ...(inferred.length ? { inferred } : {}),
     note: typeof obj.note === "string" ? obj.note : undefined,
     model: config.llm.model,
     ms: Date.now() - started,

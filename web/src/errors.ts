@@ -158,7 +158,15 @@ export interface RevertBlockLike {
   message: string;
 }
 
-/** Korean reason for a disabled revert button: the same text the revert's 409 would show (RULES). */
+/**
+ * Korean reason for a disabled revert button. Mostly the same text the revert's error would show
+ * (RULES); a block that a later action lifts says what to do instead, since the revert's own 404
+ * ("both memories must exist", "entity not found") does not.
+ */
 export function revertBlockText(b: RevertBlockLike): string {
+  if (b.code === "endpoint_trashed" && b.entry_id) return `메모리 #${b.entry_id}이(가) 휴지통에 있습니다 — 먼저 휴지통에서 되살리세요`;
+  if (b.code === "entity_gone") {
+    return `엔티티${b.entity_id ? ` #${b.entity_id}` : ""}이(가) 이제 없습니다(삭제되었거나 다른 엔티티에 합쳐짐) — 그 삭제나 합치기를 먼저 되돌리세요`;
+  }
   return errorText(b.message);
 }

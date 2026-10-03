@@ -12,6 +12,8 @@ process.env.DATA_DIR = dir;
 process.env.LLM_BASE_URL = "http://llm.test/v1";
 process.env.LLM_API_KEY = "test-key";
 process.env.LLM_MODEL = "test-model";
+// Dates (TURN DATE, deadlines) must not depend on the developer's shell.
+process.env.TIMEZONE = "UTC";
 process.env.WEB_DIR = path.join(dir, "web");
 process.on("exit", () => fs.rmSync(dir, { recursive: true, force: true }));
 installFakeLlm(process.env.LLM_BASE_URL);
