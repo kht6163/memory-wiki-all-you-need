@@ -1,7 +1,16 @@
 import { config } from "./config.ts";
 import { db, now, rowToEntry, transaction, type Entry, type Source } from "./db.ts";
 import { ENTITY_KINDS, entitiesVersion, entityDisplayName, entityNorm, resolveEntityId } from "./entities.ts";
-import { getGraphRevision, markGraphRevisionReverted, recordGraphRevision, type GraphRevision } from "./graph-revisions.ts";
+import {
+  entityRevertBlock,
+  getGraphRevision,
+  markGraphRevisionReverted,
+  planEntityUpdateRevert,
+  recordGraphRevision,
+  recreateBlock,
+  supersedesBlock,
+  type GraphRevision,
+} from "./graph-revisions.ts";
 import { ACTIVE_SQL, HttpError, getEntry } from "./store.ts";
 
 // Memory graph: memories ⇄ entities (mentions) and memory → memory typed links.
@@ -66,30 +75,9 @@ export function addLink(fromId: number, toId: number, type: LinkType, author: So
   const b = getEntry(toId);
   if (!a || a.deleted_at || !b || b.deleted_at) throw new HttpError(404, "both memories must exist");
   if (type === "supersedes") {
-    // The replacement hides the old memory (G-026), so it must be visible
-    // wherever the old one is: a project memory cannot retire a global one, or
-    // another project's.
-    if (a.scope === "project" && a.project_id !== b.project_id) {
-      throw new HttpError(400, "a project memory can only supersede memories of the same project");
-    }
-    // A cycle (A supersedes B, B supersedes A) would retire both. Only retiring
-    // links count: a pre-v0.6 informational one (retires = 0) retires nothing.
-    const seen = new Set<number>([toId]);
-    let frontier = [toId];
-    for (let depth = 0; frontier.length && depth < 50; depth++) {
-      const next: number[] = [];
-      for (const id of frontier) {
-        for (const r of db.prepare(`SELECT to_id FROM entry_links WHERE from_id = ? AND type = 'supersedes' AND retires = 1`).all(id)) {
-          const t = Number(r.to_id);
-          if (t === fromId) throw new HttpError(409, `#${toId} already supersedes #${fromId} (directly or through others)`);
-          if (!seen.has(t)) {
-            seen.add(t);
-            next.push(t);
-          }
-        }
-      }
-      frontier = next;
-    }
+    // Same project, no cycle (G-026) — shared with the revision list (G-041).
+    const refused = supersedesBlock(fromId, toId);
+    if (refused) throw new HttpError(refused.status ?? 409, refused.message);
   }
   // "related" is symmetric: store it once.
   if (type === "related" && db.prepare(`SELECT 1 FROM entry_links WHERE from_id = ? AND to_id = ? AND type = 'related'`).get(toId, fromId)) return false;
@@ -371,7 +359,7 @@ export function revertGraphRevision(id: number, author: Source = "human"): { rev
   if (!rev) throw new HttpError(404, "revision not found");
   if (rev.reverted_at) throw new HttpError(409, "this change was already reverted");
   // Same check the revision list reports as `blocked` (G-041).
-  if (rev.blocked) throw new HttpError(409, rev.blocked.message);
+  if (rev.blocked) throw new HttpError(rev.blocked.status ?? 409, rev.blocked.message);
   if (!rev.revertible) throw new HttpError(409, `a ${rev.target} "${rev.action}" cannot be reverted`);
   const s = rev.snapshot;
   const newId = transaction(() => {
@@ -454,34 +442,18 @@ function revertLinkAdd(s: Snap, author: Source, revertOf: number): number {
 
 function revertEntityUpdate(s: Snap, author: Source, revertOf: number): number {
   const id = Number(s.entity_id);
-  const cur = getEntity(id);
-  if (!cur) throw new HttpError(404, "entity not found");
+  // The list's `blocked` comes from the same plan (G-041); this runs it.
+  const plan = planEntityUpdateRevert(s);
+  if (!plan) throw new HttpError(404, "entity not found");
+  if (plan.block) throw new HttpError(plan.block.status ?? 409, plan.block.message);
+  const cur = getEntity(id)!;
   const before = s.before as { name: string; kind: string; description: string };
-  const after = s.after as { name: string };
-  const norm = entityNorm(before.name);
-  const other = resolveEntityId(before.name);
-  if (other && other !== id) throw new HttpError(409, `"${before.name}" is now entity #${other} — merge instead`);
-  const curNorm = entityNorm(cur.name);
-  const aliasesAdded: string[] = [];
-  const aliasesRemoved: string[] = [];
-  // Drop the aliases the change added (the old name is the name again)...
   const delAlias = db.prepare(`DELETE FROM entity_aliases WHERE norm = ? AND entity_id = ?`);
-  for (const a of s.aliases_added as string[]) if (delAlias.run(a, id).changes) aliasesRemoved.push(a);
-  if (delAlias.run(norm, id).changes && !aliasesRemoved.includes(norm)) aliasesRemoved.push(norm);
-  // ...bring back the ones it removed, unless another entity owns them now...
-  const addAlias = db.prepare(`INSERT OR IGNORE INTO entity_aliases (norm, entity_id) VALUES (?, ?)`);
-  const taken = (n: string) => n === norm || db.prepare(`SELECT 1 FROM entities WHERE norm = ?`).get(n);
-  for (const a of s.aliases_removed as string[]) if (!taken(a) && addAlias.run(a, id).changes) aliasesAdded.push(a);
-  // ...and keep the current name as an alias only if it came from a later rename.
-  if (curNorm !== norm && curNorm !== entityNorm(after.name) && addAlias.run(curNorm, id).changes) aliasesAdded.push(curNorm);
-  // Already back at the old values (e.g. renamed back by hand): refuse rather than
-  // record a no-op revision (G-034). The throw rolls back the whole revert, so the
-  // original revision stays unreverted.
-  if (cur.name === before.name && cur.kind === before.kind && cur.description === before.description && !aliasesAdded.length && !aliasesRemoved.length) {
-    throw new HttpError(409, "nothing to revert: the entity already has these values");
-  }
+  for (const a of plan.remove) delAlias.run(a, id);
+  const addAlias = db.prepare(`INSERT INTO entity_aliases (norm, entity_id) VALUES (?, ?)`);
+  for (const a of plan.add) addAlias.run(a, id);
   db.prepare(`UPDATE entities SET name = ?, norm = ?, kind = ?, description = ?, updated_at = ? WHERE id = ?`).run(
-    before.name, norm, before.kind, before.description, now(), id,
+    before.name, entityNorm(before.name), before.kind, before.description, now(), id,
   );
   return recordGraphRevision({
     target: "entity",
@@ -490,8 +462,8 @@ function revertEntityUpdate(s: Snap, author: Source, revertOf: number): number {
       entity_id: id,
       before: { name: cur.name, kind: cur.kind, description: cur.description },
       after: before,
-      aliases_added: aliasesAdded,
-      aliases_removed: aliasesRemoved,
+      aliases_added: plan.add,
+      aliases_removed: plan.remove,
       entity_ids: [id], entry_ids: [],
     },
     author,
@@ -503,9 +475,8 @@ function revertEntityUpdate(s: Snap, author: Source, revertOf: number): number {
 function recreateEntity(row: Snap): number {
   const norm = String(row.norm);
   // The name must be free both as a name and as an alias (G-020).
-  const owner =
-    db.prepare(`SELECT id FROM entities WHERE norm = ?`).get(norm) ?? db.prepare(`SELECT entity_id AS id FROM entity_aliases WHERE norm = ?`).get(norm);
-  if (owner) throw new HttpError(409, `"${row.name}" is now entity #${owner.id} — merge instead`);
+  const taken = recreateBlock(row);
+  if (taken) throw new HttpError(taken.status ?? 409, taken.message);
   const free = !db.prepare(`SELECT 1 FROM entities WHERE id = ?`).get(row.id);
   const res = free
     ? db.prepare(`INSERT INTO entities (id, name, norm, kind, description, created_at) VALUES (?, ?, ?, ?, ?, ?)`).run(
@@ -530,15 +501,11 @@ function revertEntityMerge(s: Snap, author: Source, revertOf: number): number {
   // entity's) went with it and live only in that delete's snapshot. Reverting the
   // merge now would lose them, and a later delete revert would hand them to the
   // target (old spelling resolving to the wrong entity, G-020). Restore it first.
-  if (!db.prepare(`SELECT 1 FROM entities WHERE id = ?`).get(intoId)) {
-    throw new HttpError(409, `the merge target #${intoId} no longer exists — restore the target first`);
-  }
+  // And the merged-away name must still point at the target (or nowhere) — G-020.
+  // Same check as the list's `blocked` (G-041).
+  const blocked = entityRevertBlock("merge", s);
+  if (blocked) throw new HttpError(blocked.status ?? 409, blocked.message);
   const nameNorm = String(s.name_alias);
-  // The merged-away name must still point at the target (or nowhere) — G-020.
-  const aliasOwner = db.prepare(`SELECT entity_id FROM entity_aliases WHERE norm = ?`).get(nameNorm);
-  if (aliasOwner && Number(aliasOwner.entity_id) !== intoId) {
-    throw new HttpError(409, `"${s.entity.name}" now resolves to entity #${aliasOwner.entity_id} — revert that change first`);
-  }
   db.prepare(`DELETE FROM entity_aliases WHERE norm = ? AND entity_id = ?`).run(nameNorm, intoId);
   const id = recreateEntity(s.entity);
   // Move its aliases back from the target (ones that vanished or moved elsewhere since stay as they are).
@@ -743,7 +710,11 @@ export function graphData(projectId: number | null, opts: { limit?: number } = {
 export function graphStats() {
   const one = (sql: string) => Number(Object.values(db.prepare(sql).get() ?? { n: 0 })[0]);
   return {
-    entities: one(`SELECT COUNT(DISTINCT ee.entity_id) FROM entry_entities ee JOIN entries e ON e.id = ee.entry_id WHERE e.deleted_at IS NULL`),
+    // Per entity, stop at its first live mention: a DISTINCT over every mention looked up each
+    // wide entries row (615ms at 100k memories on every /api/health; this form ~10ms).
+    entities: one(
+      `SELECT COUNT(*) FROM entities x WHERE EXISTS (SELECT 1 FROM entry_entities ee JOIN entries e ON e.id = ee.entry_id WHERE ee.entity_id = x.id AND e.deleted_at IS NULL)`,
+    ),
     links: one(`SELECT COUNT(*) FROM entry_links l JOIN entries a ON a.id = l.from_id JOIN entries b ON b.id = l.to_id WHERE a.deleted_at IS NULL AND b.deleted_at IS NULL`),
     unlinked: one(
       `SELECT COUNT(*) FROM entries e WHERE e.deleted_at IS NULL AND e.category != 'standing' AND NOT EXISTS (SELECT 1 FROM entry_entities ee WHERE ee.entry_id = e.id)`,

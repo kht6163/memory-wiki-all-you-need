@@ -270,8 +270,26 @@ export interface GraphRevision {
   reverted_at: string | null;
   /** False when already reverted, never revertible, or `blocked`. */
   revertible: boolean;
-  /** Why a revert would fail now (e.g. a memory of the link was purged); the button is disabled. */
-  blocked: { code: "endpoint_purged" | "endpoint_replaced" | "link_exists" | "link_gone" | "link_not_retiring"; entry_id?: number; message: string } | null;
+  /** Why a revert would fail now (a memory of the link purged, an entity name taken, …); the button is disabled. */
+  blocked: {
+    code:
+      | "endpoint_purged"
+      | "endpoint_replaced"
+      | "link_exists"
+      | "link_gone"
+      | "link_not_retiring"
+      | "supersedes_cycle"
+      | "cross_project"
+      | "name_taken"
+      | "name_moved"
+      | "merge_target_gone"
+      | "nothing_to_revert";
+    entry_id?: number;
+    entity_id?: number;
+    /** HTTP status the revert answers with (default 409; cross_project 400). */
+    status?: number;
+    message: string;
+  } | null;
 }
 
 export interface ReviewJob {

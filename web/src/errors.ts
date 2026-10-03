@@ -154,6 +154,7 @@ export function errorText(e: unknown): string {
 export interface RevertBlockLike {
   code: string;
   entry_id?: number;
+  entity_id?: number;
   message: string;
 }
 

@@ -24,6 +24,8 @@ test("G-048: graph revert 409 messages are shown in Korean", () => {
     [409, "memory #5 was permanently deleted — this link cannot be restored", /메모리 #5.*영구 삭제.*되살릴 수 없습니다/],
     [409, "memory #5 is now a different memory (the original was permanently deleted) — this link cannot be restored", /메모리 #5.*다른 메모리.*되살릴 수 없습니다/],
     [409, '"k8s" now resolves to entity #3 — revert that change first', /#3.*먼저 되돌리세요/],
+    [409, "#4 already supersedes #9 (directly or through others)", /#4.*#9.*순환/],
+    [400, "a project memory can only supersede memories of the same project", /같은 프로젝트의 메모리만/],
     [409, "proposal is already applied", /이미 적용된 제안/],
     [409, "the memories changed since this was proposed; run the review again", /제안 뒤 메모리가 바뀌었습니다/],
     [422, "the edited passage is no longer in the body", /본문에 없습니다/],
@@ -90,7 +92,7 @@ const AGENT_ONLY = [/^old_text is required$/, /^action must be add, replace or r
 test("G-048: every 4xx HttpError message in server/src has a Korean rule", () => {
   // Static messages are checked as written; template messages with every ${…} replaced by "7".
   // "could not apply: …" wraps another message and is covered by its own test.
-  const files = ["api.ts", "graph.ts", "review.ts", "wiki.ts", "store.ts", "turns.ts", "entity-similar.ts"];
+  const files = ["api.ts", "graph.ts", "graph-revisions.ts", "review.ts", "wiki.ts", "store.ts", "turns.ts", "entity-similar.ts"];
   const untranslated: string[] = [];
   let templates = 0;
   for (const f of files) {
@@ -100,6 +102,11 @@ test("G-048: every 4xx HttpError message in server/src has a Korean rule", () =>
     for (const m of src.matchAll(/HttpError\(4\d\d, `/g)) {
       msgs.push(sampleTemplate(src, m.index + m[0].length).text);
       templates++;
+    }
+    // Revert blocks (graph-revisions.ts) carry the message the revert throws (G-041).
+    if (f === "graph-revisions.ts") {
+      for (const m of src.matchAll(/message: "([^"]*)"/g)) msgs.push(m[1]);
+      for (const m of src.matchAll(/message: `/g)) msgs.push(sampleTemplate(src, m.index + m[0].length).text);
     }
     for (const msg of msgs) {
       if (msg.startsWith("could not apply: ") || AGENT_ONLY.some((re) => re.test(msg))) continue;

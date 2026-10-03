@@ -1,9 +1,11 @@
 import { db, now, type Source } from "./db.ts";
+import { entityNorm, resolveEntityId } from "./entities.ts";
 
 // History of memory-graph edits (links and entities) so they can be undone.
-// Depends only on db.ts: entities.ts and graph.ts both record into it, and the
-// revert logic lives in graph.ts. The precondition check shared by the list and
-// the revert (linkRevertBlock) lives here and reads entries / entry_links.
+// Depends only on db.ts and entities.ts: graph.ts records into it, and the
+// revert logic lives in graph.ts. The precondition checks shared by the list and
+// the revert (revertBlock, and addLink's supersedesBlock) live here and read
+// entries / entry_links / entities / entity_aliases with plain SQL.
 //
 // Actions:
 //   link:   add | remove
@@ -41,13 +43,64 @@ export interface GraphRevision {
   blocked: RevertBlock | null;
 }
 
-export type RevertBlockCode = "endpoint_purged" | "endpoint_replaced" | "link_exists" | "link_gone" | "link_not_retiring";
+export type RevertBlockCode =
+  | "endpoint_purged"
+  | "endpoint_replaced"
+  | "link_exists"
+  | "link_gone"
+  | "link_not_retiring"
+  | "supersedes_cycle"
+  | "cross_project"
+  | "name_taken"
+  | "name_moved"
+  | "merge_target_gone"
+  | "nothing_to_revert";
 export interface RevertBlock {
   code: RevertBlockCode;
   /** The memory the code is about (endpoint_*). */
   entry_id?: number;
-  /** English, the same text the revert route's 409 carries. */
+  /** The entity the code is about (name_taken / name_moved: the owner now; merge_target_gone: the target). */
+  entity_id?: number;
+  /** HTTP status the revert answers with (default 409; cross_project keeps addLink's 400). */
+  status?: number;
+  /** English, the same text the revert route's error carries. */
   message: string;
+}
+
+/**
+ * addLink's checks for a retiring "supersedes" link (G-026), shared with the
+ * revision list so a link-remove revert that addLink would refuse is shown as
+ * blocked: a project memory may only retire memories of its own project (400),
+ * and the link must not close a cycle of retiring links (409). Only retiring
+ * links count in the walk: a pre-v0.6 informational one (retires = 0) retires nothing.
+ */
+export function supersedesBlock(fromId: number, toId: number): RevertBlock | null {
+  const end = db.prepare(`SELECT scope, project_id FROM entries WHERE id = ?`);
+  const a = end.get(fromId) as { scope: string; project_id: number | null } | undefined;
+  const b = end.get(toId) as { scope: string; project_id: number | null } | undefined;
+  // The replacement hides the old memory, so it must be visible wherever the old one is.
+  if (a && b && a.scope === "project" && a.project_id !== b.project_id) {
+    return { code: "cross_project", status: 400, message: "a project memory can only supersede memories of the same project" };
+  }
+  // A cycle (A supersedes B, B supersedes A) would retire both.
+  const next = db.prepare(`SELECT to_id FROM entry_links WHERE from_id = ? AND type = 'supersedes' AND retires = 1`);
+  const seen = new Set<number>([toId]);
+  let frontier = [toId];
+  for (let depth = 0; frontier.length && depth < 50; depth++) {
+    const step: number[] = [];
+    for (const id of frontier) {
+      for (const r of next.all(id)) {
+        const t = Number(r.to_id);
+        if (t === fromId) return { code: "supersedes_cycle", message: `#${toId} already supersedes #${fromId} (directly or through others)` };
+        if (!seen.has(t)) {
+          seen.add(t);
+          step.push(t);
+        }
+      }
+    }
+    frontier = step;
+  }
+  return null;
 }
 
 /**
@@ -63,9 +116,12 @@ export interface RevertBlock {
  *   find it and refuse. A legacy informational supersedes row (retires = 0) is
  *   no obstacle to restoring a retiring one (addLink turns it on), and a
  *   "related" link counts in either direction (stored once).
+ *   A retiring link is put back with addLink, so its supersedes checks apply
+ *   too (supersedesBlock) — once both memories are live: a memory in the trash
+ *   is not blocked (restore it first; addLink answers 404 meanwhile).
  * - add: the link must still be there (purging a memory drops its links), and
  *   a legacy link the add turned on must still be retiring.
- * Entity revisions are never blocked here.
+ * Entity revisions are checked by entityRevertBlock.
  */
 export function linkRevertBlock(target: GraphRevisionTarget, action: string, s: Record<string, any>, createdAt: string): RevertBlock | null {
   if (target !== "link") return null;
@@ -92,6 +148,10 @@ export function linkRevertBlock(target: GraphRevisionTarget, action: string, s: 
       (row && (informational || type !== "supersedes" || Number(row.retires) !== 0)) ||
       (!informational && type === "related" && db.prepare(`SELECT 1 FROM entry_links WHERE from_id = ? AND to_id = ? AND type = 'related'`).get(to, from));
     if (back) return { code: "link_exists", message: "the link already exists" };
+    if (!informational && type === "supersedes") {
+      const live = db.prepare(`SELECT count(*) AS n FROM entries WHERE id IN (?, ?) AND deleted_at IS NULL`).get(from, to) as { n: number };
+      if (Number(live.n) === 2) return supersedesBlock(from, to);
+    }
     return null;
   }
   if (action === "add") {
@@ -104,6 +164,105 @@ export function linkRevertBlock(target: GraphRevisionTarget, action: string, s: 
   return null;
 }
 
+/** What reverting an entity update would change, worked out before writing anything. */
+export interface EntityUpdatePlan {
+  /** Alias norms of the entity to drop (the ones the update added, and the old name's). */
+  remove: string[];
+  /** Alias norms to give the entity (the ones the update removed, and the current name if it came from a later rename). */
+  add: string[];
+  block: RevertBlock | null;
+}
+
+/**
+ * Plan for reverting an entity update (snapshot `s`); null when the entity is
+ * gone (deleted or merged away — the revert answers 404, restore it first).
+ * The revert carries out exactly this plan, so the list's "nothing to revert"
+ * and the revert's agree (G-041):
+ * - the old name must not be another entity's name or alias now (G-020);
+ * - drop the aliases the update added and the old name's alias, if still the entity's;
+ * - bring back the aliases it removed unless that norm is an entity name, the
+ *   old name, or another alias now;
+ * - keep the current name as an alias only if it came from a later rename;
+ * - nothing to change (already back at the old values) → nothing_to_revert, so
+ *   no no-op revision is recorded (G-034).
+ */
+export function planEntityUpdateRevert(s: Record<string, any>): EntityUpdatePlan | null {
+  const id = Number(s.entity_id);
+  const cur = db.prepare(`SELECT name, kind, description FROM entities WHERE id = ?`).get(id) as
+    | { name: string; kind: string; description: string | null }
+    | undefined;
+  if (!cur) return null;
+  const before = s.before as { name: string; kind: string; description: string };
+  const norm = entityNorm(before.name);
+  const other = resolveEntityId(before.name);
+  if (other && other !== id) {
+    return { remove: [], add: [], block: { code: "name_taken", entity_id: other, message: `"${before.name}" is now entity #${other} — merge instead` } };
+  }
+  const aliasOwner = db.prepare(`SELECT entity_id FROM entity_aliases WHERE norm = ?`);
+  const ownedBy = (n: string) => (aliasOwner.get(n) as { entity_id: number } | undefined)?.entity_id;
+  const remove = [...new Set([...((s.aliases_added as string[]) ?? []), norm])].filter((n) => Number(ownedBy(n)) === id);
+  const add: string[] = [];
+  const free = (n: string) => !add.includes(n) && (ownedBy(n) === undefined || remove.includes(n));
+  const isName = db.prepare(`SELECT 1 FROM entities WHERE norm = ?`);
+  for (const a of (s.aliases_removed as string[]) ?? []) if (a !== norm && !isName.get(a) && free(a)) add.push(a);
+  const curNorm = entityNorm(cur.name);
+  if (curNorm !== norm && curNorm !== entityNorm(String(s.after?.name ?? "")) && free(curNorm)) add.push(curNorm);
+  const same = cur.name === before.name && cur.kind === before.kind && String(cur.description ?? "") === before.description;
+  const block: RevertBlock | null =
+    same && !add.length && !remove.length ? { code: "nothing_to_revert", message: "nothing to revert: the entity already has these values" } : null;
+  return { remove, add, block };
+}
+
+/**
+ * Bringing back a merged-away or deleted entity (`row` = its entities row): its
+ * name must be free both as a name and as an alias (G-020). A merge revert drops
+ * the target's alias of that name first, so it passes `aliasOf` = the target.
+ */
+export function recreateBlock(row: Record<string, any>, aliasOf?: number): RevertBlock | null {
+  const norm = String(row.norm);
+  const alias = db.prepare(`SELECT entity_id AS id FROM entity_aliases WHERE norm = ?`).get(norm) as { id: number } | undefined;
+  const owner =
+    (db.prepare(`SELECT id FROM entities WHERE norm = ?`).get(norm) as { id: number } | undefined) ??
+    (alias && Number(alias.id) !== aliasOf ? alias : undefined);
+  if (!owner) return null;
+  return { code: "name_taken", entity_id: Number(owner.id), message: `"${row.name}" is now entity #${owner.id} — merge instead` };
+}
+
+/**
+ * The entity side of the shared check (G-041), in the order the revert runs it.
+ * - update: planEntityUpdateRevert (name taken, nothing to revert).
+ * - merge: the target must still exist (its aliases, the merged-away name's
+ *   included, would otherwise be lost — restore it first); the merged-away name
+ *   must still point at the target or nowhere; no entity may carry that name.
+ * - delete: the name must be free (recreateBlock).
+ * A gone entity (update) is not blocked: restore it first, the revert answers 404.
+ */
+export function entityRevertBlock(action: string, s: Record<string, any>): RevertBlock | null {
+  if (action === "update") return planEntityUpdateRevert(s)?.block ?? null;
+  if (action === "merge") {
+    const intoId = Number(s.into_id);
+    if (!db.prepare(`SELECT 1 FROM entities WHERE id = ?`).get(intoId)) {
+      return { code: "merge_target_gone", entity_id: intoId, message: `the merge target #${intoId} no longer exists — restore the target first` };
+    }
+    const aliasOwner = db.prepare(`SELECT entity_id FROM entity_aliases WHERE norm = ?`).get(String(s.name_alias)) as { entity_id: number } | undefined;
+    if (aliasOwner && Number(aliasOwner.entity_id) !== intoId) {
+      return {
+        code: "name_moved",
+        entity_id: Number(aliasOwner.entity_id),
+        message: `"${s.entity.name}" now resolves to entity #${aliasOwner.entity_id} — revert that change first`,
+      };
+    }
+    return recreateBlock(s.entity, intoId);
+  }
+  if (action === "delete") return recreateBlock(s.entity);
+  return null;
+}
+
+/** Why reverting this (open, revertible-kind) revision would fail now, or null. */
+export function revertBlock(target: GraphRevisionTarget, action: string, s: Record<string, any>, createdAt: string): RevertBlock | null {
+  return target === "link" ? linkRevertBlock(target, action, s, createdAt) : entityRevertBlock(action, s);
+}
+
 const toRevision = (r: Record<string, unknown>): GraphRevision => {
   const target = r.target as GraphRevisionTarget;
   const action = String(r.action);
@@ -111,7 +270,7 @@ const toRevision = (r: Record<string, unknown>): GraphRevision => {
   const snapshot = JSON.parse(String(r.snapshot));
   const created_at = String(r.created_at);
   const open = !reverted_at && REVERTIBLE[target].includes(action);
-  const blocked = open ? linkRevertBlock(target, action, snapshot, created_at) : null;
+  const blocked = open ? revertBlock(target, action, snapshot, created_at) : null;
   return {
     id: Number(r.id),
     target,

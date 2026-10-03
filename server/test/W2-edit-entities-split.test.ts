@@ -75,11 +75,12 @@ test("G-049: a side update folded into an edit follows the same keep rule", asyn
   assert.equal(revisionCount(m.id) - before, 1);
 });
 
-test("G-049: a full update still replaces the entity list", async () => {
+test("G-049: a full update adds entities too; it drops only what the old text named and the new one does not", async () => {
   const p = await freshProject();
+  // Changed deliberately (v0.6.2 re-measure 34): an update no longer replaces the list.
   const m = await entry({ project_id: p.id, title: "cache", body: "- memcached", entities: [{ name: "memcached", kind: "tech" }, { name: "LRU", kind: "concept" }] });
   await runTurn(p, [{ op: "update", id: m.id, body: "- Redis with LRU", entities: [{ name: "Redis", kind: "tech" }] }]);
-  assert.deepEqual(await entityNames(m.id), ["Redis"]);
+  assert.deepEqual(await entityNames(m.id), ["LRU", "Redis"]);
 });
 
 test("G-050: a later op links to an earlier add of the same response by its ref", async () => {
@@ -118,8 +119,8 @@ test("turn-curation: the prompt carries the v0.6.1 re-measure rules (identifiers
   await runQueueOnce();
   const sys = llmCalls[0].system;
   assert.match(sys, /"envoy 1\.29\.1" stays "envoy 1\.29\.1"[^\n]*canonical spelling \("Envoy"\) belongs in the entities list only/);
-  assert.match(sys, /On update, entities REPLACE[^\n]*On edit, entities ADD to the list/);
-  assert.doesNotMatch(sys, /On update and edit, entities REPLACE/);
+  assert.match(sys, /On update and edit, entities ADD to the list[^\n]*"drop_entities"/);
+  assert.doesNotMatch(sys, /entities REPLACE/);
   assert.match(sys, /Topic split:[^\n]*link them "related"[^\n]*"ref"/);
   assert.match(sys, /\{"op":"add","ref":"a",/);
   assert.match(sys, /keywords \(0-8\):[^\n]*never repeat a title\/body word[^\n]*"머지 동결" ↔ "merge freeze"[^\n]*abbreviations[^\n]*REQUIRED whenever/);
@@ -167,7 +168,7 @@ test("turn-curation: the id rule and the link op both allow a ref of an earlier 
   const sys = llmCalls[0].system;
   assert.match(sys, /Only reference ids from the EXISTING MEMORIES list \(or a "ref" of an earlier add in this response\)/);
   assert.match(sys, /\{"op":"link"\} relates two existing memories \(or a "ref" of an earlier add in this response\)/);
-  assert.match(sys, /On edit, entities ADD to the list \(omit to add none\)[^\n]*dropped even without "entities"/);
+  assert.match(sys, /On update and edit, entities ADD to the list \(omit to add none\)[^\n]*dropped even without "entities"/);
 });
 
 test("G-049: an entity the title still names stays after an edit removes it from the body (same rule as review, G-046)", async () => {

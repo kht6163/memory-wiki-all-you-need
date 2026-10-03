@@ -1,6 +1,6 @@
 import { config, llmEnabled } from "./config.ts";
 import { db, rowToEntry, type Entry, type Project, type Turn, type TurnResult } from "./db.ts";
-import { chatJson } from "./llm.ts";
+import { chatJson, LlmJsonError, type ChatMessage } from "./llm.ts";
 import { searchEntries } from "./search.ts";
 import {
   ACTIVE_SQL,
@@ -18,7 +18,7 @@ import {
   updateEntry,
   type WriteMeta,
 } from "./store.ts";
-import { ENTITY_KINDS, entryEntitiesDroppedByEdit, type EntityInput } from "./entities.ts";
+import { ENTITY_KINDS, entityDisplayName, entryEntitiesDroppedByEdit, type EntityInput } from "./entities.ts";
 import {
   addLink,
   claimGraphJob,
@@ -54,7 +54,7 @@ Remember (only if it will plausibly matter in a FUTURE session):
 
 Do NOT remember:
 - transient task progress, TODOs of this turn, or the conversation itself
-- one-off work that merely applies an existing memory (a task done the way a remembered rule says): that is a confirm of the rule, not a new convention — add only when the turn states a new durable fact
+- one-off work that merely applies an existing memory (a task done the way a remembered rule says, even when it touched specific files, values or tokens): that is a confirm of the rule, not a new convention — add only when the turn states a new durable fact
 - things obvious from reading the code, or generic programming knowledge
 - guesses not confirmed in the turn: a claim that appears only in the assistant's own reasoning or plan is not a fact until a tool result, the user or the code backs it (what the agent actually did and verified — "fixed X by doing Y" — does count)
 - an assistant message that only repeats or acknowledges what the user said (store the user's fact once, not the echo)
@@ -68,13 +68,13 @@ Scopes:
 
 Rules:
 - Prefer updating an existing memory over adding a near-duplicate. Memories from earlier turns of this session are among the candidates: extend them instead of repeating them. But merge only facts about the SAME subject whose title still fits; a different component or concern (DB vs CI auth vs cache) gets its own add — never let one memory grow into a grab bag.
-- Topic split: when one turn yields several memories (adds, or adds plus updates) that belong to the same change or system, link them "related" — give each add a short "ref" ("a", "b", ...) and a later op links to an earlier add of this response with {"to":"a","type":"related"}; link to existing memories by id.
+- Topic split: when one turn yields several memories (adds, or adds plus updates) that are parts of the same change or the same system, link them "related" (never merely because they came from the same turn or project) — give each add a short "ref" ("a", "b", ...) and a later op links to an earlier add of this response with {"to":"a","type":"related"}; link to existing memories by id.
 - When the world changed (switched library, moved a path, upgraded a version, reversed a decision): add the new memory with a "supersedes" link to the old one. The old one is then kept as history and no longer injected — do not also delete it. Use update for corrections/refinements of the same fact, delete only for memories that were wrong from the start or are noise.
 - Multiple values are not a contradiction: "uses PostgreSQL" and "also uses Redis" can both be true; only replace/supersede when the new fact makes the old one false.
 - valid_until (YYYY-MM-DD): for facts that are true only until a known date (a temporary workaround, a freeze, a deadline like "until next Wednesday"): set it to that resolved date, in addition to writing the date in the body. Leave it out for lasting facts.
-- keywords (0-8): search terms NOT already in title/body (never repeat a title/body word) — prefer the user's own wording when the memory words it differently, the Korean↔English translation ("머지 동결" ↔ "merge freeze"), abbreviations, aliases, alternate spellings. REQUIRED whenever such a term exists (user wrote "포스트그레스", title says "PostgreSQL" → ["포스트그레스","Postgres"]); omit only when there is truly none. Used for search only, never shown to the agent.
+- keywords (0-8): search terms NOT already in title/body (never repeat a title/body word) — prefer the user's own wording when the memory words it differently, the Korean↔English translation (always include the common English/Korean counterpart of the key concept: "머지 동결" ↔ "merge freeze"), abbreviations, aliases, alternate spellings. REQUIRED whenever such a term exists (user wrote "포스트그레스", title says "PostgreSQL" → ["포스트그레스","Postgres"]); omit only when there is truly none. Used for search only, never shown to the agent.
 - Only reference ids from the EXISTING MEMORIES list (or a "ref" of an earlier add in this response).
-- edit: for a small change to a long body (fix a value, add or drop a line), prefer {"op":"edit","id":N,"old":"...","new":"..."} over update: "old" is copied verbatim from the body and must occur in it exactly once (include enough surrounding text to make it unique); it is replaced by "new". To also change that memory's entities, links or valid_until (e.g. a deadline the turn adds), put "entities"/"links"/"valid_until" on the same edit op — never a second op for the same memory. Use update with a full "body" only when rewriting the memory, and never drop still-true lines when you do.
+- edit: for a small change to a long body (fix a value, add or drop a line), prefer {"op":"edit","id":N,"old":"...","new":"..."} over update: "old" is copied verbatim from the body and must occur in it exactly once (include enough surrounding text to make it unique); it is replaced by "new". To also change that memory's entities, links or valid_until (e.g. a deadline the turn adds), put "entities"/"drop_entities"/"links"/"valid_until" on the same edit op — never a second op for the same memory. Use update with a full "body" only when rewriting the memory, and never drop still-true lines when you do.
 - confirm: when the turn relies on or re-states an existing memory that is still accurate and needs no change, return {"op":"confirm","id":N} instead of an update (at most a few per turn). It changes nothing; it only records that the memory is still in use.
 - Write titles and bodies in the same language the user writes in (Korean if the user writes Korean). In title and body, copy package, container, service, CLI, config and file names exactly as written, even when they are also product names ("redis-sentinel" stays "redis-sentinel", not "Redis Sentinel"; "envoy 1.29.1" stays "envoy 1.29.1", not "Envoy 1.29.1"); canonical spelling ("Envoy") belongs in the entities list only.
 - title: short and specific (<= 80 chars). body: concise, self-contained markdown (1-6 lines). Include the "why" when known.
@@ -90,15 +90,15 @@ Graph (memories are also nodes of a knowledge graph):
   - "supersedes": this replaces the other (the other then becomes history automatically)
   - "related": closely related, nothing more specific fits
   Only link when the relation is real and useful; most memories need 0-2 links.
-- Give entities on every add. On update, entities REPLACE the memory's entity list (omit to keep it). On edit, entities ADD to the list (omit to add none): the memory's other entities stay, except ones only the replaced "old" text named, which are dropped even without "entities".
+- Give entities on every add. On update and edit, entities ADD to the list (omit to add none): the memory's other entities stay, except ones the old title/body (or the replaced "old" text) named that the new text no longer names, which are dropped even without "entities". "drop_entities" (exact current names) only when the turn says that thing was removed or replaced — never to tidy entities the body does not spell out.
 - Graph upkeep is expected even when nothing else changes: every EXISTING memory this turn is about that has "entities": [] (e.g. one the agent just saved with memory_add) MUST get an update op with only "id", "entities" and, where real, "links" (or carry them on the edit op if you also edit it). Also add links between existing memories when this turn reveals a relation (op "link").
 - {"op":"link"} relates two existing memories (or a "ref" of an earlier add in this response) without changing them.
 
 Respond with ONLY a JSON object:
 {"ops":[
   {"op":"add","ref":"a","scope":"project|global|user","category":"...","title":"...","body":"...","tags":["..."],"keywords":["user's own term","alias"],"valid_until":"YYYY-MM-DD","entities":[{"name":"...","kind":"tech"}],"links":[{"to":123,"type":"because"}]},
-  {"op":"update","id":123,"title":"...","body":"...","category":"...","tags":["..."],"keywords":["..."],"valid_until":"YYYY-MM-DD","entities":[{"name":"...","kind":"..."}],"links":[{"to":45,"type":"related"}],"reason":"..."},
-  {"op":"edit","id":123,"old":"exact text from the body","new":"replacement","entities":[{"name":"...","kind":"..."}],"links":[{"to":45,"type":"related"}],"valid_until":"YYYY-MM-DD","reason":"..."},
+  {"op":"update","id":123,"title":"...","body":"...","category":"...","tags":["..."],"keywords":["..."],"valid_until":"YYYY-MM-DD","entities":[{"name":"...","kind":"..."}],"links":[{"to":45,"type":"related"}],"drop_entities":["..."],"reason":"..."},
+  {"op":"edit","id":123,"old":"exact text from the body","new":"replacement","entities":[{"name":"...","kind":"..."}],"links":[{"to":45,"type":"related"}],"drop_entities":["..."],"valid_until":"YYYY-MM-DD","reason":"..."},
   {"op":"delete","id":123,"reason":"..."},
   {"op":"confirm","id":123},
   {"op":"link","from":123,"to":45,"type":"depends_on"}
@@ -211,6 +211,7 @@ export function applyMemoryOps(
   allowed: Set<number>,
   meta: WriteMeta,
   label: string,
+  turnText?: string,
 ): { applied: TurnResult["applied"]; skipped: NonNullable<TurnResult["skipped"]> } {
   const applied: TurnResult["applied"] = [];
   const skipped: NonNullable<TurnResult["skipped"]> = [];
@@ -219,6 +220,9 @@ export function applyMemoryOps(
   // An add may carry a short "ref" label so a later op of this response can link to it
   // (the LLM cannot know the new id): {"to":"a"}. Only earlier adds resolve.
   const refs = new Map<string, number>();
+  // "drop_entities" is honored only for names the turn itself mentions (the user removed
+  // or replaced that thing); the LLM used it to "tidy" unrelated entities (G-049).
+  const mentioned = turnText === undefined ? undefined : compactText(turnText);
   const target = (raw: unknown) => (typeof raw === "string" && refs.has(raw.trim()) ? refs.get(raw.trim())! : Number(raw));
   const setRef = (op: Op, id: number) => {
     const ref = typeof op.ref === "string" ? op.ref.trim() : "";
@@ -358,7 +362,8 @@ export function applyMemoryOps(
             // An edit ADDS entities: it may drop only those the replaced passage alone named
             // (a one-line change must not rewrite the whole list), with or without "entities".
             // The kept ones go first so the per-memory cap cuts an addition, never a kept one.
-            const { kept, dropped } = keptOnEdit(id, String(op.old), `${getEntry(id)?.title ?? ""}\n${r.body}`);
+            const drop = group.flatMap((o) => (Array.isArray(o.drop_entities) ? o.drop_entities : []));
+            const { kept, dropped } = keptEntities(id, String(op.old), `${getEntry(id)?.title ?? ""}\n${r.body}`, drop, mentioned);
             const ents = given || dropped ? [...kept, ...(given ?? [])] : undefined;
             const until = group.map(validUntilOf).filter((v) => v).at(-1);
             const e = updateEntry(id, { body: r.body, entities: ents, ...(until ? { valid_until: until } : {}) }, { ...meta, reason });
@@ -389,6 +394,12 @@ export function applyMemoryOps(
           applied.push({ op: "update", entryId: e.id, title: e.title });
           if (meta.turnId != null) recordEntryTurn(e.id, meta.turnId, "update");
         } else if (kind === "update") {
+          // Like an edit, an update ADDS entities (G-049): a current one is dropped only when the
+          // old title/body named it and the new text no longer does, or when listed in drop_entities.
+          const before = `${current.title}\n${current.body}`;
+          const after = `${op.title != null ? String(op.title) : current.title}\n${op.body != null ? String(op.body) : current.body}`;
+          const { kept, dropped } = keptEntities(id, before, after, op.drop_entities, mentioned);
+          const ents = entities || dropped ? [...kept, ...(entities ?? [])] : undefined;
           const e = updateEntry(
             id,
             {
@@ -396,7 +407,7 @@ export function applyMemoryOps(
               body: op.body != null ? String(op.body) : undefined,
               category,
               tags,
-              entities,
+              entities: ents,
               keywords,
               ...(validUntil ? { valid_until: validUntil } : {}),
             },
@@ -418,17 +429,32 @@ export function applyMemoryOps(
   return { applied, skipped };
 }
 
-/** The memory's current entities an edit keeps: all but those only the removed passage named. */
-function keptOnEdit(id: number, old: string, after: string): { kept: EntityInput[]; dropped: boolean } {
+/**
+ * The memory's current entities an edit or update keeps: all but those only the removed
+ * text named (G-049) and those the op lists in "drop_entities" (current names only).
+ */
+function keptEntities(id: number, old: string, after: string, drop?: unknown, mentioned?: string): { kept: EntityInput[]; dropped: boolean } {
   const current = entitiesOf(id);
-  const dropped = new Set(entryEntitiesDroppedByEdit(id, [old], after));
+  const dropped = new Set(old === after ? [] : entryEntitiesDroppedByEdit(id, [old], after));
+  const norm = (n: string) => entityDisplayName(n).toLowerCase();
+  const asked = new Set(Array.isArray(drop) ? drop.map((d) => norm(String(d))) : []);
+  for (const n of current) {
+    if (!asked.has(norm(n.name))) continue;
+    if (mentioned !== undefined && !mentioned.includes(compactText(entityDisplayName(n.name)))) continue;
+    dropped.add(n.name);
+  }
   const kept = current.filter((n) => !dropped.has(n.name)).map((n) => ({ name: n.name, kind: n.kind }));
   return { kept, dropped: dropped.size > 0 };
 }
 
-/** An update that only sets entities, links and/or valid_until (what the LLM sends next to an edit). */
+/** Lowercased, NFKC, without spaces, dots, dashes or underscores — for "does the turn name it". */
+function compactText(s: string): string {
+  return s.normalize("NFKC").toLowerCase().replace(/[\s._-]+/g, "");
+}
+
+/** An update that only sets entities, drop_entities, links and/or valid_until (what the LLM sends next to an edit). */
 function isSideUpdate(op: Op): boolean {
-  if (op.entities === undefined && op.links === undefined && op.valid_until == null) return false;
+  if (op.entities === undefined && op.links === undefined && op.valid_until == null && op.drop_entities === undefined) return false;
   return ["title", "body", "category", "tags", "keywords", "scope"].every((k) => op[k] == null);
 }
 
@@ -478,13 +504,22 @@ export async function processTurn(turn: Turn) {
   if (isTrivial(turn)) return finishTurn(turn.id, "skipped", { ops: [], applied: [], note: "trivial turn" });
 
   const candidates = candidateEntries(turn, project);
-  const { data } = await chatJson([
+  const messages: ChatMessage[] = [
     { role: "system", content: SYSTEM_PROMPT },
     { role: "user", content: buildUserPrompt(turn, project, candidates) },
-  ]);
+  ];
+  let data: unknown;
+  try {
+    ({ data } = await chatJson(messages));
+  } catch (err) {
+    // A malformed reply is usually a one-off: ask once more before failing the turn (bounded).
+    if (!(err instanceof LlmJsonError)) throw err;
+    console.warn(`[worker] turn ${turn.id}: unreadable LLM reply, retrying once: ${err.message.slice(0, 120)}`);
+    ({ data } = await chatJson([...messages, { role: "user", content: "Your previous reply was not valid JSON. Reply with ONLY the JSON object." }]));
+  }
   const obj = (data ?? {}) as { ops?: unknown; note?: unknown };
   const ops = Array.isArray(obj.ops) ? (obj.ops as Op[]) : [];
-  const { applied, skipped } = applyMemoryOps(ops, project, new Set(candidates.map((c) => c.id)), { author: "llm", turnId: turn.id, origin: "turn" }, `turn ${turn.id}`);
+  const { applied, skipped } = applyMemoryOps(ops, project, new Set(candidates.map((c) => c.id)), { author: "llm", turnId: turn.id, origin: "turn" }, `turn ${turn.id}`, renderTurn(turn.payload));
   finishTurn(turn.id, "done", {
     ops,
     applied,
