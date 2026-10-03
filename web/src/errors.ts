@@ -101,6 +101,10 @@ const RULES: Rule[] = [
   [/^too many turns \(max (\d+)\)$/, (n) => `턴이 너무 많습니다 (최대 ${n}개)`],
   [/^some turns do not exist$/, () => "일부 턴이 없습니다"],
   [/^no memories to backfill$/, () => "그래프를 채울 메모리가 없습니다"],
+  // project merge
+  [/^a job is running for one of these projects/, () => "두 프로젝트 중 한쪽에서 작업이 진행 중입니다. 끝난 뒤 다시 시도하세요"],
+  [/^cannot merge a project into itself$/, () => "프로젝트를 자기 자신에 합칠 수 없습니다"],
+  [/^into is required$/, () => "합칠 대상 프로젝트를 골라야 합니다"],
   // not found
   [/^(entry|page|project|entity|revision|job|proposal|turn) not found$/, (n) => `${NOUN[n]} 찾을 수 없습니다`],
   [/^memory #(\d+) not found$/, (id) => `메모리 #${id}을(를) 찾을 수 없습니다`],

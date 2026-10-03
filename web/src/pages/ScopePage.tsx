@@ -1,30 +1,11 @@
 import "./scope.css";
 import { useEffect, useMemo, useRef, useState, type KeyboardEvent } from "react";
 import { api, type Entry, type Policy, type Project, type Scope, type Source } from "../api.ts";
-import {
-  CATEGORY_LABEL,
-  CATEGORY_ORDER,
-  CategoryBadge,
-  Empty,
-  ErrorBox,
-  Markdown,
-  MOD_LABEL,
-  SOURCE_LABEL,
-  SourceBadge,
-  StateBadge,
-  Tags,
-  Time,
-  act,
-  confirmDialog,
-  go,
-  isHistory,
-  softDelete,
-  errorText,
-  toast,
-  useData,
-} from "../lib.tsx";
+import { act, CATEGORY_LABEL, CATEGORY_ORDER, CategoryBadge, changed, confirmDialog, Empty, ErrorBox, errorText, go, isHistory, Markdown, MOD_LABEL, softDelete, SOURCE_LABEL, SourceBadge, StateBadge, Tags, Time, toast, useData } from "../lib.tsx";
+import { Dialog } from "../components/Dialog.tsx";
 import { Icon } from "../components/Icon.tsx";
 import { Menu } from "../components/Menu.tsx";
+import { mergeCandidates, mergeSummary } from "../project-merge.ts";
 import { PageHeader } from "../components/PageHeader.tsx";
 import { SkeletonList } from "../components/Skeleton.tsx";
 import { ScopeTabs } from "./WikiPages.tsx";
@@ -402,6 +383,11 @@ function ProjectHeader({ project, onSaved }: { project: Project; onSaved: () => 
             마지막 사용 <Time iso={project.last_seen_at} />
           </span>
         )}
+        {project.aliases && project.aliases.length > 0 && (
+          <span className="project-aliases" title="합쳐진 프로젝트의 키 — 이 키로 들어오는 요청도 이 프로젝트로 연결됩니다">
+            이전 주소: {project.aliases.join(", ")}
+          </span>
+        )}
       </div>
       {editing ? (
         <div className="desc-editor">
@@ -452,8 +438,9 @@ function ProjectHeader({ project, onSaved }: { project: Project; onSaved: () => 
   );
 }
 
-/** "더 보기" menu in the page actions (project delete lives here, behind type-to-confirm). */
+/** "더 보기" menu in the page actions (merge and delete live here, both behind type-to-confirm). */
 function ProjectMenu({ project }: { project: Project }) {
+  const [merging, setMerging] = useState(false);
   const remove = async () => {
     const ok = await confirmDialog({
       title: "프로젝트 삭제",
@@ -466,14 +453,249 @@ function ProjectMenu({ project }: { project: Project }) {
   };
 
   return (
-    <Menu
-      label="더 보기"
-      items={[
-        { label: "프로젝트 키 복사", icon: "copy", run: () => copyText(project.key) },
-        { label: "턴 기록", icon: "messages-square", href: `#/turns?project=${project.id}` },
-        { label: "프로젝트 삭제…", icon: "trash-2", danger: true, run: remove },
-      ]}
-    />
+    <>
+      <Menu
+        label="더 보기"
+        items={[
+          { label: "프로젝트 키 복사", icon: "copy", run: () => copyText(project.key) },
+          { label: "턴 기록", icon: "messages-square", href: `#/turns?project=${project.id}` },
+          { label: "다른 프로젝트에 합치기…", icon: "git-merge", run: () => setMerging(true) },
+          { label: "프로젝트 삭제…", icon: "trash-2", danger: true, run: remove },
+        ]}
+      />
+      {merging && <ProjectMergeDialog source={project} onClose={() => setMerging(false)} />}
+    </>
+  );
+}
+
+// --------------------------------------------------------------- project merge
+
+/**
+ * Merge this project into another (G-007: a changed git origin splits one project in two).
+ * Step 1 picks the target (palette-style list, ↑↓ / Enter); step 2 shows the server's preview and
+ * asks for the source name before the irreversible POST (G-036).
+ */
+function ProjectMergeDialog({ source, onClose }: { source: Project; onClose: () => void }) {
+  const [q, setQ] = useState("");
+  const [sel, setSel] = useState(0);
+  const [target, setTarget] = useState<Project | null>(null);
+  const [typed, setTyped] = useState("");
+  const [busy, setBusy] = useState(false);
+  const listRef = useRef<HTMLDivElement>(null);
+  const searchRef = useRef<HTMLInputElement>(null);
+  const typeRef = useRef<HTMLInputElement>(null);
+  const projects = useData(() => api.projects(), []);
+  const items = mergeCandidates(projects.data ?? [], source.id, q);
+  const preview = useData(() => (target ? api.mergePreview(source.id, target.id) : Promise.resolve(null)), [source.id, target?.id]);
+  // useData keeps the previous result while reloading: only show a preview of the chosen target.
+  const pv = preview.data && target && preview.data.target.id === target.id ? preview.data : null;
+  const summary = pv ? mergeSummary(pv) : null;
+  const typedOk = typed.trim() === source.name;
+  const canMerge = Boolean(pv) && !preview.error && typedOk && !busy;
+
+  useEffect(() => setSel(0), [q]);
+  useEffect(() => {
+    listRef.current?.querySelector<HTMLElement>(`[data-i="${sel}"]`)?.scrollIntoView({ block: "nearest" });
+  }, [sel]);
+  useEffect(() => {
+    // Steps swap the focused control; data-autofocus only runs when the dialog opens.
+    if (target) typeRef.current?.focus();
+    else searchRef.current?.focus();
+  }, [target]);
+
+  const choose = (p: Project) => {
+    setTyped("");
+    setTarget(p);
+  };
+  const back = () => {
+    setTarget(null);
+    setTyped("");
+  };
+  const merge = async () => {
+    if (!target || !canMerge) return;
+    setBusy(true);
+    // quiet + changed() after leaving: a refetch on this page would ask for the deleted source project (404s).
+    const r = await act(() => api.mergeProject(source.id, target.id), { success: "합쳤습니다", quiet: true });
+    setBusy(false);
+    if (r !== undefined) {
+      onClose();
+      go(`/p/${r.target.id}`);
+      setTimeout(changed, 100);
+    }
+  };
+
+  const onKey = (e: KeyboardEvent<HTMLInputElement>) => {
+    if (!items.length) return;
+    if (e.key === "ArrowDown" || (e.ctrlKey && e.key === "n")) {
+      e.preventDefault();
+      setSel((i) => Math.min(items.length - 1, i + 1));
+    } else if (e.key === "ArrowUp" || (e.ctrlKey && e.key === "p")) {
+      e.preventDefault();
+      setSel((i) => Math.max(0, i - 1));
+    } else if (e.key === "Enter") {
+      e.preventDefault();
+      const p = items[Math.min(sel, items.length - 1)];
+      if (p) choose(p);
+    }
+  };
+
+  const listId = `pmerge-pick-${source.id}`;
+  return (
+    <Dialog
+      open
+      onClose={onClose}
+      className="pmerge-dialog"
+      title={target ? `"${source.name}"을(를) "${target.name}"에 합치기` : `"${source.name}"을(를) 어느 프로젝트에 합칠까요?`}
+      footer={
+        target ? (
+          <>
+            <button type="button" className="btn ghost" onClick={back} disabled={busy}>
+              다른 프로젝트 고르기
+            </button>
+            <span className="pmerge-foot-gap" />
+            <button type="button" className="btn" onClick={onClose} disabled={busy}>
+              취소
+            </button>
+            <button type="button" className="btn solid-danger" onClick={merge} disabled={!canMerge} aria-busy={busy}>
+              합치기
+            </button>
+          </>
+        ) : undefined
+      }
+    >
+      {!target ? (
+        <>
+          <p className="pmerge-hint">
+            git origin이 바뀌어 같은 프로젝트가 둘로 나뉘었을 때 씁니다. 고른 프로젝트로 메모리·턴 기록·위키를 옮기고, "{source.name}"의 키는 그 프로젝트를 가리키게 됩니다.
+          </p>
+          <ErrorBox error={projects.error} />
+          <div className="pmerge-box">
+            <div className="palette-input">
+              <Icon name="search" />
+              <input
+                ref={searchRef}
+                value={q}
+                onChange={(e) => setQ(e.target.value)}
+                onKeyDown={onKey}
+                placeholder="합칠 대상 프로젝트 검색"
+                aria-label="합칠 대상 프로젝트 검색"
+                role="combobox"
+                aria-expanded={items.length > 0}
+                aria-controls={listId}
+                aria-activedescendant={items.length ? `${listId}-${sel}` : undefined}
+                autoComplete="off"
+                spellCheck={false}
+                data-autofocus=""
+              />
+              {projects.loading && <div className="palette-loading" />}
+            </div>
+            <div className="palette-list" id={listId} role="listbox" ref={listRef} aria-label="합칠 대상 프로젝트">
+              {items.map((p, i) => (
+                <div
+                  key={p.id}
+                  id={`${listId}-${i}`}
+                  data-i={i}
+                  role="option"
+                  aria-selected={i === sel}
+                  className="palette-item"
+                  onMouseMove={() => setSel(i)}
+                  onClick={() => choose(p)}
+                >
+                  <Icon name="folder" size={16} />
+                  <span className="palette-label">{p.name}</span>
+                  <span className="hint pmerge-key">{p.key}</span>
+                </div>
+              ))}
+              {!projects.loading && projects.data && items.length === 0 && (
+                <div className="palette-empty">{q.trim() ? "일치하는 프로젝트가 없습니다" : "합칠 수 있는 다른 프로젝트가 없습니다"}</div>
+              )}
+            </div>
+            <div className="palette-foot">↑↓ 이동 · ↵ 고르기 · esc 닫기</div>
+          </div>
+        </>
+      ) : (
+        <div className="pmerge-preview" aria-busy={preview.loading}>
+          <ErrorBox error={preview.error} />
+          {preview.error && (
+            <p className="pmerge-retry">
+              <button type="button" className="btn" onClick={preview.reload} disabled={preview.loading}>
+                {preview.loading ? "다시 불러오는 중…" : "다시 시도"}
+              </button>
+            </p>
+          )}
+          {!pv && !preview.error && <p className="hint">미리보기를 불러오는 중…</p>}
+          {summary && pv && (
+            <>
+              <section aria-labelledby={`${listId}-moves`}>
+                <h3 id={`${listId}-moves`}>옮겨지는 것</h3>
+                {summary.moves.length ? (
+                  <ul>
+                    {summary.moves.map((m) => (
+                      <li key={m}>{m}</li>
+                    ))}
+                  </ul>
+                ) : (
+                  <p>옮길 메모리·턴 기록·위키가 없습니다.</p>
+                )}
+              </section>
+              {summary.renames.length > 0 && (
+                <section aria-labelledby={`${listId}-renames`}>
+                  <h3 id={`${listId}-renames`}>이름이 바뀌는 위키 페이지</h3>
+                  <p className="hint">"{pv.target.name}" 위키에 같은 주소의 페이지가 있어 "{pv.source.name}" 쪽 페이지의 주소를 바꿉니다.</p>
+                  <ul className="pmerge-renames">
+                    {summary.renames.map((r) => (
+                      <li key={r.from}>
+                        <code>{r.from}</code> → <code>{r.to}</code>
+                      </li>
+                    ))}
+                  </ul>
+                </section>
+              )}
+              <section aria-labelledby={`${listId}-keeps`}>
+                <h3 id={`${listId}-keeps`}>"{pv.target.name}"에 남는 것</h3>
+                <ul>
+                  <li>{summary.policy}</li>
+                  <li>{summary.description}</li>
+                </ul>
+              </section>
+              {summary.aliases.length > 0 && (
+                <section aria-labelledby={`${listId}-aliases`}>
+                  <h3 id={`${listId}-aliases`}>"{pv.target.name}"로 연결되는 키</h3>
+                  <p className="hint">합친 뒤 이 키로 들어오는 pi 요청도 "{pv.target.name}"의 메모리를 받습니다. 같은 키로 프로젝트가 다시 생기지 않습니다.</p>
+                  <ul className="pmerge-aliases">
+                    {summary.aliases.map((a) => (
+                      <li key={a}>
+                        <code>{a}</code>
+                      </li>
+                    ))}
+                  </ul>
+                </section>
+              )}
+              <p className="pmerge-warn" role="note">
+                <Icon name="alert-triangle" size={14} />
+                <span>
+                  되돌릴 수 없습니다. 합친 뒤 "{pv.source.name}" 프로젝트는 사라집니다. 필요하면 먼저 데이터를 백업하세요.
+                </span>
+              </p>
+            </>
+          )}
+          <form
+            className="dialog-confirm-text"
+            onSubmit={(e) => {
+              e.preventDefault();
+              merge();
+            }}
+          >
+            <label>
+              <span>
+                확인하려면 <b>{source.name}</b>을(를) 입력하세요
+              </span>
+              <input ref={typeRef} value={typed} onChange={(e) => setTyped(e.target.value)} autoComplete="off" spellCheck={false} disabled={busy} />
+            </label>
+          </form>
+        </div>
+      )}
+    </Dialog>
   );
 }
 

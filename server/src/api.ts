@@ -10,6 +10,7 @@ import {
   getEntry,
   getProject,
   getProjectByKey,
+  projectAliases,
   listEntries,
   listProjects,
   listRevisions,
@@ -33,6 +34,7 @@ import {
   setPolicy,
   withStates,
 } from "./store.ts";
+import { mergePreview, mergeProject } from "./project-merge.ts";
 import { deleteTurn, enqueueTurn, getTurn, listTurns, retryTurn } from "./turns.ts";
 import { config, llmEnabled } from "./config.ts";
 import {
@@ -249,7 +251,13 @@ api.get("/projects", (c) => c.json(listProjects()));
 api.get("/projects/:id", (c) => {
   const p = getProject(idParam(c));
   if (!p) throw new HttpError(404, "project not found");
-  return c.json(p);
+  return c.json({ ...p, aliases: projectAliases(p.id) });
+});
+/** Merge a project split off by an origin change into another one (source = :id). */
+api.get("/projects/:id/merge-preview", (c) => c.json(mergePreview(idParam(c), c.req.query("into"))));
+api.post("/projects/:id/merge", async (c) => {
+  const b = await body<{ into?: number | string | null }>(c);
+  return c.json(mergeProject(idParam(c), b.into));
 });
 api.patch("/projects/:id", async (c) => c.json(updateProject(idParam(c), await body(c))));
 api.delete("/projects/:id", (c) => {

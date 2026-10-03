@@ -535,6 +535,71 @@ INSERT INTO entries_fts(entries_fts) VALUES ('rebuild');
       rewriteEntitySnapshots(db);
     },
   },
+  {
+    version: 11,
+    name: "project aliases",
+    up(db) {
+      // Keys of projects merged into another one (origin renamed or added, see
+      // project-merge.ts). A key here resolves to its project and is never
+      // created again as a separate project; gone when the project is deleted.
+      db.exec(`
+CREATE TABLE project_aliases (
+  key TEXT PRIMARY KEY,
+  project_id INTEGER NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
+  created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now'))
+);
+CREATE INDEX project_aliases_project ON project_aliases(project_id);
+`);
+    },
+  },
+  {
+    version: 12,
+    name: "project ids are never reused",
+    up(db) {
+      // Merging deletes the source project, so the largest id is freed far more
+      // often than before. wiki_composed.scope, curation_policies and graph job
+      // payloads name projects by id without a foreign key, and web links are
+      // #/p/<id>: a reused id would inherit another project's "composed" marks or
+      // point an old link at a different project. Same rebuild as steps 8 and 9;
+      // children (entries, turns, wiki_pages, wiki_jobs, review_jobs,
+      // project_aliases) reference "projects" by name; foreign keys are off.
+      db.exec(`
+CREATE TABLE projects_new (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  key TEXT NOT NULL UNIQUE,
+  name TEXT NOT NULL,
+  remote TEXT,
+  description TEXT NOT NULL DEFAULT '',
+  created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now')),
+  updated_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now')),
+  last_seen_at TEXT
+);
+INSERT INTO projects_new (id, key, name, remote, description, created_at, updated_at, last_seen_at)
+  SELECT id, key, name, remote, description, created_at, updated_at, last_seen_at FROM projects;
+DROP TABLE projects;
+ALTER TABLE projects_new RENAME TO projects;
+`);
+      // Start above every id a record still names (a project deleted before the upgrade).
+      const mentioned = Number(
+        (
+          db
+            .prepare(
+              `SELECT max(
+                 IFNULL((SELECT max(id) FROM projects), 0),
+                 IFNULL((SELECT max(scope) FROM wiki_composed), 0),
+                 IFNULL((SELECT max(project_id) FROM curation_policies), 0),
+                 IFNULL((SELECT max(CAST(json_extract(payload, '$.projectId') AS INTEGER)) FROM graph_jobs WHERE json_valid(payload)), 0)
+               ) AS n`,
+            )
+            .get() as { n: number }
+        ).n,
+      );
+      if (mentioned > 0) {
+        const res = db.prepare(`UPDATE sqlite_sequence SET seq = max(seq, ?) WHERE name = 'projects'`).run(mentioned);
+        if (!res.changes) db.prepare(`INSERT INTO sqlite_sequence (name, seq) VALUES ('projects', ?)`).run(mentioned);
+      }
+    },
+  },
 ];
 
 /**

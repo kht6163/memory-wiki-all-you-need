@@ -16,6 +16,47 @@ export interface Project {
   last_seen_at: string | null;
   entry_count?: number;
   turn_count?: number;
+  /** Older keys that now resolve to this project (merged-away projects). GET /projects/:id only. */
+  aliases?: string[];
+}
+
+/** What a project merge moves (preview and result share the shape). */
+export interface MergeCounts {
+  entries: number;
+  turns: number;
+  wiki_pages: number;
+  wiki_jobs: number;
+  review_jobs: number;
+  review_proposals_pending: number;
+}
+
+/** Same slug in both wikis: the source page is renamed to new_slug. */
+export interface MergeConflict {
+  slug: string;
+  source_page_id: number;
+  target_page_id: number;
+  new_slug: string;
+}
+
+export type ProjectRef = { id: number; key: string; name: string };
+
+export interface MergePreview {
+  source: ProjectRef;
+  target: ProjectRef;
+  counts: MergeCounts;
+  wiki_conflicts: MergeConflict[];
+  /** Which curation policy the target keeps ("both": target's, with the source's appended). */
+  policy: "target" | "source" | "both" | "none";
+  description: "target" | "source" | "none";
+  /** Keys that resolve to the target afterwards. */
+  aliases: string[];
+}
+
+export interface MergeResult {
+  target: Project;
+  moved: MergeCounts;
+  wiki_conflicts: MergeConflict[];
+  aliases: string[];
 }
 
 export interface Entry {
@@ -406,6 +447,8 @@ export const api = {
   project: (id: number) => request<Project>("GET", `/projects/${id}`),
   updateProject: (id: number, patch: Partial<Pick<Project, "name" | "description">>) => request<Project>("PATCH", `/projects/${id}`, patch),
   deleteProject: (id: number) => request("DELETE", `/projects/${id}`),
+  mergePreview: (id: number, into: number) => request<MergePreview>("GET", `/projects/${id}/merge-preview${qs({ into })}`),
+  mergeProject: (id: number, into: number) => request<MergeResult>("POST", `/projects/${id}/merge`, { into }),
   entries: (f: { scope?: Scope; project_id?: number; category?: string; deleted?: boolean }) =>
     request<Entry[]>("GET", `/entries${qs({ ...f, deleted: f.deleted ? 1 : undefined })}`),
   entry: (id: number) =>

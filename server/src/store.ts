@@ -37,18 +37,44 @@ export function upsertProject(ref: ProjectRef): Project {
   const key = ref.key.trim();
   if (!key) throw new HttpError(400, "project key is required");
   const name = ref.name?.trim() || key.split("/").pop() || key;
-  db.prepare(
-    `INSERT INTO projects (key, name, remote, last_seen_at) VALUES (?, ?, ?, ?)
-     ON CONFLICT(key) DO UPDATE SET
-       remote = COALESCE(excluded.remote, projects.remote),
-       last_seen_at = excluded.last_seen_at`,
-  ).run(key, name, ref.remote ?? null, now());
+  // A key merged into another project resolves to it and never makes a new project.
+  const alias = aliasTarget(key);
+  if (alias != null) {
+    db.prepare(`UPDATE projects SET remote = COALESCE(?, remote), last_seen_at = ? WHERE id = ?`).run(ref.remote ?? null, now(), alias);
+    return getProject(alias)!;
+  }
+  // UPDATE first: an INSERT … ON CONFLICT would still advance the AUTOINCREMENT counter on every
+  // request for an existing project (step 12), leaving big gaps in project ids.
+  const upd = db.prepare(`UPDATE projects SET remote = COALESCE(?, remote), last_seen_at = ? WHERE key = ?`).run(ref.remote ?? null, now(), key);
+  if (!upd.changes) {
+    db.prepare(
+      `INSERT INTO projects (key, name, remote, last_seen_at) VALUES (?, ?, ?, ?)
+       ON CONFLICT(key) DO UPDATE SET remote = COALESCE(excluded.remote, projects.remote), last_seen_at = excluded.last_seen_at`,
+    ).run(key, name, ref.remote ?? null, now());
+  }
   return getProjectByKey(key)!;
 }
 
+/** The project a merged-away key now belongs to, or null when the key is not an alias. */
+function aliasTarget(key: string): number | null {
+  const r = db.prepare(`SELECT project_id FROM project_aliases WHERE key = ?`).get(key);
+  return r ? Number(r.project_id) : null;
+}
+
+/** By key, or by a key of a project merged into it (project_aliases). */
 export function getProjectByKey(key: string): Project | null {
   const row = db.prepare(`SELECT * FROM projects WHERE key = ?`).get(key);
-  return row ? rowToProject(row) : null;
+  if (row) return rowToProject(row);
+  const alias = aliasTarget(key);
+  return alias == null ? null : getProject(alias);
+}
+
+/** Keys that resolve to this project besides its own (from merges), oldest first. */
+export function projectAliases(id: number): string[] {
+  return db
+    .prepare(`SELECT key FROM project_aliases WHERE project_id = ? ORDER BY created_at, key`)
+    .all(id)
+    .map((r) => String(r.key));
 }
 
 export function getProject(id: number): Project | null {
@@ -111,6 +137,8 @@ export function updateProject(id: number, patch: { name?: string; description?: 
 export function deleteProject(id: number): void {
   db.prepare(`DELETE FROM projects WHERE id = ?`).run(id);
   db.prepare(`DELETE FROM curation_policies WHERE project_id = ?`).run(id);
+  // "composed into this project's wiki" marks (scope = project id, no foreign key).
+  db.prepare(`DELETE FROM wiki_composed WHERE scope = ?`).run(id);
   pruneAllOrphanEntities();
 }
 

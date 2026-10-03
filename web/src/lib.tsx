@@ -279,10 +279,11 @@ export function scopeHref(e: Pick<Entry, "scope" | "project_id">): string {
  * Runs a mutation: on success fires "memory:changed" (and an optional success toast), on failure shows
  * an error toast. Never throws — returns undefined on failure, so callers can chain `.then(r => r !== undefined && …)`.
  */
-export async function act<T>(fn: () => Promise<T>, opts?: { success?: string }): Promise<T | undefined> {
+export async function act<T>(fn: () => Promise<T>, opts?: { success?: string; quiet?: boolean }): Promise<T | undefined> {
   try {
     const r = await fn();
-    changed();
+    // quiet: the caller fires changed() itself (e.g. after leaving a page whose data is now gone).
+    if (!opts?.quiet) changed();
     if (opts?.success) toast({ kind: "ok", title: opts.success });
     return r;
   } catch (e) {
