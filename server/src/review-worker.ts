@@ -151,7 +151,7 @@ async function runReview(job: ReviewJob, between: () => Promise<void>) {
         const truncated = new Set(cut);
         // Several updates of one memory (e.g. one edit each) become one proposal with all their edits.
         const bodies = new Map(batch.map((e) => [e.id, e.body]));
-        const combined = combineUpdateProposals(all.slice(0, 30), (id) => (seen.has(id) ? bodies.get(id) : undefined));
+        const combined = combineUpdateProposals(all.slice(0, 30), (id) => (seen.has(id) ? bodies.get(id) : undefined), (id) => context.has(id));
         combined.dropped.forEach(drop);
         for (const p of combined.proposals) {
           // The LLM never saw the end of a truncated body: it may not rewrite that body. Exact-substring

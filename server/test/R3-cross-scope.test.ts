@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { beforeEach, test } from "node:test";
-import { CROSS_SCOPE_MAX, crossScopeBudget, crossScopeContext, scheduleDueReviews, versionOf } from "../src/review.ts";
+import { CROSS_SCOPE_MAX, combineUpdateProposals, crossScopeBudget, crossScopeContext, scheduleDueReviews, versionOf } from "../src/review.ts";
 import type { Entry } from "../src/db.ts";
 import { getEntry, updateEntry } from "../src/store.ts";
 import { call, db, entry, llmCalls, llmDefault, llmReply, llmReset, ok, project, runQueueOnce } from "./helpers.ts";
@@ -334,4 +334,40 @@ test("G-055: a conflict with a REFERENCE memory is kept; a reason citing it fill
   assert.equal((await call("POST", `/review/proposals/${del.id}/apply`)).status, 409);
   assert.equal((await call("POST", `/review/proposals/${conf.id}/apply`)).status, 409);
   assert.equal((await ok("GET", `/entries/${dup.id}`)).entry.deleted_at, null);
+});
+
+test("G-055: a single shared word does not pull an unrelated global memory in; hub entities weigh less", async () => {
+  const p = await freshProject();
+  const noise = await entry({ scope: "global", title: "xsnoise 테스트", body: "테스티 임" });
+  const lang = await entry({ scope: "global", title: "xsanswer 답변 언어", body: "answers in Korean" });
+  const hit = await entry({ scope: "global", title: "xscommit 커밋 메시지 언어", body: "Commit messages in Korean." });
+  const m1 = await entry({ project_id: p.id, title: "xscommit 커밋 메시지 언어", body: "Korean commits here." });
+  const m2 = await entry({ project_id: p.id, title: "xsrun 테스트 실행", body: "npm test" });
+  const fmt = (e: Entry) => `${e.id} ${e.title} ${e.body}`;
+  const refs = crossScopeContext([getEntry(m1.id)!, getEntry(m2.id)!], fmt).map((e) => e.id);
+  assert.ok(refs.includes(hit.id), "the memory sharing the whole title is a reference");
+  assert.ok(!refs.includes(noise.id), "one shared word of two is not enough");
+  assert.ok(!refs.includes(lang.id), "one shared word of four is not enough");
+  // A two-word title whose body repeats the global rule still finds it (v0.6.6 re-measure regression).
+  const rule = await entry({ project_id: p.id, title: "xsrule 커밋 규칙", body: "커밋 메시지는 한국어로 쓴다. 이 저장소는 커밋 앞에 [web] 접두사." });
+  const hitG = await entry({ scope: "global", title: "xsrule2 커밋 메시지 언어", body: "커밋 메시지는 한국어로 쓴다 (모든 저장소)." });
+  assert.ok(crossScopeContext([getEntry(rule.id)!], fmt).map((e) => e.id).includes(hitG.id), "found through the body");
+
+  // Entity path: a hub entity (many global memories) ranks below a rare shared entity.
+  const hubName = "XsHubEntity";
+  for (let i = 0; i < 12; i++) await entry({ scope: "global", title: `xshub filler ${i}`, body: `filler ${i}`, entities: [hubName] });
+  const rare = await entry({ scope: "global", title: "xsrare doc", body: "rare", entities: ["XsRareEntity"] });
+  const both = await entry({ project_id: p.id, title: "xsboth", body: "both", entities: [hubName, "XsRareEntity"] });
+  const top = crossScopeContext([getEntry(both.id)!], fmt, { max: 1 }).map((e) => e.id);
+  assert.deepEqual(top, [rare.id], "the rare shared entity wins the only slot");
+});
+
+test("G-055: folding updates keeps the covered_by that names a REFERENCE memory", () => {
+  const raws = [
+    { kind: "update", ids: [5], edits: [{ old: "a", new: "" }], covered_by: 6, reason: "dup of #6 in batch" },
+    { kind: "update", ids: [5], edits: [{ old: "b", new: "" }], covered_by: 99, reason: "already in global #99" },
+  ];
+  const out = combineUpdateProposals(raws, () => "a b c", (id) => id === 99);
+  assert.equal(out.proposals.length, 1);
+  assert.equal(out.proposals[0].covered_by, 99);
 });

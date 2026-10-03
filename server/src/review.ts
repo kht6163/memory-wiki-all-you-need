@@ -202,6 +202,9 @@ export const crossScopeBudget = (chunk = config.review.chunkChars) => Math.min(C
  * Ranked by shared entities first, then by keyword search on the batch's titles.
  * Bounded by `max` memories and `chars` characters of `fmt` output.
  */
+/** Smallest search score for a keyword-only REFERENCE (no shared entity) — see crossScopeContext. */
+export const KEYWORD_REF_MIN = 5;
+
 export function crossScopeContext(
   batch: Entry[],
   fmt: (e: Entry) => string,
@@ -213,26 +216,42 @@ export function crossScopeContext(
   const ids = batch.slice(0, 500).map((e) => e.id);
   const order: number[] = [];
   const byId = new Map<number, Entry>();
-  const rows = db
+  // Shared entities, each weighted down by how many global/user memories mention it: a hub
+  // entity ("Git", "TypeScript") alone should not pull the same general memories into every batch.
+  const pairs = db
     .prepare(
-      `SELECT e.*, COUNT(DISTINCT b.entity_id) AS shared FROM entry_entities a
+      `SELECT e.id AS id, b.entity_id AS entity,
+              (SELECT COUNT(*) FROM entry_entities c JOIN entries g ON g.id = c.entry_id
+                WHERE c.entity_id = b.entity_id AND g.scope IN ('global','user') AND g.deleted_at IS NULL) AS n
+         FROM entry_entities a
          JOIN entry_entities b ON b.entity_id = a.entity_id
          JOIN entries e ON e.id = b.entry_id
        WHERE a.entry_id IN (${ids.map(() => "?").join(",")}) AND e.scope IN ('global','user')
          AND e.deleted_at IS NULL AND e.category != 'standing' AND ${ACTIVE_SQL("e")}
-       GROUP BY e.id ORDER BY shared DESC, e.updated_at DESC, e.id LIMIT ?`,
+       GROUP BY e.id, b.entity_id`,
     )
-    .all(...ids, max * 3);
-  for (const r of rows) {
-    const e = rowToEntry(r);
+    .all(...ids) as { id: number; entity: number; n: number }[];
+  const weight = new Map<number, number>();
+  for (const r of pairs) weight.set(Number(r.id), (weight.get(Number(r.id)) ?? 0) + 1 / Math.log2(1 + Math.max(1, Number(r.n))));
+  // Equal weight: the more recently updated first, then id (as before the weighting).
+  const found = [...weight.keys()].map((id) => getEntry(id)).filter((e): e is Entry => Boolean(e));
+  found.sort((a, b) => weight.get(b.id)! - weight.get(a.id)! || b.updated_at.localeCompare(a.updated_at) || a.id - b.id);
+  for (const e of found.slice(0, max * 3)) {
     order.push(e.id);
     byId.set(e.id, e);
   }
   // Keyword overlap: each batch memory's title (and keywords) searched in global/user, best two each.
   const score = new Map<number, number>();
   for (const m of batch) {
-    for (const h of searchEntries(`${m.title} ${m.keywords.join(" ")}`, { scopes: ["global", "user"], limit: 2, excludeIds: new Set(order) })) {
+    // Title, keywords and the start of the body: a two-word title alone ("커밋 규칙") scores too
+    // low to tell a real overlap from one shared word ("테스트", "답변 언어"); with the body the
+    // gap is wide (v0.6.6 measurements: 9–24 vs ≤4).
+    const query = `${m.title} ${m.keywords.join(" ")} ${m.body.slice(0, 200)}`;
+    const hits = searchEntries(query, { scopes: ["global", "user"], limit: 3, excludeIds: new Set(order) });
+    const best = hits[0]?.score ?? 0;
+    for (const h of hits) {
       if (h.entry.category === "standing") continue;
+      if (h.score < KEYWORD_REF_MIN || h.score < best * 0.3) continue;
       score.set(h.entry.id, (score.get(h.entry.id) ?? 0) + h.score);
       byId.set(h.entry.id, h.entry);
     }
@@ -473,6 +492,8 @@ function entitiesAfterEdits(id: number, edits: unknown[], after: string): string
 export function combineUpdateProposals(
   raws: Record<string, unknown>[],
   bodyOf: (id: number) => string | undefined,
+  /** REFERENCE ids of this batch: a part citing one wins over a part citing a batch memory. */
+  isReference: (id: number) => boolean = () => false,
 ): { proposals: Record<string, unknown>[]; dropped: DroppedProposal[] } {
   const idsOf = (p: Record<string, unknown>) => [...new Set((Array.isArray(p.ids) ? p.ids : p.id != null ? [p.id] : []).map(Number))];
   const foldable = (p: Record<string, unknown>) => {
@@ -562,7 +583,7 @@ export function combineUpdateProposals(
       if (fresh.length && part.entities == null) derive = true;
       const why = String(part.reason ?? "").trim();
       if (why && !reasons.includes(why)) reasons.push(why);
-      if (covered == null && part.covered_by != null) covered = part.covered_by;
+      if (part.covered_by != null && (covered == null || (!isReference(Number(covered)) && isReference(Number(part.covered_by))))) covered = part.covered_by;
     }
     // Some parts listed entities and some did not: also drop what the folded edits stop mentioning
     // (intersection = union of removals). With no list at all, tryAddProposal derives it instead.
