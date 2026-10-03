@@ -1,13 +1,19 @@
+import "./graph.css";
 import cytoscape, { type Core, type ElementDefinition } from "cytoscape";
 import { useEffect, useMemo, useRef, useState } from "react";
-import { api, type GraphData, type GraphNode } from "../api.ts";
-import { CATEGORY_LABEL, CATEGORY_ORDER, CategoryBadge, ErrorBox, Markdown, SCOPE_LABEL, act, go, useData } from "../lib.tsx";
-import { EntityChips, KIND_LABEL, LINK_TYPES, LinkList } from "./GraphPages.tsx";
+import { api, type GraphData, type GraphJob, type GraphNode } from "../api.ts";
+import { CATEGORY_LABEL, CATEGORY_ORDER, CategoryBadge, Empty, ErrorBox, JOB_STATUS_LABEL, Markdown, SCOPE_LABEL, StateBadge, act, go, isHistory, usePoll, useData } from "../lib.tsx";
+import { EntityChips, KIND_LABEL, KindIcon, LINK_LABEL, LINK_TYPES, LinkList } from "./GraphPages.tsx";
 import { ScopeTabs } from "./WikiPages.tsx";
+import { Icon } from "../components/Icon.tsx";
+import { SkeletonText } from "../components/Skeleton.tsx";
 
 // The interactive graph (cytoscape). Loaded lazily so the rest of the UI does not pay for it.
 
 const cssVar = (name: string, fallback: string) => getComputedStyle(document.documentElement).getPropertyValue(name).trim() || fallback;
+
+const LEGEND_CATS = CATEGORY_ORDER.filter((c) => c !== "standing");
+const isRunning = (j: GraphJob) => j.status === "pending" || j.status === "processing";
 
 export function GraphPage({ projectId, initialFocus }: { projectId?: number; initialFocus?: string }) {
   const projects = useData(() => api.projects(), []);
@@ -18,20 +24,24 @@ export function GraphPage({ projectId, initialFocus }: { projectId?: number; ini
   const [focus, setFocus] = useState<string | null>(initialFocus ?? null);
   const [selected, setSelected] = useState<GraphNode | null>(null);
   const [q, setQ] = useState("");
+  const [dismissedJob, setDismissedJob] = useState<number | null>(null);
   const box = useRef<HTMLDivElement>(null);
   const cy = useRef<Core | null>(null);
+  const searchRef = useRef<HTMLInputElement>(null);
 
-  const mine = (j: { payload: { projectId?: number | null } }) => (j.payload.projectId ?? undefined) === projectId;
-  const running = jobs.data?.find((j) => mine(j) && (j.status === "pending" || j.status === "processing"));
-  const failed = jobs.data?.find((j) => mine(j) && j.status === "error");
+  // Jobs come newest first; the latest one for this scope decides what the status bar says.
+  const job = jobs.data?.find((j) => (j.payload.projectId ?? undefined) === projectId);
+  const running = job && isRunning(job) ? job : undefined;
+  usePoll(() => jobs.reload(), 3000, Boolean(running));
+  // Refresh the graph when the running job advances or finishes (not on every poll: each refresh re-lays out).
+  const progress = `${job?.id}:${job?.status}:${job?.result?.done?.length ?? 0}`;
+  const lastProgress = useRef<string | null>(null);
   useEffect(() => {
-    if (!running) return;
-    const t = setInterval(() => {
-      jobs.reload();
-      graph.reload();
-    }, 5000);
-    return () => clearInterval(t);
-  }, [running?.id, jobs.reload, graph.reload]);
+    if (!jobs.data) return;
+    const prev = lastProgress.current;
+    lastProgress.current = progress;
+    if (prev !== null && prev !== progress) graph.reload();
+  }, [progress, jobs.data, graph.reload]);
 
   const elements = useMemo(() => buildElements(graph.data, { showEntities, hidden, focus }), [graph.data, showEntities, hidden, focus]);
 
@@ -45,23 +55,55 @@ export function GraphPage({ projectId, initialFocus }: { projectId?: number; ini
       go(raw.type === "memory" ? `/e/${raw.entryId}` : `/entity/${raw.entityId}`);
     });
     cy.current = c;
-    // Re-read colors when the OS theme flips.
+    // Re-read colors when the theme changes: OS flip (for "system") or the in-app toggle.
+    // rAF so the new data-theme has been applied before the tokens are read.
     const mq = window.matchMedia("(prefers-color-scheme: dark)");
-    const onTheme = () => c.style(graphStyle());
+    const onTheme = () => requestAnimationFrame(() => cy.current === c && c.style(graphStyle()));
     mq.addEventListener("change", onTheme);
+    window.addEventListener("theme:changed", onTheme);
     return () => {
       mq.removeEventListener("change", onTheme);
+      window.removeEventListener("theme:changed", onTheme);
       c.destroy();
       cy.current = null;
     };
   }, []);
 
+  // Apply element changes as a diff so a refresh keeps existing nodes where they are.
   useEffect(() => {
     const c = cy.current;
     if (!c) return;
-    c.elements().remove();
-    c.add(elements);
-    c.layout({ name: "cose", animate: false, nodeRepulsion: () => 9000, idealEdgeLength: () => 70, nodeOverlap: 20, componentSpacing: 120, padding: 30, randomize: true } as cytoscape.LayoutOptions).run();
+    const next = new Set(elements.map((e) => String(e.data.id)));
+    const fresh = c.nodes().length === 0;
+    let changed = false;
+    c.batch(() => {
+      const gone = c.elements().filter((el) => !next.has(el.id()));
+      changed = gone.length > 0;
+      gone.remove();
+      const add: ElementDefinition[] = [];
+      for (const def of elements) {
+        const el = c.getElementById(String(def.data.id));
+        if (el.empty()) add.push(def);
+        else {
+          el.data(def.data);
+          el.classes(def.classes ?? "");
+        }
+      }
+      c.add(add);
+      if (add.length) changed = true;
+    });
+    // Same set of nodes and edges (a plain refresh): keep the current picture.
+    if (!changed || !c.nodes().length) return;
+    c.layout({
+      name: "cose",
+      animate: false,
+      randomize: fresh,
+      nodeRepulsion: () => 9000,
+      idealEdgeLength: () => 70,
+      nodeOverlap: 20,
+      componentSpacing: 120,
+      padding: 40,
+    } as cytoscape.LayoutOptions).run();
   }, [elements]);
 
   // Highlight search matches.
@@ -71,32 +113,68 @@ export function GraphPage({ projectId, initialFocus }: { projectId?: number; ini
     c.nodes().removeClass("match dim");
     const needle = q.trim().toLowerCase();
     if (!needle) return;
-    const hits = c.nodes().filter((n) => String(n.data("label")).toLowerCase().includes(needle));
+    const hits = c.nodes().filter((n) => String((n.data("raw") as GraphNode).label).toLowerCase().includes(needle));
     c.nodes().not(hits).addClass("dim");
     hits.addClass("match");
     if (hits.length) c.animate({ fit: { eles: hits, padding: 80 } }, { duration: 300 });
   }, [q, elements]);
 
+  // Esc closes the drawer (unless typing).
+  useEffect(() => {
+    if (!selected) return;
+    const on = (e: KeyboardEvent) => {
+      if (e.key !== "Escape" || e.defaultPrevented) return;
+      const t = e.target as HTMLElement | null;
+      if (t && (t.tagName === "INPUT" || t.tagName === "TEXTAREA" || t.tagName === "SELECT")) return;
+      setSelected(null);
+    };
+    window.addEventListener("keydown", on);
+    return () => window.removeEventListener("keydown", on);
+  }, [selected]);
+
   const project = projects.data?.find((p) => p.id === projectId);
   const memCount = graph.data?.nodes.filter((n) => n.type === "memory").length ?? 0;
   const entCount = graph.data?.nodes.filter((n) => n.type === "entity").length ?? 0;
   const linkCount = graph.data?.edges.filter((e) => e.type !== "mentions").length ?? 0;
+  const unlinked = graph.data?.unlinked ?? 0;
   const toggleCat = (c: string) => {
     const next = new Set(hidden);
     next.has(c) ? next.delete(c) : next.add(c);
     setHidden(next);
   };
+  const fit = () => cy.current?.animate({ fit: { eles: cy.current.elements(), padding: 40 } }, { duration: 250 });
+  const relayout = () =>
+    cy.current?.layout({ name: "cose", animate: false, randomize: true, nodeOverlap: 20, componentSpacing: 120, padding: 40 } as cytoscape.LayoutOptions).run();
+  const startBackfill = () => act(() => api.backfill(projectId), { success: "그래프 붙이기를 시작했습니다" }).then((r) => r !== undefined && jobs.reload());
+  const scopeName = projectId ? (project ? `"${project.name}"` : "이 프로젝트") : "전체";
+
+  // An empty canvas with unlinked memories is the moment to offer the backfill as the main action.
+  const offerEmpty = Boolean(graph.data && !running && unlinked > 0 && entCount === 0 && linkCount === 0);
+  const showJob = job && (running || ((job.status === "error" || job.status === "cancelled") && dismissedJob !== job.id));
 
   return (
-    <article className="page wide graph-page">
-      <header className="page-head">
-        <h1>메모리 그래프{project ? ` · ${project.name}` : ""}</h1>
+    <article className="graph-page" aria-busy={graph.loading}>
+      <header className="graph-head">
+        <div className="graph-head-row">
+          <h1>
+            메모리 그래프
+            {project && <span className="graph-head-scope">{project.name}</span>}
+          </h1>
+          <span className="graph-stats" aria-live="polite">
+            메모리 {memCount} · 엔티티 {entCount} · 관계 {linkCount}
+            {graph.data?.truncated ? " · 일부만 표시" : ""}
+          </span>
+          {graph.loading && graph.data && <span className="live-dot" title="불러오는 중" aria-label="불러오는 중" />}
+        </div>
         {projectId && <ScopeTabs scope={projectId} active="graph" />}
-        <p className="lead">
-          메모리(점)와 엔티티(네모)가 이어진 지식 그래프입니다. 메모리끼리는 이유·전제·대체·관련 관계로 잇습니다. 턴이 정리될 때 LLM이 함께 채우고, 메모리 화면에서 직접 고칠 수 있습니다.
-        </p>
-        <div className="toolbar graph-toolbar">
-          <select value={projectId ?? ""} onChange={(e) => go(e.target.value ? `/graph?project=${e.target.value}` : "/graph")}>
+      </header>
+
+      <div className={`graph-stage${selected ? " has-drawer" : ""}`}>
+        <div ref={box} className="graph-canvas" aria-label="메모리 그래프 캔버스" role="application" />
+
+        <div className="graph-top">
+        <div className="graph-float graph-toolbar" role="toolbar" aria-label="그래프 도구">
+          <select value={projectId ?? ""} onChange={(e) => go(e.target.value ? `/graph?project=${e.target.value}` : "/graph")} aria-label="범위">
             <option value="">전체</option>
             {projects.data?.map((p) => (
               <option key={p.id} value={p.id}>
@@ -104,49 +182,169 @@ export function GraphPage({ projectId, initialFocus }: { projectId?: number; ini
               </option>
             ))}
           </select>
-          <input className="graph-search" value={q} onChange={(e) => setQ(e.target.value)} placeholder="노드 찾기" />
-          <label className="check">
-            <input type="checkbox" checked={showEntities} onChange={(e) => setShowEntities(e.target.checked)} /> 엔티티
-          </label>
+          <div className="search-field graph-search">
+            <Icon name="search" size={14} />
+            <input
+              ref={searchRef}
+              type="search"
+              value={q}
+              onChange={(e) => setQ(e.target.value)}
+              onKeyDown={(e) => {
+                if (e.key === "Escape") {
+                  e.preventDefault();
+                  setQ("");
+                  searchRef.current?.blur();
+                }
+              }}
+              placeholder="노드 찾기"
+              aria-label="노드 찾기"
+            />
+          </div>
+          <button className="chip" aria-pressed={showEntities} onClick={() => setShowEntities(!showEntities)} title="엔티티 노드 표시">
+            <span className="entity-swatch" aria-hidden="true" />
+            엔티티
+          </button>
           {focus && (
-            <button className="btn small" onClick={() => setFocus(null)}>
-              전체 보기
+            <button className="chip" aria-pressed onClick={() => setFocus(null)} title="주변만 보기를 끄고 전체 그래프 보기">
+              <Icon name="crosshair" size={13} />
+              주변만 보는 중
+              <Icon name="x" size={12} />
             </button>
           )}
-          <button className="btn small" onClick={() => cy.current?.layout({ name: "cose", animate: false, randomize: true, nodeOverlap: 20, componentSpacing: 120 } as cytoscape.LayoutOptions).run()}>
-            다시 배치
+          <span className="graph-toolbar-sep" aria-hidden="true" />
+          <button className="icon-btn" onClick={fit} aria-label="화면에 맞추기" title="화면에 맞추기">
+            <Icon name="scan" />
           </button>
-          <span className="muted small right">
-            메모리 {memCount} · 엔티티 {entCount} · 관계 {linkCount}
-            {graph.data?.truncated ? " · 일부만 표시" : ""}
-          </span>
+          <button className="icon-btn" onClick={relayout} aria-label="다시 배치" title="다시 배치">
+            <Icon name="rotate-ccw" />
+          </button>
         </div>
-        <div className="legend">
-          {CATEGORY_ORDER.filter((c) => c !== "standing").map((c) => (
-            <button key={c} className={`legend-item${hidden.has(c) ? " off" : ""}`} onClick={() => toggleCat(c)}>
+
+        {showJob && job && <JobBar job={job} scopeName={scopeName} onChanged={() => jobs.reload()} onDismiss={() => setDismissedJob(job.id)} />}
+        {!showJob && !offerEmpty && !running && unlinked > 0 && (
+          <div className="graph-float graph-jobbar">
+            <span className="graph-jobbar-text">
+              엔티티가 없는 메모리 <b className="mono-num">{unlinked}</b>개
+            </span>
+            <button className="btn small" onClick={startBackfill}>
+              <Icon name="share-2" size={14} />
+              그래프 붙이기
+            </button>
+          </div>
+        )}
+        </div>
+
+        <div className="graph-float graph-legend" role="group" aria-label="분류 범례 (누르면 숨김/표시)">
+          {LEGEND_CATS.map((c) => (
+            <button key={c} className="chip legend-chip" aria-pressed={!hidden.has(c)} onClick={() => toggleCat(c)} title={hidden.has(c) ? `${CATEGORY_LABEL[c]} 표시` : `${CATEGORY_LABEL[c]} 숨기기`}>
               <span className="swatch" style={{ background: `var(--c-${c})` }} />
               {CATEGORY_LABEL[c]}
             </button>
           ))}
+          <span className="graph-legend-links" aria-label="관계 종류">
+            {LINK_TYPES.map((t) => (
+              <span key={t} className={`link-type lt-${t}`} title={LINK_LABEL[t].name}>
+                {LINK_LABEL[t].out}
+              </span>
+            ))}
+          </span>
         </div>
-        {failed && !running && (
-          <div className="notice small">
-            그래프 붙이기가 실패했습니다 ({failed.result?.done?.length ?? 0}/{failed.payload.entries.length}): {failed.error}{" "}
-            <button className="btn small" onClick={() => act(() => api.retryGraphJob(failed.id)).then(() => jobs.reload())}>
-              이어서 다시 실행
-            </button>
+
+        <p className="graph-float graph-hint">누르면 정보 · 두 번 누르면 열기 · 휠로 확대</p>
+
+        {graph.loading && !graph.data && (
+          <div className="graph-center" aria-busy="true">
+            <span className="graph-loading">
+              <Icon name="loader" className="spin" />
+              그래프를 불러오는 중…
+            </span>
           </div>
         )}
-        <BackfillBar unlinked={graph.data?.unlinked ?? 0} projectId={projectId} running={running} onStart={() => jobs.reload()} />
-      </header>
-      <ErrorBox error={graph.error} />
-      <div className="graph-wrap">
-        <div ref={box} className="graph-canvas" />
-        {graph.data && memCount === 0 && <div className="graph-empty muted">표시할 메모리가 없습니다.</div>}
-        {selected && <NodePanel node={selected} onFocus={() => setFocus(selected.id)} onClose={() => setSelected(null)} />}
+        {graph.error && (
+          <div className="graph-center">
+            <ErrorBox error={graph.error} />
+          </div>
+        )}
+        {offerEmpty && (
+          <div className="graph-center">
+            <Empty
+              icon="share-2"
+              title="아직 이어진 그래프가 없습니다"
+              action={
+                <button className="btn primary" onClick={startBackfill}>
+                  <Icon name="share-2" />
+                  그래프 붙이기
+                </button>
+              }
+            >
+              엔티티가 없는 메모리가 {unlinked}개 있습니다. LLM이 {scopeName} 메모리를 읽고 엔티티와 관계를 붙입니다.
+            </Empty>
+          </div>
+        )}
+        {graph.data && !offerEmpty && memCount === 0 && !running && (
+          <div className="graph-center">
+            <Empty icon="sticky-note" title="표시할 메모리가 없습니다">
+              {projectId ? "이 프로젝트에 메모리가 쌓이면 그래프가 그려집니다." : "메모리가 쌓이면 그래프가 그려집니다."}
+            </Empty>
+          </div>
+        )}
+
+        {selected && <NodePanel key={selected.id} node={selected} onFocus={() => setFocus(selected.id)} focused={focus === selected.id} onClose={() => setSelected(null)} />}
       </div>
-      <p className="muted small">노드를 누르면 정보, 두 번 누르면 상세 화면으로 갑니다. 휠로 확대하고 끌어서 옮깁니다.</p>
     </article>
+  );
+}
+
+/** Backfill job status: label + progress, with cancel (queued/running) or resume (failed/cancelled). */
+function JobBar({ job, scopeName, onChanged, onDismiss }: { job: GraphJob; scopeName: string; onChanged: () => void; onDismiss: () => void }) {
+  const [busy, setBusy] = useState(false);
+  const done = job.result?.done?.length ?? 0;
+  const total = job.payload.entries.length;
+  const pct = total ? Math.round((done / total) * 100) : 0;
+  const running = isRunning(job);
+  const run = async (fn: () => Promise<unknown>, success: string) => {
+    setBusy(true);
+    const r = await act(fn, { success });
+    setBusy(false);
+    if (r !== undefined) onChanged();
+  };
+  return (
+    <div className={`graph-float graph-jobbar is-${job.status}`} role="status">
+      <span className={`status st-${job.status}`}>{JOB_STATUS_LABEL[job.status] ?? job.status}</span>
+      <span className="graph-jobbar-text">
+        {running ? `${scopeName} 그래프 붙이기` : job.status === "error" ? "그래프 붙이기 실패" : "그래프 붙이기를 멈췄습니다"}
+        <span className="faint mono-num">
+          {" "}
+          {done}/{total}
+        </span>
+        {job.status === "error" && job.error && (
+          <span className="graph-jobbar-error" title={job.error}>
+            {job.error}
+          </span>
+        )}
+      </span>
+      {running && (
+        <span className="job-meter" role="progressbar" aria-label="진행률" aria-valuemin={0} aria-valuemax={100} aria-valuenow={pct}>
+          <span style={{ width: `${pct}%` }} />
+        </span>
+      )}
+      {running ? (
+        <button className="btn small ghost" disabled={busy} aria-busy={busy} onClick={() => run(() => api.cancelGraphJob(job.id), "그래프 붙이기를 취소했습니다")}>
+          <Icon name="x" size={14} />
+          취소
+        </button>
+      ) : (
+        <>
+          <button className="btn small" disabled={busy} aria-busy={busy} onClick={() => run(() => api.retryGraphJob(job.id), "이어서 다시 실행합니다")}>
+            <Icon name="rotate-ccw" size={14} />
+            이어서 다시 실행
+          </button>
+          <button className="icon-btn" onClick={onDismiss} aria-label="알림 닫기" title="닫기">
+            <Icon name="x" size={14} />
+          </button>
+        </>
+      )}
+    </div>
   );
 }
 
@@ -192,13 +390,19 @@ function buildElements(data: GraphData | undefined, f: { showEntities: boolean; 
 }
 
 function graphStyle(): cytoscape.StylesheetJson {
-  const text = cssVar("--text", "#1f2328");
-  const muted = cssVar("--muted", "#6b7079");
-  const border = cssVar("--border-strong", "#d2d2cc");
-  const surface = cssVar("--surface", "#fff");
-  const accent = cssVar("--accent", "#4f46e5");
+  const text = cssVar("--color-text", "#18181b");
+  const muted = cssVar("--color-text-2", "#5f6170");
+  const border = cssVar("--color-border-strong", "#d4d4da");
+  const surface = cssVar("--color-surface", "#ffffff");
+  const accent = cssVar("--color-accent", "#5b5bd6");
   const cats = CATEGORY_ORDER.map((c) => ({ selector: `node[kind = "memory"][category = "${c}"]`, style: { "background-color": cssVar(`--c-${c}`, muted) } }));
-  const linkColor: Record<string, string> = { because: cssVar("--c-failure", "#c2410c"), depends_on: cssVar("--c-preference", "#0369a1"), supersedes: muted, related: cssVar("--c-decision", "#7e22ce") };
+  // Same hues as the .lt-* relation badges.
+  const linkColor: Record<string, string> = {
+    because: cssVar("--color-info-text", "#0d74ce"),
+    depends_on: cssVar("--color-warn-text", "#ab6400"),
+    supersedes: cssVar("--color-danger-text", "#ce2c31"),
+    related: muted,
+  };
   return [
     {
       selector: "node",
@@ -253,72 +457,94 @@ function graphStyle(): cytoscape.StylesheetJson {
   ] as cytoscape.StylesheetJson;
 }
 
-function NodePanel({ node, onFocus, onClose }: { node: GraphNode; onFocus: () => void; onClose: () => void }) {
+function NodePanel({ node, onFocus, focused, onClose }: { node: GraphNode; onFocus: () => void; focused: boolean; onClose: () => void }) {
   const entry = useData(() => (node.type === "memory" ? api.entry(node.entryId) : Promise.resolve(null)), [node.id]);
   const entity = useData(() => (node.type === "entity" ? api.entity(node.entityId) : Promise.resolve(null)), [node.id]);
+  const href = node.type === "memory" ? `#/e/${node.entryId}` : `#/entity/${node.entityId}`;
+  const error = entry.error ?? entity.error;
+  const e = entry.data?.entry;
   return (
-    <aside className="graph-panel">
-      <button className="btn small ghost right" onClick={onClose} aria-label="닫기">
-        ✕
-      </button>
-      {node.type === "memory" && entry.data && (
-        <>
-          <div className="small">
-            <CategoryBadge category={entry.data.entry.category} /> {entry.data.entry.scope === "project" ? entry.data.project?.name : SCOPE_LABEL[entry.data.entry.scope]}
-          </div>
-          <h3>
-            <a href={`#/e/${node.entryId}`}>{entry.data.entry.title}</a>
-          </h3>
-          {entry.data.entry.body && (
-            <div className="small">
-              <Markdown>{entry.data.entry.body.length > 600 ? `${entry.data.entry.body.slice(0, 600)}…` : entry.data.entry.body}</Markdown>
-            </div>
+    <aside className="graph-drawer" aria-label={node.type === "memory" ? "메모리 정보" : "엔티티 정보"}>
+      <div className="graph-drawer-head">
+        <span className="graph-drawer-kind">
+          {node.type === "memory" ? (
+            <>
+              <Icon name="sticky-note" size={14} />
+              메모리 <span className="mono-num">#{node.entryId}</span>
+            </>
+          ) : (
+            <>
+              <KindIcon kind={node.kind} />
+              엔티티 · {KIND_LABEL[node.kind] ?? node.kind}
+            </>
           )}
-          <EntityChips entities={entry.data.entities} />
-          <LinkList links={entry.data.links} />
-        </>
-      )}
-      {node.type === "entity" && entity.data && (
-        <>
-          <div className="small muted">엔티티 · {KIND_LABEL[entity.data.entity.kind] ?? entity.data.entity.kind}</div>
-          <h3>
-            <a href={`#/entity/${node.entityId}`}>{entity.data.entity.name}</a>
-          </h3>
-          {entity.data.entity.description && <p className="small">{entity.data.entity.description}</p>}
-          <div className="small muted">메모리 {entity.data.memories.length}개</div>
-          <ul className="plain-list small">
-            {entity.data.memories.slice(0, 12).map((m) => (
-              <li key={m.id}>
-                <a href={`#/e/${m.id}`}>{m.title}</a> <span className="muted">{m.project_name ?? SCOPE_LABEL[m.scope]}</span>
-              </li>
-            ))}
-          </ul>
-        </>
-      )}
-      <div className="row">
-        <button className="btn small" onClick={onFocus}>
+        </span>
+        <button className="icon-btn" onClick={onClose} aria-label="정보 닫기" title="닫기 (Esc)">
+          <Icon name="x" />
+        </button>
+      </div>
+      <div className="graph-drawer-body">
+        <ErrorBox error={error} />
+        {node.type === "memory" && !entry.data && !error && <SkeletonText lines={5} />}
+        {node.type === "entity" && !entity.data && !error && <SkeletonText lines={5} />}
+        {node.type === "memory" && entry.data && e && (
+          <div>
+            <div className="graph-drawer-meta">
+              <CategoryBadge category={e.category} />
+              <span className="faint small">{e.scope === "project" ? entry.data.project?.name ?? "프로젝트" : SCOPE_LABEL[e.scope]}</span>
+              <StateBadge e={e} />
+            </div>
+            <h3>
+              <a href={href}>{e.title}</a>
+            </h3>
+            {e.body && (
+              <div className="graph-drawer-md">
+                <Markdown>{e.body.length > 600 ? `${e.body.slice(0, 600)}…` : e.body}</Markdown>
+              </div>
+            )}
+            {entry.data.entities.length > 0 && <div className="graph-drawer-label">엔티티</div>}
+            <EntityChips entities={entry.data.entities} />
+            {entry.data.links.length > 0 && <div className="graph-drawer-label">관계</div>}
+            <LinkList links={entry.data.links} />
+          </div>
+        )}
+        {node.type === "entity" && entity.data && (
+          <>
+            <h3>
+              <a href={href}>{entity.data.entity.name}</a>
+            </h3>
+            {entity.data.entity.description && <p className="small muted">{entity.data.entity.description}</p>}
+            <div className="graph-drawer-label">
+              메모리 <span className="count">{entity.data.memories.length}</span>
+            </div>
+            <div className="list graph-drawer-list">
+              {entity.data.memories.slice(0, 12).map((m) => (
+                <a key={m.id} className={`list-row${isHistory(m) ? " is-history" : ""}`} href={`#/e/${m.id}`}>
+                  <span className="graph-drawer-row-title">{m.title}</span>
+                  <span className="faint small">
+                    {m.project_name ?? SCOPE_LABEL[m.scope]} {isHistory(m) && <StateBadge e={m} linked={false} />}
+                  </span>
+                </a>
+              ))}
+            </div>
+            {entity.data.memories.length > 12 && (
+              <a className="small" href={href}>
+                {entity.data.memories.length - 12}개 더 보기
+              </a>
+            )}
+          </>
+        )}
+      </div>
+      <div className="graph-drawer-foot">
+        <button className="btn small" onClick={onFocus} disabled={focused} aria-pressed={focused}>
+          <Icon name="crosshair" size={14} />
           주변만 보기
         </button>
+        <a className="btn small primary" href={href}>
+          <Icon name="external-link" size={14} />
+          열기
+        </a>
       </div>
     </aside>
   );
 }
-
-function BackfillBar({ unlinked, projectId, running, onStart }: { unlinked: number; projectId?: number; running?: { result: { done?: number[] } | null; payload: { entries: number[] } }; onStart: () => void }) {
-  if (running)
-    return (
-      <div className="notice small">
-        LLM이 기존 메모리에 그래프를 붙이는 중… {running.result?.done?.length ?? 0}/{running.payload.entries.length}
-      </div>
-    );
-  if (!unlinked) return null;
-  return (
-    <div className="notice small">
-      엔티티가 없는 메모리가 {unlinked}개 있습니다.{" "}
-      <button className="btn small" onClick={() => act(() => api.backfill(projectId)).then(onStart)}>
-        {projectId ? "이 프로젝트" : "전체"} 그래프 붙이기
-      </button>
-    </div>
-  );
-}
-

@@ -1,0 +1,255 @@
+/* Memory review page (ReviewPage.tsx). Tokens only; shared classes live in styles.css. */
+
+/* ---- proposal card: 3 px left border in the kind color */
+.proposal.kind-merge,
+.proposal.kind-update {
+  border-left: 3px solid var(--color-accent);
+}
+.proposal.kind-delete {
+  border-left: 3px solid var(--color-danger);
+}
+.proposal.kind-conflict {
+  border-left: 3px solid var(--color-warn-text);
+}
+.proposal {
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-lg);
+  background: var(--color-surface);
+  padding: var(--space-3) 14px;
+  margin: var(--space-3) 0;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  scroll-margin: var(--space-6);
+  transition: box-shadow var(--dur-fast), border-color var(--dur-fast);
+}
+.proposal.is-selected {
+  box-shadow: 0 0 0 2px var(--color-ring);
+}
+.proposal:focus {
+  outline: none;
+}
+.proposal-head {
+  display: flex;
+  align-items: flex-start;
+  gap: var(--space-2);
+}
+.proposal-reason {
+  flex: 1;
+  min-width: 0;
+  font-size: var(--text-base);
+  line-height: var(--leading-normal);
+}
+.proposal-id {
+  color: var(--color-text-3);
+  font-size: var(--text-xs);
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+  padding-top: 2px;
+}
+
+.badge.kind-merge,
+.badge.kind-update {
+  background: var(--color-accent-soft);
+  color: var(--color-accent-text);
+}
+.badge.kind-delete {
+  background: var(--color-danger-soft);
+  color: var(--color-danger-text);
+}
+.badge.kind-conflict {
+  background: var(--color-warn-soft);
+  color: var(--color-warn-text);
+}
+.badge.role-kept {
+  background: var(--color-ok-soft);
+  color: var(--color-ok-text);
+}
+.badge.role-gone {
+  background: var(--color-danger-soft);
+  color: var(--color-danger-text);
+}
+
+/* ---- entries inside a proposal */
+.proposal-entries {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-2);
+}
+.proposal-entries.side-by-side {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(240px, 1fr));
+}
+.pentry {
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-md);
+  padding: var(--space-2) var(--space-3);
+  background: var(--color-surface);
+  min-width: 0;
+}
+.pentry-meta {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--space-1_5);
+  font-size: var(--text-xs);
+  color: var(--color-text-3);
+  font-variant-numeric: tabular-nums;
+}
+.pentry-title {
+  font-weight: 600;
+  margin-top: var(--space-1);
+}
+.pentry-body {
+  margin-top: var(--space-1);
+  font-size: var(--text-sm);
+  color: var(--color-text-2);
+  white-space: pre-wrap;
+  max-height: 12em;
+  overflow: auto;
+}
+.pentry.is-gone .pentry-title,
+.pentry.is-gone .pentry-body {
+  text-decoration: line-through;
+  text-decoration-color: color-mix(in srgb, var(--color-danger) 50%, transparent);
+  color: var(--color-text-3);
+}
+.pentry.is-missing {
+  color: var(--color-text-3);
+  font-size: var(--text-sm);
+  border-style: dashed;
+}
+.pentry-pin {
+  color: var(--color-accent-text);
+  display: inline-flex;
+}
+
+/* ---- proposed change */
+.proposal-change {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-1_5);
+}
+.change-label {
+  font-size: var(--text-xs);
+  font-weight: 600;
+  color: var(--color-text-2);
+  display: flex;
+  align-items: center;
+  gap: var(--space-1_5);
+}
+.change-note {
+  font-size: var(--text-xs);
+  color: var(--color-text-3);
+  font-weight: 400;
+}
+.proposal-change .diff {
+  background: var(--color-surface);
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-md);
+  padding: 10px var(--space-3);
+  margin: 0;
+  font-family: var(--font-mono);
+}
+
+/* ---- actions */
+.proposal-actions {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--space-2);
+}
+.proposal-blocked {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--space-1);
+  font-size: var(--text-xs);
+  color: var(--color-danger-text);
+}
+.key-hint {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--space-1);
+  font-size: var(--text-xs);
+  color: var(--color-text-3);
+}
+.key-hint kbd + kbd {
+  margin-left: -2px;
+}
+
+/* ---- determinate progress for a running review */
+.review-progress {
+  display: flex;
+  align-items: center;
+  gap: var(--space-3);
+  margin-top: var(--space-3);
+  font-size: var(--text-xs);
+  color: var(--color-text-2);
+  font-variant-numeric: tabular-nums;
+}
+.review-progress-track {
+  flex: 1;
+  height: 4px;
+  border-radius: var(--radius-full);
+  background: var(--color-surface-3);
+  overflow: hidden;
+}
+.review-progress-fill {
+  height: 100%;
+  background: var(--color-accent);
+  border-radius: var(--radius-full);
+  transition: width var(--dur-base) var(--ease-out);
+}
+
+/* ---- job and stale lists */
+.job-row,
+.stale-row {
+  flex-direction: row;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: var(--space-2);
+}
+.job-meta {
+  font-size: var(--text-xs);
+  color: var(--color-text-3);
+  font-variant-numeric: tabular-nums;
+}
+.job-row .job-error {
+  flex-basis: 100%;
+  font-size: var(--text-xs);
+  color: var(--color-danger-text);
+  overflow-wrap: anywhere;
+}
+.stale-main {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+.stale-title {
+  display: flex;
+  align-items: center;
+  gap: var(--space-1_5);
+  min-width: 0;
+}
+.stale-title a {
+  font-weight: 600;
+  color: var(--color-text);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.section-desc {
+  margin: calc(-1 * var(--space-1)) 0 var(--space-3);
+  color: var(--color-text-2);
+  font-size: var(--text-sm);
+  max-width: 72ch;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .review-progress-fill,
+  .proposal {
+    transition: none;
+  }
+}

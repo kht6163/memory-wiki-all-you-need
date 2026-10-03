@@ -1,5 +1,7 @@
 export type Scope = "global" | "user" | "project";
 export type Source = "agent" | "llm" | "human";
+/** Wiki compose / graph backfill / review job status. "cancelled" jobs can be resumed with retry. */
+export type JobStatus = "pending" | "processing" | "done" | "skipped" | "error" | "cancelled";
 
 export interface Project {
   id: number;
@@ -22,11 +24,19 @@ export interface Entry {
   title: string;
   body: string;
   tags: string[];
+  /** Search-only words (synonyms, translations). Never injected. */
+  keywords: string[];
+  /** Last day (YYYY-MM-DD) a temporary fact holds. */
+  valid_until: string | null;
   pinned: boolean;
   source: Source;
   created_at: string;
   updated_at: string;
   deleted_at: string | null;
+  /** Live memory that replaced this one (it is history, not injected). Present on API lists/details. */
+  superseded_by?: number | null;
+  /** valid_until has passed (history, not injected). */
+  expired?: boolean;
   score?: number;
 }
 
@@ -44,6 +54,9 @@ export interface Revision {
   reason: string | null;
   /** Entity names at this revision (null before v0.4.0). */
   entities?: string[] | null;
+  /** Null before v0.6.0. */
+  keywords?: string[] | null;
+  valid_until?: string | null;
   created_at: string;
 }
 
@@ -79,7 +92,15 @@ export interface TurnMessage {
 export interface TurnDetail extends Omit<TurnSummary, "prompt" | "applied" | "note" | "project_name"> {
   cwd: string | null;
   payload: { messages: TurnMessage[] };
-  result: { ops: unknown[]; applied: TurnSummary["applied"]; note?: string; model?: string; ms?: number } | null;
+  result: {
+    ops: unknown[];
+    applied: TurnSummary["applied"];
+    /** Ops dropped on purpose, e.g. an add identical to an existing memory. */
+    skipped?: { op: string; title: string; reason: string; entryId?: number }[];
+    note?: string;
+    model?: string;
+    ms?: number;
+  } | null;
   project: Project | null;
 }
 
@@ -141,7 +162,7 @@ export interface WikiJob {
   project_name: string | null;
   /** write/sync: v0.2.0 history rows only. */
   kind: "compose" | "write" | "sync";
-  status: "pending" | "processing" | "done" | "skipped" | "error";
+  status: JobStatus;
   payload: { turns?: number[]; instruction?: string; entries?: number[] };
   first_at: string;
   run_after: string;
@@ -210,7 +231,7 @@ export interface GraphData {
 
 export interface GraphJob {
   id: number;
-  status: "pending" | "processing" | "done" | "skipped" | "error";
+  status: JobStatus;
   payload: { entries: number[]; projectId?: number | null };
   result: { done?: number[]; chunks?: number; entities?: number; links?: number; ms?: number } | null;
   error: string | null;
@@ -225,12 +246,35 @@ export interface Usage {
   shown_at: string | null;
 }
 
+/** Turns whose curation added, changed or reaffirmed a memory (newest first). */
+export interface Provenance {
+  count: number;
+  last_at: string | null;
+  recent: { turn_id: number; kind: "add" | "update" | "confirm" | "duplicate"; created_at: string; session_id: string | null }[];
+}
+
+/**
+ * One memory-graph edit. link: add | remove; entity: update | merge | delete (revertible),
+ * unmerge | restore (written by reverting a merge / delete). A revert's own row carries
+ * snapshot.revert_of. Snapshot shape depends on target/action (see server/src/graph.ts).
+ */
+export interface GraphRevision {
+  id: number;
+  target: "link" | "entity";
+  action: string;
+  snapshot: Record<string, any>;
+  author: Source;
+  created_at: string;
+  reverted_at: string | null;
+  revertible: boolean;
+}
+
 export interface ReviewJob {
   id: number;
   project_id: number | null;
   project_name: string | null;
-  status: "pending" | "processing" | "done" | "skipped" | "error";
-  payload: { entries: number[] };
+  status: JobStatus;
+  payload: { entries: number[]; scheduled?: boolean };
   result: { done?: number[]; chunks?: number; proposals?: number; ms?: number } | null;
   error: string | null;
   created_at: string;
@@ -242,7 +286,7 @@ export interface Proposal {
   job_id: number;
   kind: "merge" | "update" | "delete" | "conflict";
   entry_ids: number[];
-  data: { title?: string; body?: string; category?: string; note?: string; snap: Record<string, string> };
+  data: { title?: string; body?: string; category?: string; note?: string; snap: Record<string, string>; /** Exact-substring edit of the body (update proposals). */ edit?: { old: string; new: string } };
   reason: string;
   status: "pending" | "applied" | "dismissed" | "stale";
   created_at: string;
@@ -270,6 +314,29 @@ const qs = (params: Record<string, string | number | boolean | undefined | null>
   return s ? `?${s}` : "";
 };
 
+export interface Policy {
+  project_id: number | null;
+  text: string;
+  updated_at: string | null;
+}
+
+export interface SimilarPair {
+  a: { id: number; name: string; kind: string; count: number };
+  b: { id: number; name: string; kind: string; count: number };
+  score: number;
+  reasons: ("name" | "contains" | "cooccur")[];
+  /** Suggested direction: merge `from` into `into` (the more-mentioned one). */
+  merge: { from: number; into: number };
+}
+
+export interface WikiLint {
+  orphans: { id: number; slug: string; title: string }[];
+  missing: { slug: string; from: { id: number; slug: string; title: string }[] }[];
+  citations: { page: { id: number; slug: string; title: string }; entry_id: number; state: "deleted" | "purged" | "superseded" | "expired"; superseded_by?: number }[];
+  empty: { id: number; slug: string; title: string }[];
+  counts: { orphans: number; missing: number; citations: number; empty: number };
+}
+
 export const api = {
   meta: () => request<{ categories: string[]; llm: string | null }>("GET", "/meta"),
   stats: () => request<Stats>("GET", "/stats"),
@@ -280,7 +347,16 @@ export const api = {
   entries: (f: { scope?: Scope; project_id?: number; category?: string; deleted?: boolean }) =>
     request<Entry[]>("GET", `/entries${qs({ ...f, deleted: f.deleted ? 1 : undefined })}`),
   entry: (id: number) =>
-    request<{ entry: Entry; project: Project | null; revisions: Revision[]; citedBy: PageRef[]; entities: Entity[]; links: EntryLink[]; usage: Usage }>(
+    request<{
+      entry: Entry;
+      project: Project | null;
+      revisions: Revision[];
+      citedBy: PageRef[];
+      entities: Entity[];
+      links: EntryLink[];
+      usage: Usage;
+      provenance: Provenance;
+    }>(
       "GET",
       `/entries/${id}`,
     ),
@@ -295,6 +371,8 @@ export const api = {
   mergeEntity: (id: number, into: number) => request<Entity>("POST", `/entities/${id}/merge`, { into }),
   deleteEntity: (id: number) => request("DELETE", `/entities/${id}`),
   backfill: (project_id?: number, all = false) => request<GraphJob>("POST", "/graph/backfill", { project_id, all }),
+  graphRevisions: (f: { entity_id?: number; entry_id?: number; limit?: number } = {}) => request<GraphRevision[]>("GET", `/graph/revisions${qs(f)}`),
+  revertGraphRevision: (id: number) => request<{ revision: GraphRevision; revert: GraphRevision | null }>("POST", `/graph/revisions/${id}/revert`),
   graphJobs: () => request<GraphJob[]>("GET", "/graph/jobs"),
   startReview: (project_id?: number) => request<ReviewJob>("POST", "/review", { project_id }),
   reviewJobs: (project_id?: number) => request<ReviewJob[]>("GET", `/review/jobs${qs({ project_id: project_id ?? 0 })}`),
@@ -315,7 +393,16 @@ export const api = {
   turn: (id: number) => request<TurnDetail>("GET", `/turns/${id}`),
   retryTurn: (id: number) => request("POST", `/turns/${id}/retry`),
   deleteTurn: (id: number) => request("DELETE", `/turns/${id}`),
-  search: (q: string, project_id?: number) => request<Entry[]>("GET", `/search${qs({ q, project_id, all: project_id ? undefined : 1, limit: 40 })}`),
+  search: (q: string, project_id?: number, inactive = false) =>
+    request<Entry[]>("GET", `/search${qs({ q, project_id, all: project_id ? undefined : 1, limit: 40, inactive: inactive ? 1 : undefined })}`),
+  policy: (project_id?: number | null) => request<Policy>("GET", `/policy${qs({ project_id: project_id ?? undefined })}`),
+  setPolicy: (project_id: number | null, text: string) => request<Policy>("PUT", "/policy", { project_id, text }),
+  similarEntities: (limit = 50) => request<SimilarPair[]>("GET", `/entities/similar${qs({ limit })}`),
+  dismissSimilar: (a: number, b: number) => request<{ ok: true }>("POST", "/entities/similar/dismiss", { a, b }),
+  wikiLint: (project_id: number | null) => request<WikiLint>("GET", `/wiki/lint${qs({ project_id: project_id ?? 0 })}`),
+  cancelWikiJob: (id: number) => request<WikiJob>("POST", `/wiki/jobs/${id}/cancel`),
+  cancelGraphJob: (id: number) => request<GraphJob>("POST", `/graph/jobs/${id}/cancel`),
+  cancelReviewJob: (id: number) => request<ReviewJob>("POST", `/review/jobs/${id}/cancel`),
   sessionSearch: (q: string, project_id?: number) => request<SessionHit[]>("GET", `/session-search${qs({ q, project_id, limit: 20 })}`),
   wikiPages: (project_id: number | null, deleted = false) => request<WikiPage[]>("GET", `/wiki/pages${qs({ project_id: project_id ?? 0, deleted: deleted ? 1 : undefined })}`),
   wikiMissing: (project_id: number | null) => request<{ from: string; to: string }[]>("GET", `/wiki/missing${qs({ project_id: project_id ?? 0 })}`),

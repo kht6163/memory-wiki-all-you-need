@@ -1,7 +1,7 @@
 {
   "name": "@memory-wiki-all-you-need/web",
   "private": true,
-  "version": "0.5.0",
+  "version": "0.6.0",
   "type": "module",
   "scripts": {
     "dev": "vite",
@@ -9,8 +9,10 @@
     "typecheck": "tsc --noEmit"
   },
   "dependencies": {
+    "@fontsource-variable/jetbrains-mono": "^5.3.0",
     "cytoscape": "^3.34.3",
     "diff": "^8.0.2",
+    "pretendard": "^1.3.9",
     "react": "^19.1.1",
     "react-dom": "^19.1.1",
     "react-markdown": "^10.1.0",
