@@ -59,7 +59,13 @@ function load(sourceId: number, into: unknown) {
   return { source, target };
 }
 
-/** 409 while anything may still write to either project (curation, compose, review, backfill). */
+/**
+ * 409 while anything may still write to either project (curation, compose, review, backfill).
+ * The target's turns only while one is being curated: it picked its candidates before the
+ * merge and would miss the moved memories (a near duplicate). A pending target turn is
+ * curated after the merge with the moved memories in view, so it does not block (the
+ * target is usually the project in use). A global backfill writes by memory id only.
+ */
 function assertIdle(s: number, t: number) {
   const busy =
     one(`SELECT COUNT(*) FROM wiki_jobs WHERE status IN ('pending','processing') AND project_id IN (?, ?)`, s, t) +
@@ -70,7 +76,8 @@ function assertIdle(s: number, t: number) {
       s,
       t,
     ) +
-    one(`SELECT COUNT(*) FROM turns WHERE status IN ('pending','processing') AND project_id = ?`, s);
+    one(`SELECT COUNT(*) FROM turns WHERE status IN ('pending','processing') AND project_id = ?`, s) +
+    one(`SELECT COUNT(*) FROM turns WHERE status = 'processing' AND project_id = ?`, t);
   if (busy) throw new HttpError(409, "a job is running for one of these projects — try again when it finishes");
 }
 
@@ -210,6 +217,14 @@ export function mergeProject(sourceId: number, into: unknown) {
     db.prepare(
       `UPDATE graph_jobs SET payload = json_set(payload, '$.projectId', ?) WHERE json_valid(payload) AND json_extract(payload, '$.projectId') = ?`,
     ).run(t, s);
+    // Pairs dismissed as "different projects" now speak for the target (the pair with the target itself goes).
+    db.prepare(
+      `INSERT OR IGNORE INTO project_pair_dismissed (a, b, created_at)
+       SELECT min(?, o), max(?, o), created_at FROM
+         (SELECT CASE WHEN a = ? THEN b ELSE a END AS o, created_at FROM project_pair_dismissed WHERE a = ? OR b = ?)
+       WHERE o != ?`,
+    ).run(t, t, s, s, s, t);
+    db.prepare(`DELETE FROM project_pair_dismissed WHERE a = ? OR b = ?`).run(s, s);
 
     // 3. Curation policy: the target's wins; the source's is kept under it.
     const tp = getPolicy(t).text.trim();

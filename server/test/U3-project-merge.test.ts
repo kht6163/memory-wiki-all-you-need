@@ -3,9 +3,9 @@
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import { test } from "node:test";
-import type { MergePreview, Project } from "../../web/src/api.ts";
+import type { MergePreview, Project, SimilarProjectPair } from "../../web/src/api.ts";
 import { ApiError, describeError } from "../../web/src/errors.ts";
-import { mergeCandidates, mergeCountLines, mergeSummary } from "../../web/src/project-merge.ts";
+import { mergeCandidates, mergeCountLines, mergeSummary, PROJECT_REASON_LABEL, rankMergeCandidates, similarPartners } from "../../web/src/project-merge.ts";
 
 const webSrc = new URL("../../web/src/", import.meta.url);
 const read = (rel: string) => readFileSync(new URL(rel, webSrc), "utf8");
@@ -74,6 +74,8 @@ test("G-060: merge errors from the server are shown in Korean", () => {
     [400, "cannot merge a project into itself", /프로젝트를 자기 자신에 합칠 수 없습니다/],
     [400, "into is required", /합칠 대상 프로젝트/],
     [404, "project not found", /^프로젝트를 찾을 수 없습니다$/],
+    [400, "a and b must be different projects", /서로 다른 두 프로젝트/],
+    [400, "a and b must be project ids", /프로젝트 id가 올바르지 않습니다/],
   ];
   for (const [status, msg, want] of cases) {
     const d = describeError(new ApiError(status, msg));
@@ -97,4 +99,34 @@ test("G-060: the merge dialog is irreversible-guarded (type the source name) and
   const api = read("api.ts");
   assert.match(api, /`\/projects\/\$\{id\}\/merge-preview\$\{qs\(\{ into \}\)\}`/);
   assert.match(api, /request<MergeResult>\("POST", `\/projects\/\$\{id\}\/merge`, \{ into \}\)/);
+});
+
+test("ADR-0030: suggested merge partners float to the top of the picker in suggestion order, the rest keep theirs", () => {
+  const ps = [
+    project(1, "old", "local/old", "2026-09-01"),
+    project(2, "new", "github.com/me/new", "2026-10-01"),
+    project(3, "Other", "github.com/me/other", null),
+    project(4, "web", "github.com/me/web", "2026-09-15"),
+    project(5, "old", "github.com/me/old", "2026-08-01"),
+  ];
+  const side = (p: Project) => ({ id: p.id, key: p.key, name: p.name, last_seen_at: p.last_seen_at, entry_count: 0 });
+  const pair = (a: Project, b: Project, score: number, reasons: SimilarProjectPair["reasons"]): SimilarProjectPair => ({
+    a: side(a), b: side(b), score, reasons, shared_entities: 0, merge: { from: a.id, into: b.id },
+  });
+  const pairs = [pair(ps[0], ps[2], 0.4, ["entities"]), pair(ps[0], ps[4], 0.9, ["local"]), pair(ps[1], ps[3], 0.6, ["folder"])];
+  const partners = similarPartners(pairs, 1);
+  assert.deepEqual([...partners.entries()], [[5, ["local"]], [3, ["entities"]]]);
+  assert.deepEqual(rankMergeCandidates(mergeCandidates(ps, 1, ""), partners).map((p) => p.id), [5, 3, 2, 4]);
+  assert.deepEqual(rankMergeCandidates(mergeCandidates(ps, 1, "web"), partners).map((p) => p.id), [4]);
+  assert.deepEqual(rankMergeCandidates(mergeCandidates(ps, 1, ""), new Map()).map((p) => p.id), [2, 4, 5, 3]);
+  assert.equal(PROJECT_REASON_LABEL.local, "origin 추가");
+});
+
+test("ADR-0030: the suggestion list opens the same typed-name merge dialog and calls the contract routes", () => {
+  const other = read("pages/OtherPages.tsx");
+  assert.match(other, /<ProjectMergeDialog source=\{merging\.source\} initialTarget=\{merging\.target\}/);
+  assert.match(other, /api\.dismissSimilarProjects\(p\.a\.id, p\.b\.id\)/);
+  const api = read("api.ts");
+  assert.match(api, /`\/projects\/similar\$\{qs\(\{ limit \}\)\}`/);
+  assert.match(api, /"POST", "\/projects\/similar\/dismiss", \{ a, b \}/);
 });

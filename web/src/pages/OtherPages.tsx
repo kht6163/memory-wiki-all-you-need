@@ -1,6 +1,6 @@
 import "./other.css";
 import { Fragment, useMemo, useState, type ReactNode } from "react";
-import { api, type ActivityItem, type Entry, type Source, type TurnDetail, type TurnMessage, type TurnSummary } from "../api.ts";
+import { api, type ActivityItem, type Entry, type Project, type SimilarProjectPair, type Source, type TurnDetail, type TurnMessage, type TurnSummary } from "../api.ts";
 import {
   ACTION_LABEL,
   CategoryBadge,
@@ -16,6 +16,7 @@ import {
   go,
   isHistory,
   toast,
+  toastError,
   useData,
   usePoll,
   useRoute,
@@ -23,6 +24,8 @@ import {
 import { Icon, type IconName } from "../components/Icon.tsx";
 import { PageHeader } from "../components/PageHeader.tsx";
 import { SkeletonList, SkeletonPage } from "../components/Skeleton.tsx";
+import { PROJECT_REASON_HINT, PROJECT_REASON_LABEL } from "../project-merge.ts";
+import { ProjectMergeDialog } from "./ScopePage.tsx";
 
 /** Known server skip reasons in Korean; anything else is shown as sent. */
 function turnReason(msg: string): string {
@@ -283,6 +286,7 @@ export function ProjectsPage() {
     <article className="page">
       <PageHeader title="프로젝트" lead="pi 확장이 git 저장소(원격 주소 기준)로 자동 구분합니다. 최근에 쓴 순서입니다." busy={loading && Boolean(data)} />
       <ErrorBox error={error} />
+      {data && data.length > 1 && <SimilarProjectsSection projects={data} />}
       {loading && !data && <SkeletonList rows={3} />}
       {data?.length === 0 && (
         <Empty icon="folder" title="아직 프로젝트가 없습니다">
@@ -310,6 +314,127 @@ export function ProjectsPage() {
         ))}
       </div>
     </article>
+  );
+}
+
+const projectPairKey = (p: SimilarProjectPair) => `${p.a.id}-${p.b.id}`;
+const SIMILAR_PROJECTS_TOP = 5;
+
+/**
+ * Projects that look like one project split by an origin change (api.similarProjects, ADR-0030).
+ * Suggest-only: "합치기…" opens the usual preview + typed-name dialog with both sides chosen.
+ */
+function SimilarProjectsSection({ projects }: { projects: Project[] }) {
+  const similar = useData(() => api.similarProjects(), []);
+  const [gone, setGone] = useState<Set<string>>(new Set());
+  const [flipped, setFlipped] = useState<Set<string>>(new Set());
+  const [busy, setBusy] = useState<string | null>(null);
+  const [all, setAll] = useState(false);
+  const [merging, setMerging] = useState<{ source: Project; target: Project } | null>(null);
+
+  const byId = new Map(projects.map((p) => [p.id, p]));
+  const pairs = (similar.data ?? []).filter((p) => !gone.has(projectPairKey(p)) && byId.has(p.a.id) && byId.has(p.b.id));
+  if (similar.error) return <ErrorBox error={similar.error} />;
+  if (!similar.data || !pairs.length) return null;
+  const visible = all ? pairs : pairs.slice(0, SIMILAR_PROJECTS_TOP);
+
+  return (
+    <section className="similar">
+      <div className="section-head">
+        <h2>합칠 만한 프로젝트</h2>
+        <span className="count">{pairs.length}</span>
+        <span className="faint small">git origin이 바뀌어 둘로 나뉜 것 같은 쌍입니다. 합치거나 다른 프로젝트로 표시하세요.</span>
+      </div>
+      <div className="list">
+        {visible.map((p) => {
+          const key = projectPairKey(p);
+          const dir = flipped.has(key) ? { from: p.merge.into, into: p.merge.from } : p.merge;
+          const from = byId.get(dir.from)!;
+          const into = byId.get(dir.into)!;
+          const pct = Math.round(p.score * 100);
+          const dismiss = async () => {
+            setBusy(key);
+            try {
+              await api.dismissSimilarProjects(p.a.id, p.b.id);
+              setGone((g) => new Set(g).add(key));
+              toast({ kind: "ok", title: "다른 프로젝트로 표시했습니다", description: `${p.a.name} · ${p.b.name}은(는) 다시 제안되지 않습니다.` });
+            } catch (e) {
+              toastError(e);
+            } finally {
+              setBusy(null);
+            }
+          };
+          return (
+            <div key={key} className="list-row similar-row" aria-busy={busy === key}>
+              <div className="similar-pair">
+                <SimilarProjectSide p={p.a} />
+                <span className="similar-sep" aria-label="와(과)">
+                  ↔
+                </span>
+                <SimilarProjectSide p={p.b} />
+              </div>
+              <div className="similar-meta">
+                <span className="score" title={`유사도 ${pct}%`}>
+                  <span className="score-meter" role="meter" aria-label="유사도" aria-valuemin={0} aria-valuemax={100} aria-valuenow={pct}>
+                    <span style={{ width: `${pct}%` }} />
+                  </span>
+                  <span className="score-num">{pct}%</span>
+                </span>
+                {p.reasons.map((r) => (
+                  <span key={r} className={`reason-chip reason-${r}`} title={r === "entities" ? `${PROJECT_REASON_HINT[r]} (${p.shared_entities}개)` : PROJECT_REASON_HINT[r]}>
+                    {PROJECT_REASON_LABEL[r]}
+                  </span>
+                ))}
+                <span className="similar-dir">
+                  <span className="faint">합치면</span> <b>{from.name}</b> <Icon name="arrow-right" size={12} /> <b>{into.name}</b>
+                </span>
+                <span className="similar-actions">
+                  <button
+                    className="icon-btn"
+                    aria-label={`방향 바꾸기: ${into.name}을(를) ${from.name}에 합치기`}
+                    title="합치는 방향 바꾸기"
+                    disabled={busy === key}
+                    onClick={() =>
+                      setFlipped((f) => {
+                        const next = new Set(f);
+                        next.has(key) ? next.delete(key) : next.add(key);
+                        return next;
+                      })
+                    }
+                  >
+                    <Icon name="arrow-left-right" size={15} />
+                  </button>
+                  <button className="btn small ghost" disabled={busy === key} onClick={dismiss}>
+                    다른 프로젝트
+                  </button>
+                  <button className="btn small" disabled={busy === key} onClick={() => setMerging({ source: from, target: into })}>
+                    <Icon name="git-merge" size={14} />
+                    합치기…
+                  </button>
+                </span>
+              </div>
+            </div>
+          );
+        })}
+      </div>
+      {pairs.length > SIMILAR_PROJECTS_TOP && (
+        <button className="btn small ghost similar-more" aria-expanded={all} onClick={() => setAll(!all)}>
+          <Icon name={all ? "chevron-down" : "chevron-right"} size={14} />
+          {all ? "접기" : `더 보기 (${pairs.length - SIMILAR_PROJECTS_TOP})`}
+        </button>
+      )}
+      {merging && <ProjectMergeDialog source={merging.source} initialTarget={merging.target} onClose={() => setMerging(null)} />}
+    </section>
+  );
+}
+
+function SimilarProjectSide({ p }: { p: SimilarProjectPair["a"] }) {
+  return (
+    <a className="similar-side" href={`#/p/${p.id}`} title={`${p.key} · 메모리 ${p.entry_count}개`}>
+      <Icon name="folder" size={14} />
+      <b>{p.name}</b>
+      <span className="faint small mono">{middleTruncate(p.key, 36)}</span>
+    </a>
   );
 }
 

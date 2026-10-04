@@ -35,6 +35,7 @@ import {
   withStates,
 } from "./store.ts";
 import { mergePreview, mergeProject } from "./project-merge.ts";
+import { dismissSimilarProjects, similarProjects } from "./project-similar.ts";
 import { deleteTurn, enqueueTurn, getTurn, listTurns, retryTurn } from "./turns.ts";
 import { config, llmEnabled } from "./config.ts";
 import {
@@ -248,6 +249,13 @@ api.get("/meta", (c) => c.json({ categories: CATEGORIES, llm: llmEnabled() ? con
 api.get("/stats", (c) => c.json({ ...stats(), ...wikiStats(), ...graphStats(), ...reviewStats() }));
 
 api.get("/projects", (c) => c.json(listProjects()));
+// Registered before /projects/:id so "similar" is never read as an id.
+api.get("/projects/similar", (c) => c.json(similarProjects(Math.min(num(c.req.query("limit")) ?? 50, 500))));
+api.post("/projects/similar/dismiss", async (c) => {
+  const b = await body<{ a: number; b: number }>(c);
+  dismissSimilarProjects(Number(b.a), Number(b.b));
+  return c.json({ ok: true });
+});
 api.get("/projects/:id", (c) => {
   const p = getProject(idParam(c));
   if (!p) throw new HttpError(404, "project not found");

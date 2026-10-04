@@ -296,6 +296,7 @@ test("G-060: a merge that fails midway rolls everything back", async () => {
   await page(t.id, "overview", "target");
   // The last step (source key → alias) hits the primary key.
   db.prepare(`INSERT INTO project_aliases (key, project_id) VALUES (?, ?)`).run(s.key, other.id);
+  await ok("POST", "/projects/similar/dismiss", { a: s.id, b: other.id });
   const revs = total("wiki_revisions");
   const links = db.prepare(`SELECT to_slug FROM wiki_links WHERE page_id = ?`).all(sp.id).map((x: Any) => x.to_slug);
 
@@ -307,5 +308,39 @@ test("G-060: a merge that fails midway rolls everything back", async () => {
   assert.deepEqual({ project_id: Number(pg.project_id), slug: pg.slug, body: pg.body }, { project_id: s.id, slug: "overview", body: "self [[overview]]" });
   assert.equal(total("wiki_revisions"), revs);
   assert.deepEqual(db.prepare(`SELECT to_slug FROM wiki_links WHERE page_id = ?`).all(sp.id).map((x: Any) => x.to_slug), links);
+  const pairs = db.prepare(`SELECT a, b FROM project_pair_dismissed WHERE a IN (?, ?) OR b IN (?, ?)`).all(s.id, t.id, s.id, t.id).map((x: Any) => [x.a, x.b]);
+  assert.deepEqual(pairs, [[Math.min(s.id, other.id), Math.max(s.id, other.id)]], "dismissed pairs unchanged");
   db.prepare(`DELETE FROM project_aliases WHERE key = ?`).run(s.key);
+});
+
+test("G-060: a target turn being curated blocks the merge, a pending one does not", async () => {
+  const s = await proj();
+  const t = await proj();
+  const tt = await turn([{ role: "user", text: "target turn" }], t);
+  // Pending: curated after the merge with the moved memories in view.
+  assert.equal((await call("GET", `/projects/${s.id}/merge-preview?into=${t.id}`)).status, 200);
+  db.prepare(`UPDATE turns SET status = 'processing' WHERE id = ?`).run(tt.id);
+  for (const r of [await call("GET", `/projects/${s.id}/merge-preview?into=${t.id}`), await call("POST", `/projects/${s.id}/merge`, { into: t.id })]) {
+    assert.equal(r.status, 409);
+    assert.equal(r.data.error, "a job is running for one of these projects — try again when it finishes");
+  }
+  db.prepare(`UPDATE turns SET status = 'pending' WHERE id = ?`).run(tt.id);
+  await ok("POST", `/projects/${s.id}/merge`, { into: t.id });
+  assert.equal((db.prepare(`SELECT status, project_id FROM turns WHERE id = ?`).get(tt.id) as Any).project_id, t.id);
+  doneTurns();
+});
+
+test("G-060: dismissed similar-project pairs move to the target, the pair with the target itself goes", async () => {
+  const s = await proj();
+  const t = await proj();
+  const x = await proj();
+  const y = await proj();
+  for (const [a, b] of [[s, t], [s, x], [y, s], [t, y]]) await ok("POST", "/projects/similar/dismiss", { a: a.id, b: b.id });
+  await ok("POST", `/projects/${s.id}/merge`, { into: t.id });
+  const pairs = db
+    .prepare(`SELECT a, b FROM project_pair_dismissed WHERE a IN (?, ?, ?, ?) OR b IN (?, ?, ?, ?) ORDER BY a, b`)
+    .all(s.id, t.id, x.id, y.id, s.id, t.id, x.id, y.id)
+    .map((r: Any) => [r.a, r.b]);
+  const pair = (p: number, q: number) => [Math.min(p, q), Math.max(p, q)];
+  assert.deepEqual(pairs, [pair(t.id, x.id), pair(t.id, y.id)].sort((m, n) => m[0] - n[0] || m[1] - n[1]));
 });

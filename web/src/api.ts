@@ -432,6 +432,17 @@ export interface SimilarPair {
   merge: { from: number; into: number };
 }
 
+export type ProjectSimilarReason = "folder" | "local" | "name" | "entities";
+export interface SimilarProjectPair {
+  a: { id: number; key: string; name: string; last_seen_at: string | null; entry_count: number };
+  b: { id: number; key: string; name: string; last_seen_at: string | null; entry_count: number };
+  score: number;
+  reasons: ProjectSimilarReason[];
+  shared_entities: number;
+  /** Suggested direction: merge `from` into `into` (the one seen most recently keeps its key). */
+  merge: { from: number; into: number };
+}
+
 export interface WikiLint {
   orphans: { id: number; slug: string; title: string }[];
   missing: { slug: string; from: { id: number; slug: string; title: string }[] }[];
@@ -449,6 +460,8 @@ export const api = {
   deleteProject: (id: number) => request("DELETE", `/projects/${id}`),
   mergePreview: (id: number, into: number) => request<MergePreview>("GET", `/projects/${id}/merge-preview${qs({ into })}`),
   mergeProject: (id: number, into: number) => request<MergeResult>("POST", `/projects/${id}/merge`, { into }),
+  similarProjects: (limit = 50) => request<SimilarProjectPair[]>("GET", `/projects/similar${qs({ limit })}`),
+  dismissSimilarProjects: (a: number, b: number) => request<{ ok: true }>("POST", "/projects/similar/dismiss", { a, b }),
   entries: (f: { scope?: Scope; project_id?: number; category?: string; deleted?: boolean }) =>
     request<Entry[]>("GET", `/entries${qs({ ...f, deleted: f.deleted ? 1 : undefined })}`),
   entry: (id: number) =>

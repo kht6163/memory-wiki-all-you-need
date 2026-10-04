@@ -600,6 +600,25 @@ ALTER TABLE projects_new RENAME TO projects;
       }
     },
   },
+  {
+    version: 13,
+    name: "dismissed similar-project pairs",
+    up(db) {
+      // Pairs a person marked as different projects (project-similar.ts), so
+      // they are not suggested for merging again. A merge re-points the
+      // source's pairs at the target (project-merge.ts, G-060).
+      db.exec(`
+CREATE TABLE project_pair_dismissed (
+  a INTEGER NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
+  b INTEGER NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
+  created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now')),
+  PRIMARY KEY (a, b),
+  CHECK (a < b)
+);
+CREATE INDEX project_pair_dismissed_b ON project_pair_dismissed(b);
+`);
+    },
+  },
 ];
 
 /**

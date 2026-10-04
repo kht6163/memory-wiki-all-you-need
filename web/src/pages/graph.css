@@ -574,9 +574,19 @@
   background: var(--color-info-soft);
   color: var(--color-info-text);
 }
-.reason-chip.reason-cooccur {
+.reason-chip.reason-cooccur,
+.reason-chip.reason-entities {
   background: var(--color-ok-soft);
   color: var(--color-ok-text);
+}
+/* similar projects (OtherPages ProjectsPage, ScopePage merge picker) */
+.reason-chip.reason-folder {
+  background: var(--color-accent-soft);
+  color: var(--color-accent-text);
+}
+.reason-chip.reason-local {
+  background: var(--color-info-soft);
+  color: var(--color-info-text);
 }
 .similar-dir {
   display: inline-flex;

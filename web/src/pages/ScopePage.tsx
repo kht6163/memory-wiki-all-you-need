@@ -5,7 +5,7 @@ import { act, CATEGORY_LABEL, CATEGORY_ORDER, CategoryBadge, changed, confirmDia
 import { Dialog } from "../components/Dialog.tsx";
 import { Icon } from "../components/Icon.tsx";
 import { Menu } from "../components/Menu.tsx";
-import { mergeCandidates, mergeSummary } from "../project-merge.ts";
+import { mergeCandidates, mergeSummary, PROJECT_REASON_HINT, PROJECT_REASON_LABEL, rankMergeCandidates, similarPartners } from "../project-merge.ts";
 import { PageHeader } from "../components/PageHeader.tsx";
 import { SkeletonList } from "../components/Skeleton.tsx";
 import { ScopeTabs } from "./WikiPages.tsx";
@@ -475,17 +475,20 @@ function ProjectMenu({ project }: { project: Project }) {
  * Step 1 picks the target (palette-style list, ↑↓ / Enter); step 2 shows the server's preview and
  * asks for the source name before the irreversible POST (G-036).
  */
-function ProjectMergeDialog({ source, onClose }: { source: Project; onClose: () => void }) {
+export function ProjectMergeDialog({ source, initialTarget, onClose }: { source: Project; initialTarget?: Project; onClose: () => void }) {
   const [q, setQ] = useState("");
   const [sel, setSel] = useState(0);
-  const [target, setTarget] = useState<Project | null>(null);
+  const [target, setTarget] = useState<Project | null>(initialTarget ?? null);
   const [typed, setTyped] = useState("");
   const [busy, setBusy] = useState(false);
   const listRef = useRef<HTMLDivElement>(null);
   const searchRef = useRef<HTMLInputElement>(null);
   const typeRef = useRef<HTMLInputElement>(null);
   const projects = useData(() => api.projects(), []);
-  const items = mergeCandidates(projects.data ?? [], source.id, q);
+  // Suggested partners (api.similarProjects) float to the top; a failed fetch just leaves the plain order.
+  const similar = useData(() => api.similarProjects(500).catch(() => []), []);
+  const partners = useMemo(() => similarPartners(similar.data ?? [], source.id), [similar.data, source.id]);
+  const items = rankMergeCandidates(mergeCandidates(projects.data ?? [], source.id, q), partners);
   const preview = useData(() => (target ? api.mergePreview(source.id, target.id) : Promise.resolve(null)), [source.id, target?.id]);
   // useData keeps the previous result while reloading: only show a preview of the chosen target.
   const pv = preview.data && target && preview.data.target.id === target.id ? preview.data : null;
@@ -493,7 +496,8 @@ function ProjectMergeDialog({ source, onClose }: { source: Project; onClose: () 
   const typedOk = typed.trim() === source.name;
   const canMerge = Boolean(pv) && !preview.error && typedOk && !busy;
 
-  useEffect(() => setSel(0), [q]);
+  // Suggestions arrive after the plain list and reorder it: start again from the top.
+  useEffect(() => setSel(0), [q, partners]);
   useEffect(() => {
     listRef.current?.querySelector<HTMLElement>(`[data-i="${sel}"]`)?.scrollIntoView({ block: "nearest" });
   }, [sel]);
@@ -603,6 +607,11 @@ function ProjectMergeDialog({ source, onClose }: { source: Project; onClose: () 
                 >
                   <Icon name="folder" size={16} />
                   <span className="palette-label">{p.name}</span>
+                  {partners.get(p.id)?.map((r) => (
+                    <span key={r} className={`reason-chip reason-${r}`} title={PROJECT_REASON_HINT[r]}>
+                      {PROJECT_REASON_LABEL[r]}
+                    </span>
+                  ))}
                   <span className="hint pmerge-key">{p.key}</span>
                 </div>
               ))}
