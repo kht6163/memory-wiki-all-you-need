@@ -86,9 +86,16 @@ pi (각 PC):
 curl -fsSL http://<서버 주소>:8765/install.sh | sh   # ~/.pi/agent/extensions/memory-wiki-all-you-need
 ```
 
+또는 npm 패키지로 설치할 수 있습니다. 이때는 `MEMORY_SERVER_URL`을 직접 설정해야 합니다. 두 방식 중 하나만 쓰세요(둘 다 있으면 확장이 두 번 실행됨).
+
+```sh
+pi install npm:pi-memory-wiki-all-you-need
+export MEMORY_SERVER_URL=http://<서버 주소>:8765
+```
+
 | env | 기본값 |
 |---|---|
-| `MEMORY_SERVER_URL` | 설치한 서버 주소 |
+| `MEMORY_SERVER_URL` | 설치 스크립트: 설치한 서버 주소 · npm: `http://127.0.0.1:8765` |
 | `MEMORY_SETTLE_DELAY_MS` | 8000 |
 | `MEMORY_TIMEOUT_MS` | 1500 (주입 조회 타임아웃) |
 | `MEMORY_PROJECT` | (자동) |
@@ -106,3 +113,7 @@ npm run build               # 웹 UI
 ```
 
 GitHub Actions(`.github/workflows/ci.yml`)가 push·PR마다 `npm ci` → typecheck → test → build를 돌린다.
+
+## 라이선스
+
+MIT — [LICENSE](LICENSE)
