@@ -70,8 +70,8 @@ export function normalizeRemote(url: string): string {
   return u.replace(/\.git$/, "").replace(/\/+$/, "").toLowerCase();
 }
 
-export function resolveProject(cwd: string): ProjectRef | null {
-  const override = process.env.MEMORY_PROJECT?.trim();
+/** override: a fixed project key (MEMORY_PROJECT or the settings file's "project"). */
+export function resolveProject(cwd: string, override = process.env.MEMORY_PROJECT?.trim()): ProjectRef | null {
   const repo = findRepo(cwd);
   if (override) {
     return { key: override, name: override.split("/").pop() || override, remote: null, root: repo?.[0] ?? cwd };

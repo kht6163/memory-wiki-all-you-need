@@ -189,8 +189,8 @@ test("G-007: the server stores the client key as-is, so normalized variants shar
 
 function extensionDefaultUrl(): string {
   const src = fs.readFileSync(path.join(extensionDir, "index.ts"), "utf8");
-  const m = src.match(/process\.env\.MEMORY_SERVER_URL\s*\?\?\s*"([^"]+)"/);
-  assert.ok(m, "pi-extension/index.ts has a MEMORY_SERVER_URL ?? \"...\" default");
+  const m = src.match(/const DEFAULT_SERVER = "([^"]+)"/);
+  assert.ok(m, "pi-extension/index.ts has a const DEFAULT_SERVER = \"...\" fallback");
   return m[1];
 }
 function serverReplaceLiteral(): string {
@@ -214,7 +214,7 @@ test("G-008: the placeholder is a plain origin and occurs exactly once in the ex
 test("G-008: replacing the placeholder like the server does yields the request origin as the default", () => {
   const src = fs.readFileSync(path.join(extensionDir, "index.ts"), "utf8");
   const served = src.replace(serverReplaceLiteral(), new URL("http://memory.example.test:9999/pi-extension/index.ts").origin);
-  assert.match(served, /process\.env\.MEMORY_SERVER_URL\s*\?\?\s*"http:\/\/memory\.example\.test:9999"/);
+  assert.match(served, /const DEFAULT_SERVER = "http:\/\/memory\.example\.test:9999"/);
 });
 
 // ------------------------------------------------------------------ G-011

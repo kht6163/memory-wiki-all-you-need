@@ -11,8 +11,9 @@ const app = new Hono();
 app.route("/api", api);
 
 // pi extension distribution: `curl -fsSL http://<server>/install.sh | sh`
-// copies the extension into ~/.pi/agent/extensions with this server as its
-// default MEMORY_SERVER_URL.
+// copies the extension into ~/.pi/agent/extensions, writes this server as
+// "serverUrl" into its settings file (other keys kept), and serves index.ts
+// with this server as the built-in default (G-008).
 const EXTENSION_FILES = ["index.ts", "project.ts"];
 const origin = (url: string) => new URL(url).origin;
 app.get("/pi-extension/:file", (c) => {
@@ -22,6 +23,19 @@ app.get("/pi-extension/:file", (c) => {
   if (file === "index.ts") src = src.replace("http://127.0.0.1:8765", origin(c.req.url));
   return c.body(src, 200, { "content-type": "text/plain; charset=utf-8" });
 });
+// Sets "serverUrl" in the extension's settings file and keeps every other key.
+// A file that is not a JSON object is left alone (no silent overwrite).
+const SET_SERVER_URL = [
+  `const fs = require("fs"), [file, url] = process.argv.slice(1);`,
+  `let c = {};`,
+  `if (fs.existsSync(file)) {`,
+  `  try { c = JSON.parse(fs.readFileSync(file, "utf8")); } catch (e) { c = null; }`,
+  `  if (!c || typeof c !== "object" || Array.isArray(c)) { console.log("not changed (not a JSON object): " + file); process.exit(0); }`,
+  `}`,
+  `c.serverUrl = url;`,
+  `fs.writeFileSync(file, JSON.stringify(c, null, 2) + "\\n");`,
+  `console.log("server URL saved to " + file);`,
+].join(" ");
 app.get("/install.sh", (c) => {
   const base = origin(c.req.url);
   const script = `#!/bin/sh
@@ -30,6 +44,12 @@ set -e
 DIR="\${PI_CODING_AGENT_DIR:-$HOME/.pi/agent}/extensions/memory-wiki-all-you-need"
 mkdir -p "$DIR"
 ${EXTENSION_FILES.map((f) => `curl -fsSL "${base}/pi-extension/${f}" -o "$DIR/${f}"`).join("\n")}
+CONF="\${PI_CODING_AGENT_DIR:-$HOME/.pi/agent}/extensions/memory-wiki-all-you-need.json"
+if command -v node >/dev/null 2>&1; then
+  node -e '${SET_SERVER_URL}' "$CONF" "${base}"
+else
+  echo 'node not found: put {"serverUrl": "${base}"} in this file yourself:' "$CONF"
+fi
 echo "installed to $DIR (server: ${base})"
 echo "restart pi (or run /reload) to load it"
 `;

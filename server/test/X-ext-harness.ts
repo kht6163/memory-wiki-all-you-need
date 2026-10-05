@@ -186,8 +186,11 @@ export function makePi(): FakePi {
 }
 
 /** Import the extension (after env is set) and register it on a fresh fake pi. */
-export async function loadExtension(): Promise<FakePi> {
-  if (!process.env.MEMORY_SERVER_URL) throw new Error("set MEMORY_SERVER_URL before loadExtension()");
+export async function loadExtension(opts: { settingsFile?: boolean } = {}): Promise<FakePi> {
+  // settingsFile: the server URL comes from PI_CODING_AGENT_DIR's settings file instead (set that first).
+  if (!process.env.MEMORY_SERVER_URL && !(opts.settingsFile && process.env.PI_CODING_AGENT_DIR)) {
+    throw new Error("set MEMORY_SERVER_URL (or PI_CODING_AGENT_DIR with a settings file) before loadExtension()");
+  }
   const mod: ExtensionModule = await import("../../pi-extension/index.ts");
   const pi = makePi();
   mod.default(pi.api);

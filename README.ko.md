@@ -57,7 +57,7 @@ flowchart LR
 - **지난 사실** — 새 메모리가 옛 메모리를 `supersedes`로 대체하고, 임시 사실은 `valid_until`이 지나면 이력으로 넘어갑니다. 이력은 주입되지 않지만 검색할 수 있습니다.
 - **검색 키워드** — 동의어·번역·다른 표기(`Postgres`, `포스트그레스`)는 검색과 회상에만 쓰이고 프롬프트에는 들어가지 않습니다.
 - **정리 방침** — 서버 LLM이 따를 규칙을 전역·프로젝트별로 사람이 적어 둡니다.
-- **프로젝트 구분** — git `origin` 주소를 정규화해 씁니다(`github.com/foo/bar`, worktree는 메인 저장소 기준). 원격이 없으면 `local/<폴더명>`, git 밖이면 전역만 씁니다. `MEMORY_PROJECT`로 직접 지정할 수 있습니다.
+- **프로젝트 구분** — git `origin` 주소를 정규화해 씁니다(`github.com/foo/bar`, worktree는 메인 저장소 기준). 원격이 없으면 `local/<폴더명>`, git 밖이면 전역만 씁니다. 설정 파일의 `project`(또는 `MEMORY_PROJECT`)로 직접 지정할 수 있습니다.
 
 **그래프**
 - **엔티티와 관계** — 메모리는 엔티티를 언급하고 `because`·`depends_on`·`supersedes`·`related`로 서로 이어집니다. 턴 정리와 같은 호출에서 정하므로 LLM을 더 부르지 않습니다. 엔티티는 프로젝트끼리 공유되고, 이름을 바꾸거나 합치면 예전 이름이 별칭으로 남습니다.
@@ -153,17 +153,26 @@ docker compose pull && docker compose up -d
 
 ### 2. pi 확장 설치 (각 PC)
 
-**방법 A — 설치 스크립트** (서버 주소가 자동으로 들어갑니다)
+**방법 A — 설치 스크립트** (서버 주소를 설정 파일에 함께 저장합니다)
 
 ```sh
 curl -fsSL http://<서버 주소>:8765/install.sh | sh   # → ~/.pi/agent/extensions/memory-wiki-all-you-need
 ```
 
-**방법 B — npm** (서버 주소를 직접 설정합니다)
+**방법 B — npm**, 설치한 뒤 pi 안에서 서버 주소를 한 번 지정합니다.
 
 ```sh
 pi install npm:pi-memory-wiki-all-you-need
-export MEMORY_SERVER_URL=http://<서버 주소>:8765
+```
+
+```text
+/memory-server http://<서버 주소>:8765
+```
+
+두 방법 모두 주소를 `~/.pi/agent/extensions/memory-wiki-all-you-need.json`(또는 `PI_CODING_AGENT_DIR` 아래)에 저장합니다. 다른 pi 확장이 설정을 두는 곳과 같습니다. 파일을 직접 고쳐도 됩니다.
+
+```json
+{ "serverUrl": "http://<서버 주소>:8765" }
 ```
 
 > [!IMPORTANT]
@@ -196,15 +205,17 @@ export MEMORY_SERVER_URL=http://<서버 주소>:8765
 </details>
 
 <details>
-<summary><b>확장 환경 변수</b></summary>
+<summary><b>확장 설정</b></summary>
 
-| 변수 | 기본값 | 설명 |
-|---|---|---|
-| `MEMORY_SERVER_URL` | 설치 스크립트: 설치한 서버 주소 · npm: `http://127.0.0.1:8765` | 서버 주소 |
-| `MEMORY_SETTLE_DELAY_MS` | 8000 | 에이전트가 완전히 대기 상태가 된 뒤 턴을 보내기까지 기다리는 시간 |
-| `MEMORY_TIMEOUT_MS` | 1500 | 주입할 메모리를 조회하는 타임아웃 |
-| `MEMORY_PROJECT` | (자동) | 프로젝트 키 직접 지정 |
-| `MEMORY_DISABLED` | – | `1`이면 끔 |
+`~/.pi/agent/extensions/memory-wiki-all-you-need.json` — 모든 키는 생략할 수 있습니다. 같은 뜻의 환경 변수가 있으면 파일보다 우선합니다(한 셸에서만 잠깐 바꿀 때 편합니다).
+
+| 키 | 덮어쓰는 환경 변수 | 기본값 | 설명 |
+|---|---|---|---|
+| `serverUrl` | `MEMORY_SERVER_URL` | 설치 스크립트나 `/memory-server`가 저장 | 서버 주소 |
+| `settleDelayMs` | `MEMORY_SETTLE_DELAY_MS` | 8000 | 에이전트가 완전히 대기 상태가 된 뒤 턴을 보내기까지 기다리는 시간 |
+| `timeoutMs` | `MEMORY_TIMEOUT_MS` | 1500 | 주입할 메모리를 조회하는 타임아웃 |
+| `project` | `MEMORY_PROJECT` | (자동) | 프로젝트 키 직접 지정 |
+| `disabled` | `MEMORY_DISABLED=1` | `false` | 확장 끄기 |
 
 </details>
 
@@ -225,6 +236,7 @@ export MEMORY_SERVER_URL=http://<서버 주소>:8765
 | 명령 | 하는 일 |
 |---|---|
 | `/memory` | 서버 상태와 이 프로젝트의 위키 링크 |
+| `/memory-server [url]` | 서버 주소와 그 출처를 보여 주거나, 새 주소를 설정 파일에 저장 |
 | `/memory-pin <text> [--project]` | 모든 세션에 주입되는 고정 지시 추가 |
 | `/memory-flush` | 모아 둔 턴을 기다리지 않고 지금 보냄 |
 | `/wiki-compose [정리 방향]` | 현재 세션의 턴을 서버 LLM으로 위키에 정리 |

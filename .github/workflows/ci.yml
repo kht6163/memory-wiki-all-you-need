@@ -77,6 +77,18 @@ jobs:
       - uses: actions/setup-node@v4
         with:
           node-version: 24
+      - name: Run the install script
+        run: |
+          # installs into a temp agent dir; serverUrl is merged into an existing settings file
+          set -eu
+          export PI_CODING_AGENT_DIR="$RUNNER_TEMP/pi-agent"
+          conf="$PI_CODING_AGENT_DIR/extensions/memory-wiki-all-you-need.json"
+          mkdir -p "$(dirname "$conf")"
+          echo '{"serverUrl": "http://old.example:1", "timeoutMs": 2500}' > "$conf"
+          curl -fsS "http://127.0.0.1:$HOST_PORT/install.sh" | sh
+          test -s "$PI_CODING_AGENT_DIR/extensions/memory-wiki-all-you-need/index.ts"
+          test -s "$PI_CODING_AGENT_DIR/extensions/memory-wiki-all-you-need/project.ts"
+          node -e 'const c = require(process.argv[1]); if (c.serverUrl !== process.argv[2] || c.timeoutMs !== 2500) { console.error(c); process.exit(1); }' "$conf" "http://127.0.0.1:$HOST_PORT"
       - name: Web smoke test (headless Chrome)
         run: |
           # playwright-core stays out of the repo's dependencies: pinned, installed into a temp dir,

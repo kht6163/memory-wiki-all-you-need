@@ -1,6 +1,8 @@
+import fs from "node:fs";
 import os from "node:os";
+import path from "node:path";
 import { Type } from "@earendil-works/pi-ai";
-import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
+import { getAgentDir, type ExtensionAPI, type ExtensionContext } from "@earendil-works/pi-coding-agent";
 import { resolveProject, type ProjectRef } from "./project.ts";
 
 // memory-wiki-all-you-need — central memory + LLM wiki for pi.
@@ -11,7 +13,7 @@ import { resolveProject, type ProjectRef } from "./project.ts";
 // - message_end: buffers the turn (user prompt, assistant text, tool calls,
 //   tool results).
 // - agent_settled: once pi is truly idle (no retries, compaction or queued
-//   work), waits MEMORY_SETTLE_DELAY_MS and ships the buffered turn to the
+//   work), waits settleDelayMs and ships the buffered turn to the
 //   server, where an LLM curates it into memory. A new prompt before the delay
 //   cancels the send and the turns are shipped together later.
 // - Tools compatible with pi-hermes-memory: memory_search, session_search,
@@ -21,9 +23,79 @@ import { resolveProject, type ProjectRef } from "./project.ts";
 // - /wiki-compose: asks the server LLM to organize this session's turn
 //   records into wiki pages.
 
-const SERVER = (process.env.MEMORY_SERVER_URL ?? "http://127.0.0.1:8765").replace(/\/+$/, "");
-const SETTLE_DELAY_MS = Number(process.env.MEMORY_SETTLE_DELAY_MS ?? 8000);
-const CONTEXT_TIMEOUT_MS = Number(process.env.MEMORY_TIMEOUT_MS ?? 1500);
+// Settings: <agent dir>/extensions/memory-wiki-all-you-need.json (like other pi
+// extensions), e.g. {"serverUrl": "http://<server>:8765"}. Env vars override the
+// file (MEMORY_SERVER_URL, MEMORY_SETTLE_DELAY_MS, MEMORY_TIMEOUT_MS,
+// MEMORY_PROJECT, MEMORY_DISABLED=1). The install script writes serverUrl; the
+// literal below is only the last fallback and the server swaps it for its own
+// origin when serving this file (G-008) — keep it the only occurrence.
+const DEFAULT_SERVER = "http://127.0.0.1:8765";
+
+export interface MemoryConfig {
+  serverUrl?: string;
+  settleDelayMs?: number;
+  timeoutMs?: number;
+  project?: string;
+  disabled?: boolean;
+}
+
+export const configPath = () => path.join(getAgentDir(), "extensions", "memory-wiki-all-you-need.json");
+
+/** The settings file, or {} when it is missing or broken (never throws: pi must start anyway). */
+export function readConfig(file = configPath()): MemoryConfig {
+  try {
+    if (!fs.existsSync(file)) return {};
+    const v = JSON.parse(fs.readFileSync(file, "utf8"));
+    return v && typeof v === "object" && !Array.isArray(v) ? v : {};
+  } catch (err) {
+    console.error(`[memory] ignoring ${file}: ${(err as Error).message}`);
+    return {};
+  }
+}
+
+/** Merge into the settings file, keeping keys it does not set. Throws (writes nothing) on a file that is not a JSON object. */
+export function writeConfig(patch: MemoryConfig, file = configPath()) {
+  let current: MemoryConfig = {};
+  if (fs.existsSync(file)) {
+    const v = JSON.parse(fs.readFileSync(file, "utf8"));
+    if (!v || typeof v !== "object" || Array.isArray(v)) throw new Error("not a JSON object");
+    current = v;
+  }
+  const next = { ...current, ...patch };
+  fs.mkdirSync(path.dirname(file), { recursive: true });
+  fs.writeFileSync(file, `${JSON.stringify(next, null, 2)}\n`);
+}
+
+const cleanUrl = (u: string) => u.trim().replace(/\/+$/, "");
+/** An env value wins when it is set and not blank; the file's only when it is a number. */
+const num = (env: string | undefined, file: unknown, dflt: number) => {
+  const n = env?.trim() ? Number(env) : typeof file === "number" ? file : dflt;
+  return Number.isFinite(n) && n >= 0 ? n : dflt;
+};
+
+/** Effective settings: env vars win over the settings file, the file over built-in defaults. */
+export function resolveSettings(env: Record<string, string | undefined>, file: MemoryConfig) {
+  const envServer = env.MEMORY_SERVER_URL?.trim() ?? "";
+  const fileServer = typeof file.serverUrl === "string" ? file.serverUrl.trim() : "";
+  return {
+    server: cleanUrl(envServer || fileServer || DEFAULT_SERVER),
+    source: (envServer ? "env" : fileServer ? "file" : "default") as "env" | "file" | "default",
+    envServer,
+    settleDelayMs: num(env.MEMORY_SETTLE_DELAY_MS, file.settleDelayMs, 8000),
+    timeoutMs: num(env.MEMORY_TIMEOUT_MS, file.timeoutMs, 1500),
+    project: env.MEMORY_PROJECT?.trim() || (typeof file.project === "string" ? file.project.trim() : ""),
+    disabled: env.MEMORY_DISABLED === "1" || file.disabled === true,
+  };
+}
+
+const settings = resolveSettings(process.env, readConfig());
+let SERVER = settings.server;
+let serverSource = settings.source;
+const envServer = settings.envServer;
+const SETTLE_DELAY_MS = settings.settleDelayMs;
+const CONTEXT_TIMEOUT_MS = settings.timeoutMs;
+const PROJECT_OVERRIDE = settings.project;
+const DISABLED = settings.disabled;
 const MAX_BUFFER = 600;
 
 interface TurnMessage {
@@ -106,8 +178,12 @@ function fmtEntries(entries: EntryLite[]): string {
     .join("\n");
 }
 
+const SOURCE_LABEL = { env: "MEMORY_SERVER_URL", file: "settings file", default: "built-in default" } as const;
+const unreachableHint = () =>
+  serverSource === "env" ? "" : `\nSet the server with /memory-server http://<server>:8765 (saved to ${configPath()})`;
+
 export default function memoryAllYouNeed(pi: ExtensionAPI) {
-  if (process.env.MEMORY_DISABLED === "1") return;
+  if (DISABLED) return;
 
   let sessionId = "";
   let cwd = process.cwd();
@@ -148,7 +224,7 @@ export default function memoryAllYouNeed(pi: ExtensionAPI) {
   pi.on("session_start", async (_event, ctx) => {
     sessionId = ctx.sessionManager.getSessionId();
     cwd = ctx.cwd;
-    project = resolveProject(cwd);
+    project = resolveProject(cwd, PROJECT_OVERRIDE);
     buffer = [];
     setStatus(ctx, project ? `🧠 ${project.name}` : "🧠 global");
   });
@@ -168,7 +244,7 @@ export default function memoryAllYouNeed(pi: ExtensionAPI) {
       if (warned) setStatus(ctx, project ? `🧠 ${project.name}` : "🧠 global");
       warned = false;
     } catch (err) {
-      if (!warned && ctx.hasUI) ctx.ui.notify(`memory server unreachable (${SERVER}): ${(err as Error).message}`, "warning");
+      if (!warned && ctx.hasUI) ctx.ui.notify(`memory server unreachable (${SERVER}): ${(err as Error).message}${unreachableHint()}`, "warning");
       warned = true;
       setStatus(ctx, "🧠 offline");
     }
@@ -382,7 +458,47 @@ export default function memoryAllYouNeed(pi: ExtensionAPI) {
           "info",
         );
       } catch (err) {
-        ctx.ui.notify(`memory server unreachable (${SERVER}): ${(err as Error).message}`, "error");
+        ctx.ui.notify(`memory server unreachable (${SERVER}): ${(err as Error).message}${unreachableHint()}`, "error");
+      }
+    },
+  });
+
+  pi.registerCommand("memory-server", {
+    description: "Show or set the memory server URL: /memory-server [http://<server>:8765]  (saved to the settings file)",
+    handler: async (args, ctx) => {
+      const url = cleanUrl(args);
+      if (!url) {
+        ctx.ui.notify(`memory server: ${SERVER} (from ${SOURCE_LABEL[serverSource]})\nsettings: ${configPath()}`, "info");
+        return;
+      }
+      let parsed: URL;
+      try {
+        parsed = new URL(url);
+        if (parsed.protocol !== "http:" && parsed.protocol !== "https:") throw new Error("not http(s)");
+      } catch {
+        ctx.ui.notify(`not a server URL: ${url} (expected http://<server>:8765)`, "error");
+        return;
+      }
+      const next = cleanUrl(parsed.origin + parsed.pathname);
+      try {
+        writeConfig({ serverUrl: next });
+      } catch (err) {
+        ctx.ui.notify(`could not update ${configPath()}: ${(err as Error).message} — fix or remove the file and try again`, "error");
+        return;
+      }
+      if (envServer) {
+        ctx.ui.notify(`saved to ${configPath()}, but MEMORY_SERVER_URL=${envServer} still overrides it in this shell`, "warning");
+        return;
+      }
+      SERVER = next;
+      serverSource = "file";
+      warned = false;
+      cachedSystem = ""; // the fallback block belonged to the old server
+      try {
+        const h = await call<{ entries: number }>("GET", "/health", undefined, 3000);
+        ctx.ui.notify(`memory server set to ${SERVER} (${h.entries} memories) — saved to ${configPath()}`, "info");
+      } catch (err) {
+        ctx.ui.notify(`saved ${SERVER} to ${configPath()}, but it is not reachable: ${(err as Error).message}`, "warning");
       }
     },
   });

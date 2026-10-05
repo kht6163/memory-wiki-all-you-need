@@ -57,7 +57,7 @@ flowchart LR
 - **Superseded facts** — a new memory can replace an old one via `supersedes`, and `valid_until` expires temporary facts; history stays searchable but is never injected.
 - **Search keywords** — synonyms and translations (`Postgres`, `포스트그레스`) help search and recall without entering the prompt.
 - **Curation guidelines** — global and per-project rules for the server LLM, written by humans.
-- **Project detection** — the normalized git `origin` URL (`github.com/foo/bar`; worktrees use the main repo), `local/<dir>` without a remote, global-only outside git. Override with `MEMORY_PROJECT`.
+- **Project detection** — the normalized git `origin` URL (`github.com/foo/bar`; worktrees use the main repo), `local/<dir>` without a remote, global-only outside git. Override with `project` in the settings file (or `MEMORY_PROJECT`).
 
 **Graph**
 - **Entities and relations** — memories mention entities and link via `because`, `depends_on`, `supersedes`, `related`, decided in the same curation call (no extra LLM call). Entities are shared across projects; renamed or merged names stay as aliases.
@@ -153,17 +153,26 @@ Versions are listed under [tags](https://github.com/kht6163/memory-wiki-all-you-
 
 ### 2. Install the pi extension (on each machine)
 
-**Option A — install script** (the server URL is filled in for you):
+**Option A — install script** (also saves the server URL in the settings file):
 
 ```sh
 curl -fsSL http://<server>:8765/install.sh | sh   # → ~/.pi/agent/extensions/memory-wiki-all-you-need
 ```
 
-**Option B — npm** (set the server URL yourself):
+**Option B — npm**, then point it at your server once (inside pi):
 
 ```sh
 pi install npm:pi-memory-wiki-all-you-need
-export MEMORY_SERVER_URL=http://<server>:8765
+```
+
+```text
+/memory-server http://<server>:8765
+```
+
+Both save the URL to `~/.pi/agent/extensions/memory-wiki-all-you-need.json` (or under `PI_CODING_AGENT_DIR`), the same place other pi extensions keep their settings. You can also edit the file directly:
+
+```json
+{ "serverUrl": "http://<server>:8765" }
 ```
 
 > [!IMPORTANT]
@@ -196,15 +205,17 @@ export MEMORY_SERVER_URL=http://<server>:8765
 </details>
 
 <details>
-<summary><b>Extension environment variables</b></summary>
+<summary><b>Extension settings</b></summary>
 
-| Variable | Default | Description |
-|---|---|---|
-| `MEMORY_SERVER_URL` | install script: the server it came from · npm: `http://127.0.0.1:8765` | Server URL |
-| `MEMORY_SETTLE_DELAY_MS` | 8000 | Wait after the agent settles before sending the turn |
-| `MEMORY_TIMEOUT_MS` | 1500 | Timeout for fetching the injected memory |
-| `MEMORY_PROJECT` | (auto) | Override the project key |
-| `MEMORY_DISABLED` | – | Set to `1` to disable |
+`~/.pi/agent/extensions/memory-wiki-all-you-need.json` — every key is optional. An environment variable with the same meaning overrides the file (handy for a one-off shell).
+
+| Key | Env override | Default | Description |
+|---|---|---|---|
+| `serverUrl` | `MEMORY_SERVER_URL` | set by the install script or `/memory-server` | Server URL |
+| `settleDelayMs` | `MEMORY_SETTLE_DELAY_MS` | 8000 | Wait after the agent settles before sending the turn |
+| `timeoutMs` | `MEMORY_TIMEOUT_MS` | 1500 | Timeout for fetching the injected memory |
+| `project` | `MEMORY_PROJECT` | (auto) | Override the project key |
+| `disabled` | `MEMORY_DISABLED=1` | `false` | Disable the extension |
 
 </details>
 
@@ -225,6 +236,7 @@ export MEMORY_SERVER_URL=http://<server>:8765
 | Command | What it does |
 |---|---|
 | `/memory` | Server status and the wiki link for this project |
+| `/memory-server [url]` | Show the server URL and where it comes from, or save a new one to the settings file |
 | `/memory-pin <text> [--project]` | Add a standing instruction injected into every session |
 | `/memory-flush` | Send the buffered turn now instead of waiting |
 | `/wiki-compose [focus]` | Organize this session's turns into the wiki with the server LLM |

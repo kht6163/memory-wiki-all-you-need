@@ -14,6 +14,9 @@ process.env.LLM_API_KEY = "test-key";
 process.env.LLM_MODEL = "test-model";
 // Dates (TURN DATE, deadlines) must not depend on the developer's shell.
 process.env.TIMEZONE = "UTC";
+// The pi extension reads <agent dir>/extensions/memory-wiki-all-you-need.json at import:
+// never the developer's real ~/.pi/agent (a "disabled": true there would break the suites).
+process.env.PI_CODING_AGENT_DIR = path.join(dir, "pi-agent");
 process.env.WEB_DIR = path.join(dir, "web");
 process.on("exit", () => fs.rmSync(dir, { recursive: true, force: true }));
 installFakeLlm(process.env.LLM_BASE_URL);
