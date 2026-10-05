@@ -6,6 +6,7 @@
 
 [![CI](https://github.com/kht6163/memory-wiki-all-you-need/actions/workflows/ci.yml/badge.svg)](https://github.com/kht6163/memory-wiki-all-you-need/actions/workflows/ci.yml)
 [![npm](https://img.shields.io/npm/v/pi-memory-wiki-all-you-need)](https://www.npmjs.com/package/pi-memory-wiki-all-you-need)
+[![Docker Hub](https://img.shields.io/docker/v/kht6163/memory-wiki-all-you-need?sort=semver&label=docker%20hub)](https://hub.docker.com/r/kht6163/memory-wiki-all-you-need)
 [![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
 
 [English](README.md) | **한국어**
@@ -108,7 +109,7 @@ Docker Compose 예시입니다(`LLM_API_KEY`는 `.env`에 둡니다).
 ```yaml
 services:
   memory:
-    build: ./memory-wiki-all-you-need   # 이 저장소
+    image: kht6163/memory-wiki-all-you-need:0.8   # amd64 / arm64
     restart: unless-stopped
     environment:
       LLM_BASE_URL: http://<llm-host>:8317/v1
@@ -120,6 +121,10 @@ services:
     volumes:
       - ./data:/data
 ```
+
+컨테이너는 `node` 사용자(uid 1000)로 돌기 때문에 `./data`에 쓸 수 있어야 합니다: `mkdir -p data && sudo chown 1000:1000 data`.
+
+소스에서 직접 빌드하려면 `image:` 대신 `build: ./memory-wiki-all-you-need`(이 저장소를 받은 폴더)를 쓰세요.
 
 > [!WARNING]
 > 로그인 기능이 없습니다. `127.0.0.1`이나 신뢰하는 네트워크에만 바인딩하세요.

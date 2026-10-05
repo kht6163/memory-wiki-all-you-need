@@ -6,6 +6,7 @@
 
 [![CI](https://github.com/kht6163/memory-wiki-all-you-need/actions/workflows/ci.yml/badge.svg)](https://github.com/kht6163/memory-wiki-all-you-need/actions/workflows/ci.yml)
 [![npm](https://img.shields.io/npm/v/pi-memory-wiki-all-you-need)](https://www.npmjs.com/package/pi-memory-wiki-all-you-need)
+[![Docker Hub](https://img.shields.io/docker/v/kht6163/memory-wiki-all-you-need?sort=semver&label=docker%20hub)](https://hub.docker.com/r/kht6163/memory-wiki-all-you-need)
 [![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
 
 **English** | [한국어](README.ko.md)
@@ -108,7 +109,7 @@ Docker Compose example (put `LLM_API_KEY` in `.env`):
 ```yaml
 services:
   memory:
-    build: ./memory-wiki-all-you-need   # this repository
+    image: kht6163/memory-wiki-all-you-need:0.8   # amd64 / arm64
     restart: unless-stopped
     environment:
       LLM_BASE_URL: http://<llm-host>:8317/v1
@@ -120,6 +121,10 @@ services:
     volumes:
       - ./data:/data
 ```
+
+The container runs as user `node` (uid 1000), so `./data` must be writable by it: `mkdir -p data && sudo chown 1000:1000 data`.
+
+To build from source instead, replace `image:` with `build: ./memory-wiki-all-you-need` (a clone of this repository).
 
 > [!WARNING]
 > There is no login. Bind only to `127.0.0.1` or a network you trust.
