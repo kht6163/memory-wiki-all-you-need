@@ -73,7 +73,7 @@ flowchart LR
 **Wiki**
 - **Per-project and global wikis** — `[[slug]]` links, `[#id]` memory references, history, revert, backlinks, search, locking.
 - **Page tree** — put pages under other pages; collapsible tree, breadcrumbs and a page-tree rail. A flat wiki gets grouping suggestions (e.g. ADRs under their index page) that change nothing until you apply them.
-- **Compose from turns** — the LLM turns conversations and tool output into pages, chunked by `WIKI_COMPOSE_CHUNK_CHARS`; never automatic.
+- **Compose from turns** — the LLM turns conversations and tool output into pages, chunked by `WIKI_COMPOSE_CHUNK_CHARS`; never automatic. Can be switched off on the web Settings page (`#/settings`) or with `WIKI_COMPOSE=0`; agents and people can still write pages directly.
 - **Wiki lint** — orphan pages, missing links, citations of deleted memories, empty pages (no LLM).
 
 **Web UI**
@@ -114,7 +114,7 @@ Docker Compose example (put `LLM_API_KEY` in `.env`):
 ```yaml
 services:
   memory:
-    image: kht6163/memory-wiki-all-you-need:0.14   # amd64 / arm64
+    image: kht6163/memory-wiki-all-you-need:0.15   # amd64 / arm64
     restart: unless-stopped
     environment:
       LLM_BASE_URL: http://<llm-host>:8317/v1
@@ -136,7 +136,7 @@ mkdir -p data && sudo chown 1000:1000 data
 docker run -d --name memory-wiki --restart unless-stopped \
   -p 127.0.0.1:8765:8765 -v "$PWD/data:/data" \
   -e LLM_BASE_URL=http://<llm-host>:8317/v1 -e LLM_API_KEY=<key> -e TIMEZONE=Asia/Seoul \
-  kht6163/memory-wiki-all-you-need:0.14
+  kht6163/memory-wiki-all-you-need:0.15
 ```
 
 **Optional: semantic search.** Add an embedding service to the same compose file. bge-m3 is multilingual and runs on CPU (about 55 ms per short query; the model, about 2.3 GB, is downloaded on first start):
@@ -215,6 +215,7 @@ Both save the URL to `~/.pi/agent/extensions/memory-wiki-all-you-need.json` (or 
 | `DEBUG_LOG_KEEP_DAYS` / `DEBUG_LOG_MAX_MB` | 14 / 200 | Debug log retention and per-day size cap |
 | `CONTEXT_BUDGET_CHARS` | 8000 | System-prompt memory block budget |
 | `RECALL_BUDGET_CHARS` / `RECALL_LIMIT` | 3000 / 6 | Per-prompt recall |
+| `WIKI_COMPOSE` | (web switch, on) | `1` / `0` fixes compose-from-turns on or off (otherwise the switch on `#/settings`) |
 | `WIKI_COMPOSE_CHUNK_CHARS` | 40000 | Turn-record chars per compose LLM call |
 | `WIKI_COMPOSE_MAX_TURNS` | 200 | Max turns per compose job |
 | `WIKI_WRITER_BUDGET_CHARS` | 40000 | Existing page bodies shown per compose call |

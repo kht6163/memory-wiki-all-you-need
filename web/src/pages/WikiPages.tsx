@@ -65,6 +65,21 @@ function useScopeName(scope: number) {
   return { project: project.data, name: scope ? project.data?.name ?? "프로젝트" : "전역" };
 }
 
+/** Turn-record compose switch (ADR-0038); assumed on until the server answers, so nothing flickers in the usual case. */
+function useComposeOn(): boolean {
+  const settings = useData(() => api.settings(), []);
+  return settings.data?.wikiCompose.enabled ?? true;
+}
+
+const ComposeOffNote = ({ children }: { children?: ReactNode }) => (
+  <div className="callout info" role="note">
+    <Icon name="info" size={16} />
+    <span className="callout-text">
+      턴 기록으로 위키 정리가 꺼져 있습니다.{children} <a href="#/settings">설정</a>
+    </span>
+  </div>
+);
+
 const pageHref = (scope: number, slug: string) => `#/w/${scope}/${encodeURIComponent(slug)}`;
 const newPageHref = (scope: number, slug: string) => `#/w/${scope}/~new?slug=${encodeURIComponent(slug)}`;
 
@@ -93,8 +108,10 @@ export function WikiHome({ scope }: { scope: number }) {
     window.addEventListener("hashchange", on);
     return () => window.removeEventListener("hashchange", on);
   }, []);
+  const composeOn = useComposeOn();
   const pending = jobs.data?.find((j) => j.kind === "compose" && (j.status === "pending" || j.status === "processing"));
-  usePoll(jobs.reload, 4000, Boolean(pending));
+  // A job waiting while compose is off does not move: no polling then.
+  usePoll(jobs.reload, 4000, Boolean(pending) && (composeOn || pending?.status === "processing"));
   // When a compose job finishes, the page list changes: refetch once it disappears.
   const hadPending = useRef(false);
   useEffect(() => {
@@ -121,9 +138,11 @@ export function WikiHome({ scope }: { scope: number }) {
         busy={pages.loading && Boolean(pages.data)}
         actions={
           <>
-            <a className="btn" href={`#/w/${scope}/~compose`}>
-              <Icon name="messages-square" />턴 기록으로 정리
-            </a>
+            {composeOn && (
+              <a className="btn" href={`#/w/${scope}/~compose`}>
+                <Icon name="messages-square" />턴 기록으로 정리
+              </a>
+            )}
             <a className="btn primary" href={`#/w/${scope}/~new`}>
               <Icon name="plus" />새 페이지
             </a>
@@ -134,7 +153,7 @@ export function WikiHome({ scope }: { scope: number }) {
           pending && (
             <a className="wiki-job-banner" href={`#/wiki-jobs?project=${scope}`}>
               <span className="live-dot" aria-hidden />
-              {pending.status === "processing" ? "LLM이 턴 기록을 정리하는 중…" : "정리 작업 대기 중"}
+              {pending.status === "processing" ? "LLM이 턴 기록을 정리하는 중…" : composeOn ? "정리 작업 대기 중" : "정리 작업 대기 중 (기능 꺼짐)"}
               <span className="faint">· 턴 {pending.payload.turns?.length ?? 0}개</span>
               <Icon name="arrow-right" size={14} />
             </a>
@@ -155,8 +174,14 @@ export function WikiHome({ scope }: { scope: number }) {
             </a>
           }
         >
-          직접 새 페이지를 쓰거나, <b>턴 기록으로 정리</b>로 지난 작업 대화를 LLM이 문서로 옮기게 할 수 있습니다. pi에서는 <code>/wiki-compose</code>로 현재 세션을
-          정리하거나, 에이전트에게 "위키에 정리해줘"라고 하면 됩니다.
+          {composeOn ? (
+            <>
+              직접 새 페이지를 쓰거나, <b>턴 기록으로 정리</b>로 지난 작업 대화를 LLM이 문서로 옮기게 할 수 있습니다. pi에서는 <code>/wiki-compose</code>로 현재
+              세션을 정리하거나, 에이전트에게 "위키에 정리해줘"라고 하면 됩니다.
+            </>
+          ) : (
+            <>직접 새 페이지를 쓰거나, pi 에이전트에게 "위키에 정리해줘"라고 하면 됩니다.</>
+          )}
         </Empty>
       )}
       {overview && (
@@ -769,7 +794,9 @@ const JOB_KIND: Record<string, string> = { compose: "턴 기록 정리", write: 
 
 export function WikiJobsPage({ scope }: { scope?: number }) {
   const { data, error, loading, reload } = useData(() => api.wikiJobs(scope === undefined ? undefined : scope || null), [scope]);
-  const live = Boolean(data?.some((j) => j.status === "pending" || j.status === "processing"));
+  const composeOn = useComposeOn();
+  const waiting = Boolean(data?.some((j) => j.status === "pending"));
+  const live = Boolean(data?.some((j) => j.status === "processing")) || (composeOn && waiting);
   usePoll(reload, 3000, live);
   return (
     <article className="page">
@@ -780,13 +807,14 @@ export function WikiJobsPage({ scope }: { scope?: number }) {
         tabs={scope !== undefined && <ScopeTabs scope={scope} active="jobs" />}
       />
       <ErrorBox error={error} />
+      {!composeOn && <ComposeOffNote>{waiting ? " 대기 중인 작업은 다시 켜면 이어서 실행됩니다." : ""}</ComposeOffNote>}
       {loading && !data && <SkeletonList />}
       {data?.length === 0 && (
         <Empty
           icon="file-cog"
           title="작업 기록이 없습니다"
           action={
-            scope !== undefined && (
+            scope !== undefined && composeOn && (
               <a className="btn" href={`#/w/${scope}/~compose`}>
                 턴 기록으로 정리
               </a>
@@ -799,7 +827,7 @@ export function WikiJobsPage({ scope }: { scope?: number }) {
           {data.map((j) => {
             const notes = j.result?.notes ?? (j.result?.note ? [j.result.note] : []);
             const running = j.status === "pending" || j.status === "processing";
-            const retryable = j.kind === "compose" && (j.status === "error" || j.status === "cancelled");
+            const retryable = composeOn && j.kind === "compose" && (j.status === "error" || j.status === "cancelled");
             return (
               <div key={j.id} className="list-row wiki-job">
                 <div className="wiki-job-head">
@@ -893,6 +921,18 @@ export function CitedBy({ pages }: { pages: { id: number; slug: string; title: s
 
 /** Pick turn records and have the LLM organize them into this wiki's pages. */
 export function WikiCompose({ scope }: { scope: number }) {
+  const settings = useData(() => api.settings(), []);
+  if (settings.data && !settings.data.wikiCompose.enabled)
+    return (
+      <article className="page">
+        <PageHeader crumbs={<a href={`#/w/${scope}`}>위키</a>} title="턴 기록으로 위키 정리" />
+        <ComposeOffNote> 켜면 고른 턴 기록을 LLM이 이 위키의 페이지로 정리합니다.</ComposeOffNote>
+      </article>
+    );
+  return <WikiComposeForm scope={scope} />;
+}
+
+function WikiComposeForm({ scope }: { scope: number }) {
   const { name } = useScopeName(scope);
   const turns = useData(() => api.composeTurns(scope || null), [scope]);
   const [selected, setSelected] = useState<Set<number> | null>(null);

@@ -32,6 +32,7 @@ export const ROUTES: PaletteItem[] = [
   { id: "r:wiki-jobs", label: "위키 작업", icon: "file-cog", href: "/wiki-jobs", keywords: "jobs" },
   { id: "r:preview", label: "주입 미리보기", icon: "eye", href: "/preview", keywords: "preview inject" },
   { id: "r:debug", label: "디버그 모드", icon: "file-text", href: "/debug", keywords: "debug log 로그 기록" },
+  { id: "r:settings", label: "설정", icon: "wrench", href: "/settings", keywords: "settings 설정 compose 켜기 끄기" },
   { id: "r:trash", label: "휴지통", icon: "trash-2", href: "/trash", keywords: "trash" },
   { id: "r:search", label: "검색", icon: "search", href: "/search", keywords: "search" },
 ];
@@ -100,6 +101,7 @@ export function CommandPalette({
   projects,
   projectId,
   newMemoryHref,
+  composeOn = true,
 }: {
   open: boolean;
   onClose: () => void;
@@ -107,6 +109,8 @@ export function CommandPalette({
   /** Project of the current route, used by the 작업 commands. */
   projectId?: number;
   newMemoryHref: string;
+  /** Turn-record compose is on (ADR-0038); off hides its command. */
+  composeOn?: boolean;
 }) {
   const ref = useRef<HTMLDialogElement>(null);
   const input = useRef<HTMLInputElement>(null);
@@ -160,7 +164,7 @@ export function CommandPalette({
     const actions: PaletteItem[] = [
       { id: "a:new-memory", label: "새 메모리", icon: "plus", href: newMemoryHref, keywords: "new memory create c" },
       { id: "a:new-wiki", label: "새 위키 페이지", icon: "file-text", href: `/w/${pid ?? 0}/~new`, keywords: "new wiki page" },
-      { id: "a:compose", label: "턴 기록으로 위키 정리", icon: "book-open", href: `/w/${pid ?? 0}/~compose`, keywords: "compose wiki" },
+      ...(composeOn ? [{ id: "a:compose", label: "턴 기록으로 위키 정리", icon: "book-open" as IconName, href: `/w/${pid ?? 0}/~compose`, keywords: "compose wiki" }] : []),
       { id: "a:review", label: "메모리 점검", hint: pid ? "현재 프로젝트" : "전역·사용자", icon: "check-check", href: `/review${scopeQ}`, keywords: "review" },
       { id: "a:preview", label: "주입 미리보기", hint: pid ? "현재 프로젝트" : undefined, icon: "eye", href: `/preview${scopeQ}`, keywords: "preview" },
       ...(["system", "light", "dark"] as Theme[]).map((t) => ({
@@ -214,7 +218,7 @@ export function CommandPalette({
     }
     if (term) out.push({ name: "", items: [{ id: "s:all", label: `'${term}' 전체 결과 보기`, icon: "arrow-right", href: `/search?q=${encodeURIComponent(term)}` }] });
     return out.filter((g) => g.items.length);
-  }, [term, recent, projects, projectId, newMemoryHref, remote]);
+  }, [term, recent, projects, projectId, newMemoryHref, composeOn, remote]);
 
   const flat = useMemo(() => groups.flatMap((g) => g.items), [groups]);
   const cur = Math.min(sel, Math.max(0, flat.length - 1));

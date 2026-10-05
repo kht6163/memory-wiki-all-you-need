@@ -2,6 +2,7 @@ import { config, llmEnabled } from "./config.ts";
 import { db, type Project, type Turn } from "./db.ts";
 import { chatJson } from "./llm.ts";
 import { getEntry, getProject, policyPrompt, projectLabel } from "./store.ts";
+import { wikiComposeEnabled } from "./settings.ts";
 import { getTurn, renderTurn } from "./turns.ts";
 import {
   createPage,
@@ -18,6 +19,7 @@ import {
   type WikiJob,
   type WikiPage,
   isJobCancelled,
+  pauseJob,
   runningWikiJobs,
   movePage,
   WIKI_STYLE,
@@ -240,6 +242,8 @@ async function runCompose(job: WikiJob, between: () => Promise<void>) {
     // Memory curation must not wait behind a long compose job.
     if (i > 0) await between();
     if (isJobCancelled(job.id)) return;
+    // Switched off mid-job: back to the queue; it resumes after the finished chunks once compose is on again.
+    if (!wikiComposeEnabled()) return pauseJob(job.id);
     try {
       const r = await composeChunk(job, project, chunk, touched, job.payload.instruction);
       if (!r) return;

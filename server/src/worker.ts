@@ -34,6 +34,7 @@ import {
 } from "./graph.ts";
 import { claimDueJob, nextJobDueInMs, onWikiJobQueued } from "./wiki.ts";
 import { processWikiJob } from "./wiki-worker.ts";
+import { onSettingsChanged } from "./settings.ts";
 import { processGraphJob } from "./graph-worker.ts";
 import { claimReviewJob, onReviewJobQueued, scheduleDueReviews } from "./review.ts";
 import { processReviewJob } from "./review-worker.ts";
@@ -666,6 +667,7 @@ export function startWorker() {
   onWikiJobQueued(poke);
   onGraphJobQueued(poke);
   onReviewJobQueued(poke);
+  onSettingsChanged(poke);
 
   // One loop for all LLM work: turn curation first (it keeps memory current
   // for the next request), then requested wiki compose, graph backfill and memory review jobs. Serial, so the

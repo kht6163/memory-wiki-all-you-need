@@ -1,5 +1,6 @@
 import { Hono, type Context } from "hono";
 import { buildContext } from "./context.ts";
+import { SettingForcedError, setWikiCompose, wikiComposeEnabled, wikiComposeState } from "./settings.ts";
 import { DebugForcedError, debugEnabled, debugLog, debugLogStream, debugState, listDebugLogs, msSince, setDebug } from "./debug-log.ts";
 import { embedStats, queryVector, type QueryInfo } from "./embeddings.ts";
 import { CATEGORIES, type Entry, type Scope } from "./db.ts";
@@ -119,7 +120,7 @@ api.use("*", async (c, next) => {
 
 api.onError((err, c) => {
   if (err instanceof HttpError) return c.json({ error: err.message }, err.status as 400);
-  if (err instanceof DebugForcedError) return c.json({ error: err.message }, 409);
+  if (err instanceof DebugForcedError || err instanceof SettingForcedError) return c.json({ error: err.message }, 409);
   console.error(err);
   return c.json({ error: (err as Error).message }, 500);
 });
@@ -149,7 +150,7 @@ function projectFromRef(ref: ProjectRef | null | undefined) {
 const roundScore = (n: number, fused: boolean) => (fused ? Math.round(n * 10000) / 10000 : Math.round(n * 100) / 100);
 
 api.get("/health", (c) =>
-  c.json({ ok: true, llm: llmEnabled() ? config.llm.model : null, debug: debugEnabled(), ...stats(), ...wikiStats(), ...graphStats(), ...reviewStats(), ...embedStats() }),
+  c.json({ ok: true, llm: llmEnabled() ? config.llm.model : null, debug: debugEnabled(), wikiCompose: wikiComposeEnabled(), ...stats(), ...wikiStats(), ...graphStats(), ...reviewStats(), ...embedStats() }),
 );
 
 /** One "context" debug line: the prompt, what was injected and why recall picked what it did. */
@@ -164,6 +165,19 @@ function logContext(type: string, project: { id: number; key: string } | null, p
     ...debug,
   });
 }
+
+// ------------------------------------------------------------------ settings
+
+/** Feature switches set from the web (ADR-0038); an env var that fixes one makes PUT answer 409. */
+const settingsView = () => ({ wikiCompose: wikiComposeState() });
+api.get("/settings", (c) => c.json(settingsView()));
+api.put("/settings", async (c) => {
+  const b = await body<{ wikiCompose?: unknown }>(c);
+  if (!b || typeof b !== "object" || !("wikiCompose" in b)) throw new HttpError(400, "nothing to change");
+  if (typeof b.wikiCompose !== "boolean") throw new HttpError(400, "wikiCompose must be true or false");
+  setWikiCompose(b.wikiCompose);
+  return c.json(settingsView());
+});
 
 // ------------------------------------------------------------------ debug mode
 
@@ -322,7 +336,7 @@ api.put("/policy", async (c) => {
 });
 
 api.get("/meta", (c) => c.json({ categories: CATEGORIES, llm: llmEnabled() ? config.llm.model : null }));
-api.get("/stats", (c) => c.json({ debug: debugEnabled(), ...stats(), ...wikiStats(), ...graphStats(), ...reviewStats(), ...embedStats() }));
+api.get("/stats", (c) => c.json({ debug: debugEnabled(), wikiCompose: wikiComposeEnabled(), ...stats(), ...wikiStats(), ...graphStats(), ...reviewStats(), ...embedStats() }));
 
 api.get("/projects", (c) => c.json(listProjects()));
 // Registered before /projects/:id so "similar" is never read as an id.

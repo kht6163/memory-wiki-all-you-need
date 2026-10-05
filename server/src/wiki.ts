@@ -3,6 +3,7 @@ import { db, now, rowToEntry, transaction, type Entry, type Source } from "./db.
 import { nearest } from "./embeddings.ts";
 import { extractTerms } from "./search.ts";
 import { findSecrets } from "./secrets.ts";
+import { wikiComposeEnabled } from "./settings.ts";
 import { HttpError, entryStates, getProject } from "./store.ts";
 
 // Wiki layer: long-form pages per project (project_id) or global (null).
@@ -638,9 +639,11 @@ export function onWikiJobQueued(fn: () => void) {
 }
 
 const scopeKey = (projectId: number | null) => projectId ?? 0;
+const COMPOSE_OFF = "wiki compose is turned off";
 
 /** Queue a compose job: the LLM organizes these turn records into pages of one wiki. */
 export function enqueueCompose(projectId: number | null, turnIds: number[], instruction?: string): WikiJob {
+  if (!wikiComposeEnabled()) throw new HttpError(409, COMPOSE_OFF);
   if (projectId != null && !getProject(projectId)) throw new HttpError(404, "project not found");
   const ids = [...new Set(turnIds.map(Number).filter((n) => Number.isInteger(n) && n > 0))].sort((x, y) => x - y);
   if (!ids.length) throw new HttpError(400, "no turns to compose");
@@ -710,7 +713,9 @@ export function getJob(id: number): WikiJob | null {
 
 /** Jobs the worker holds right now (a cancelled one stays here until its in-flight call returns). */
 export const runningWikiJobs = new Set<number>();
+/** Nothing is claimed while compose is off: queued jobs wait until it is back on (G-067). */
 export function claimDueJob(): WikiJob | null {
+  if (!wikiComposeEnabled()) return null;
   const r = db
     .prepare(`SELECT id FROM wiki_jobs WHERE status = 'pending' AND run_after <= ? ORDER BY run_after, id LIMIT 1`)
     .get(now());
@@ -721,7 +726,9 @@ export function claimDueJob(): WikiJob | null {
   return getJob(Number(r.id));
 }
 
+/** null while compose is off too, or a waiting job would make the worker loop spin (G-067). */
 export function nextJobDueInMs(): number | null {
+  if (!wikiComposeEnabled()) return null;
   const r = db.prepare(`SELECT MIN(run_after) AS t FROM wiki_jobs WHERE status = 'pending'`).get();
   if (!r?.t) return null;
   return Math.max(0, new Date(String(r.t)).getTime() - Date.now());
@@ -771,6 +778,10 @@ export function cancelJob(id: number): WikiJob {
   }
   return getJob(id)!;
 }
+/** A running job goes back to the queue (compose switched off between chunks); its saved progress stays. */
+export function pauseJob(id: number) {
+  db.prepare(`UPDATE wiki_jobs SET status = 'pending' WHERE id = ? AND status = 'processing'`).run(id);
+}
 export function isJobCancelled(id: number): boolean {
   return getJob(id)?.status === "cancelled";
 }
@@ -779,6 +790,7 @@ export function retryJob(id: number): WikiJob {
   const j = getJob(id);
   if (!j) throw new HttpError(404, "job not found");
   if (j.status === "processing") throw new HttpError(409, "job is running");
+  if (!wikiComposeEnabled()) throw new HttpError(409, COMPOSE_OFF);
   if (runningWikiJobs.has(id)) throw new HttpError(409, "job is still stopping; try again in a moment");
   db.prepare(`UPDATE wiki_jobs SET status = 'pending', error = NULL, run_after = ? WHERE id = ?`).run(now(), id);
   wakeWorker?.();

@@ -6,6 +6,7 @@ import { Hono } from "hono";
 import { api } from "./api.ts";
 import { config, embedEnabled, llmEnabled } from "./config.ts";
 import { captureConsole, debugState, pruneDebugLogs } from "./debug-log.ts";
+import { wikiComposeState } from "./settings.ts";
 import { startEmbedder } from "./embeddings.ts";
 import { startWorker } from "./worker.ts";
 
@@ -77,5 +78,5 @@ startEmbedder();
 
 serve({ fetch: app.fetch, port: config.port, hostname: config.host }, (info) => {
   console.log(`memory-wiki-all-you-need listening on http://${info.address}:${info.port}`);
-  console.log(`data: ${config.dataDir} | llm: ${llmEnabled() ? `${config.llm.model} @ ${config.llm.baseUrl}` : "disabled"} | embeddings: ${embedEnabled() ? `${config.embed.model} @ ${config.embed.baseUrl}` : "off"} | debug: ${debugState().enabled ? `on (${debugState().source}) → ${config.debug.logDir}` : "off"}`);
+  console.log(`data: ${config.dataDir} | llm: ${llmEnabled() ? `${config.llm.model} @ ${config.llm.baseUrl}` : "disabled"} | embeddings: ${embedEnabled() ? `${config.embed.model} @ ${config.embed.baseUrl}` : "off"} | wiki compose: ${wikiComposeState().enabled ? "on" : "off"} (${wikiComposeState().source}) | debug: ${debugState().enabled ? `on (${debugState().source}) → ${config.debug.logDir}` : "off"}`);
 });

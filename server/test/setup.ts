@@ -19,6 +19,9 @@ process.env.TIMEZONE = "UTC";
 // never the developer's real ~/.pi/agent (a "disabled": true there would break the suites).
 process.env.PI_CODING_AGENT_DIR = path.join(dir, "pi-agent");
 process.env.WEB_DIR = path.join(dir, "web");
+// Server switches the developer may have exported to try them (WIKI_COMPOSE=0 would 409 every compose suite).
+delete process.env.WIKI_COMPOSE;
+delete process.env.DEBUG_MODE;
 process.on("exit", () => fs.rmSync(dir, { recursive: true, force: true }));
 installFakeLlm(process.env.LLM_BASE_URL);
 // Embeddings stay off (EMBED_BASE_URL unset) so every other suite runs keyword-only;

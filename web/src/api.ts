@@ -168,9 +168,21 @@ export interface DebugInfo {
   files: { date: string; bytes: number }[];
 }
 
+/** Feature switches (ADR-0038): env-fixed ones cannot be changed from the web. */
+export interface SwitchState {
+  enabled: boolean;
+  source: "env" | "file" | "default";
+}
+export interface Settings {
+  /** The server LLM organizing turn records into wiki pages. */
+  wikiCompose: SwitchState;
+}
+
 export interface Stats {
   /** Debug mode is on (the server is writing day files). */
   debug: boolean;
+  /** Turn-record compose is on (off: compose entry points hidden, queued jobs wait). */
+  wikiCompose: boolean;
   reviewProposals: number;
   reviewRunning: number;
   entities: number;
@@ -484,6 +496,8 @@ export const api = {
   stats: () => request<Stats>("GET", "/stats"),
   debug: () => request<DebugInfo>("GET", "/debug"),
   setDebug: (enabled: boolean) => request<DebugInfo>("PUT", "/debug", { enabled }),
+  settings: () => request<Settings>("GET", "/settings"),
+  setSettings: (patch: { wikiCompose: boolean }) => request<Settings>("PUT", "/settings", patch),
   projects: () => request<Project[]>("GET", "/projects"),
   project: (id: number) => request<Project>("GET", `/projects/${id}`),
   updateProject: (id: number, patch: Partial<Pick<Project, "name" | "description">>) => request<Project>("PATCH", `/projects/${id}`, patch),

@@ -20,6 +20,16 @@ function zone(name: string): string {
   }
 }
 
+/** On/off env var: true or false when set to a known word, undefined when unset or unknown. */
+function onOff(name: string): boolean | undefined {
+  const raw = process.env[name]?.trim();
+  if (!raw) return undefined;
+  if (/^(1|true|on|yes)$/i.test(raw)) return true;
+  if (/^(0|false|off|no)$/i.test(raw)) return false;
+  console.warn(`[config] ${name}=${raw} is not on/off; ignoring it`);
+  return undefined;
+}
+
 /** A number in [min, max] (for similarity floors); anything else falls back. */
 function float(name: string, fallback: number, min: number, max: number): number {
   const raw = process.env[name]?.trim();
@@ -87,6 +97,8 @@ export const config = {
   recallBudget: int("RECALL_BUDGET_CHARS", 3000),
   recallLimit: int("RECALL_LIMIT", 6),
   wiki: {
+    /** WIKI_COMPOSE=1/0 fixes turn-record compose on or off; unset = the web switch (settings.json, ADR-0038). */
+    composeEnv: onOff("WIKI_COMPOSE"),
     /** Turn-record characters sent to the LLM per compose call; bigger jobs run in several chunks. */
     composeChunkChars: int("WIKI_COMPOSE_CHUNK_CHARS", 40_000),
     /** Most turns one compose job may take. */

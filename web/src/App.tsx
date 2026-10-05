@@ -19,6 +19,7 @@ import {
   TurnsPage,
 } from "./pages/OtherPages.tsx";
 import { DebugPage } from "./pages/DebugPage.tsx";
+import { SettingsPage } from "./pages/SettingsPage.tsx";
 import { EntitiesPage, EntityPage } from "./pages/GraphPages.tsx";
 
 const GraphPage = lazy(() => import("./pages/GraphView.tsx").then((m) => ({ default: m.GraphPage })));
@@ -159,6 +160,7 @@ export function App() {
   else if (p0 === "trash") page = <TrashPage />;
   else if (p0 === "preview") page = <PreviewPage projectId={num(route.query.get("project"))} />;
   else if (p0 === "debug") page = <DebugPage />;
+  else if (p0 === "settings") page = <SettingsPage onChange={stats.reload} />;
   else
     page = (
       <div className="page">
@@ -258,6 +260,7 @@ export function App() {
           </NavItem>
           <NavItem href="#/preview" icon="eye" label="주입 미리보기" active={p0 === "preview"} />
           <NavItem href="#/debug" icon="file-text" label="디버그 모드" active={p0 === "debug"} />
+          <NavItem href="#/settings" icon="wrench" label="설정" active={p0 === "settings"} />
           <NavItem href="#/trash" icon="trash-2" label="휴지통" active={p0 === "trash"}>
             {s && s.trash > 0 && <span className="count">{s.trash}</span>}
           </NavItem>
@@ -267,7 +270,7 @@ export function App() {
       <main className="main" inert={menuOpen}>
         <Suspense fallback={null}>{page}</Suspense>
       </main>
-      <CommandPalette open={paletteOpen} onClose={() => setPaletteOpen(false)} projects={projects.data} projectId={routeProject} newMemoryHref={newMemoryHref} />
+      <CommandPalette open={paletteOpen} onClose={() => setPaletteOpen(false)} projects={projects.data} projectId={routeProject} newMemoryHref={newMemoryHref} composeOn={s?.wikiCompose ?? true} />
       <ShortcutHelp open={helpOpen} onClose={() => setHelpOpen(false)} />
       <ToastProvider />
     </div>
