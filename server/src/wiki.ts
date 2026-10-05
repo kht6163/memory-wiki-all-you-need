@@ -183,6 +183,17 @@ function writeRevision(p: WikiPage, action: WikiRevision["action"], meta: PageMe
   return Number(res.lastInsertRowid);
 }
 
+/**
+ * How a wiki page should read (people read these pages): given to the compose
+ * LLM in full and to the pi agent in short (context POLICY, wiki_write). ADR-0037.
+ */
+export const WIKI_STYLE = `- Write for a person skimming. Open with 1-3 sentences that say what the page covers or answers (a short summary), before the first heading.
+- Structure with ## sections and ### subsections in a logical order (overview → details → reference). Keep headings short and specific: the page viewer builds the table of contents from them, so do not write a manual table of contents.
+- Use a table whenever items share fields: options, settings and env vars, comparisons, versions, commands with what they do, status lists, decisions with reasons. Use numbered lists for procedures, bullet lists for sets of items, code blocks for commands, config and paths.
+- Keep paragraphs short (at most about 4 sentences). No walls of text. Bold only a few key terms.
+- Write the current state first; history and past attempts go in a later section.
+- A page that grows past roughly 8 sections or covers several topics should be split into child pages under it.`;
+
 // ------------------------------------------------------------------- tree
 
 /** Deepest a page may sit (top level = 1). */

@@ -6,6 +6,7 @@ import { entityEntries, getEntity, linkedNeighbors, mentionedEntities } from "./
 import { entityExtraLimit, entityMentionCounts, searchEntries } from "./search.ts";
 import { entryState, getEntry, isActive, promptDescription, visibleEntries } from "./store.ts";
 import { listPages } from "./wiki.ts";
+import { treeOrder } from "./wiki-tree.ts";
 
 // Builds what the pi extension injects:
 //  - `system`: stable block for the system prompt (policy, standing
@@ -20,7 +21,8 @@ const POLICY = `You have a persistent memory shared across sessions and machines
 - Use memory_search when earlier decisions, conventions, failures or preferences may matter and they are not shown here; use session_search to find what was discussed in past sessions.
 - Memories form a graph: entities (technologies, services, tools, files) and typed links (because, depends_on, supersedes, related). Use memory_graph to see everything known about an entity, or why a memory exists and what it depends on. "(graph: …)" in recall shows how a memory was reached from memory #A: "depends_on #A" / "because #A" = #A depends on / exists because of this memory; "needs #A" / "follows from #A" = this memory depends on / exists because of #A; "replaces #A" = this memory replaced #A; an entity name = it mentions an entity named in the request; a trailing 2-hop note = reached through one more linked memory.
 - Durable learnings are saved for you after each turn. Call memory_add / memory_replace / memory_remove only when the user explicitly asks you to remember, update or forget something.
-- <wiki-pages> lists the project wiki: long-form documents (architecture, decisions, procedures, troubleshooting) kept separately from memory. Use wiki_read to open a page and wiki_search to search pages when you need the fuller picture. Use wiki_write only when the user asks you to document something in the wiki; read the page first when updating it.`;
+- <wiki-pages> lists the project wiki: long-form documents (architecture, decisions, procedures, troubleshooting) kept separately from memory. Pages form a tree: an indented page sits under the page above it. Use wiki_read to open a page and wiki_search to search pages when you need the fuller picture. Use wiki_write only when the user asks you to document something in the wiki; read the page first when updating it.
+- When you write a wiki page: give a new page a parent (wiki_write "parent") when it belongs under an existing page, e.g. one decision under the decisions page; leave existing pages where they are unless asked. Write for people: a short summary first, ## sections and ### subsections (they become the page's table of contents), tables for anything with repeated fields (settings, comparisons, versions, commands), numbered steps for procedures, short paragraphs, no walls of text.`;
 
 function fmtEntry(e: Entry): string {
   const tag = e.category === "fact" ? "" : ` (${e.category})`;
@@ -161,8 +163,9 @@ export function buildContextWith(project: Project | null, prompt: string, vector
   let wikiSize = 0;
   const wikiGroups: [string, number | null][] = project ? [["project", project.id], ["global", null]] : [["global", null]];
   for (const [label, pid] of wikiGroups) {
-    for (const p of listPages(pid)) {
-      const line = `- ${label === "global" && project ? "global:" : ""}${p.slug} — ${p.title}`;
+    // Tree order, two spaces per level: the agent sees which page sits under which.
+    for (const { page: p, depth } of treeOrder(listPages(pid))) {
+      const line = `${"  ".repeat(depth)}- ${label === "global" && project ? "global:" : ""}${p.slug} — ${p.title}`;
       if (wikiSize + line.length > config.wiki.indexBudget) break;
       wikiLines.push(line);
       wikiSize += line.length + 1;

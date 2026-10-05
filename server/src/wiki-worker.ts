@@ -20,6 +20,7 @@ import {
   isJobCancelled,
   runningWikiJobs,
   movePage,
+  WIKI_STYLE,
 } from "./wiki.ts";
 
 // Compose job: the LLM reads selected turn records (the real conversations and
@@ -46,11 +47,12 @@ Page set:
 
 Writing rules:
 - Write in the language the user speaks in the transcripts (Korean if they speak Korean). Keep technical identifiers, commands and paths as-is.
-- Markdown with ## headings, short paragraphs, lists, tables and code blocks where they help. Explain the "why".
+- Markdown. Explain the "why". Make every page easy for a person to read:
+${WIKI_STYLE}
 - Do not start the body with a "# Title" heading — the title is shown separately.
 - State only what the transcripts support. Do not invent. When a transcript shows something was later changed or reverted, write the final state.
 - Link related pages with [[slug]] or [[slug|label]]. Only link slugs that exist or that you create in this response.
-- When you update a page you are given its CURRENT BODY. Return the full new body. Preserve existing structure and wording, especially text a human wrote, unless the transcripts show it is now wrong. Make the smallest change that integrates the new knowledge. Keep any existing [#123] references as they are; do not add new ones.
+- When you update a page you are given its CURRENT BODY. Return the full new body. Preserve existing wording, especially text a human wrote, unless the transcripts show it is now wrong. Integrate the new knowledge where it belongs. If the page is hard to read (a wall of text, missing headings, data that belongs in a table), you may restructure it into sections, lists and tables while keeping every fact. Keep any existing [#123] references as they are; do not add new ones.
 - Do not touch pages marked locked. Do not update a page whose current body you were not shown (create a new page or leave it).
 - No secrets, tokens or passwords.
 - An INSTRUCTION from the person who started this job takes priority on what to focus on.

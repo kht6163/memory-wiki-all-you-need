@@ -507,7 +507,7 @@ export default function memoryAllYouNeed(pi: ExtensionAPI) {
     name: "wiki_write",
     label: "Wiki write",
     description:
-      "Create or update a wiki page. Only when the user asks to document something in the wiki. Updating: read the page with wiki_read first, then send the full new body (mode replace) or just a new section (mode append). Markdown with ## headings; no '# Title' line; link pages with [[slug]].",
+      "Create or update a wiki page. Only when the user asks to document something in the wiki. Updating: read the page with wiki_read first, then send the full new body (mode replace) or just a new section (mode append). Pages form a tree: give a new page a \"parent\" when it belongs under an existing page. Write for people: a 1-3 sentence summary first; ## sections and ### subsections (they become the table of contents; no manual TOC); tables for anything with repeated fields (settings, comparisons, versions, commands); numbered steps for procedures; short paragraphs, no walls of text; no '# Title' line; link pages with [[slug]].",
     parameters: Type.Object({
       slug: Type.String({ description: "Page slug, e.g. architecture, deploy, troubleshooting" }),
       title: Type.Optional(Type.String({ description: "Page title (required when creating)" })),

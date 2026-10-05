@@ -5,7 +5,7 @@ import assert from "node:assert/strict";
 import { test } from "node:test";
 
 const { call, db, llmDefault, llmReset, ok, project, runQueueOnce, turn } = await import("./helpers.ts");
-const { suggestTree } = await import("../src/wiki-tree.ts");
+const { suggestTree, treeOrder } = await import("../src/wiki-tree.ts");
 const { MAX_TREE_DEPTH } = await import("../src/wiki.ts");
 const tree = await import("../../web/src/wiki-tree.ts");
 
@@ -310,4 +310,47 @@ test("ADR-0036: a suggestion that apply would refuse for depth is not offered", 
   assert.deepEqual(suggestTree(pages, new Map()), []);
   pages.pop();
   assert.deepEqual(suggestTree(pages, new Map()).map((s) => s.page.slug), ["x-2"]);
+});
+
+test("ADR-0037: the agent sees the wiki as a tree, and is told to place pages and write for people", async () => {
+  const p = await freshProject();
+  const top = await page({ project_id: p.id, slug: "decisions", title: "Decisions", body: "d" });
+  const mid = await page({ project_id: p.id, slug: "adr-1", title: "ADR 1", body: "a", parent_id: top.id });
+  await page({ project_id: p.id, slug: "adr-1-notes", title: "ADR 1 notes", body: "n", parent_id: mid.id });
+  await page({ project_id: p.id, slug: "zeta", title: "Zeta", body: "z" });
+  const r = await ok<Any>("POST", "/context", { project: { key: p.key, name: p.name }, prompt: "" });
+  const block = r.system.split("<wiki-pages>\n")[1].split("\n</wiki-pages>")[0];
+  assert.match(block, /^- decisions — Decisions\n  - adr-1 — ADR 1\n    - adr-1-notes — ADR 1 notes\n/m, "children indented under their parent");
+  assert.match(block, /^- zeta — Zeta$/m);
+  assert.match(r.system, /Pages form a tree: an indented page sits under the page above it/);
+  assert.match(r.system, /give a new page a parent/);
+  assert.match(r.system, /tables for anything with repeated fields/);
+});
+
+test("ADR-0037: the compose prompt carries the readability rules and allows restructuring a hard-to-read page", async () => {
+  const p = await freshProject();
+  let system = "";
+  llmReset();
+  llmDefault((c: { system: string }) => {
+    if (!c.system.includes("You maintain a wiki")) return { ops: [], note: "nothing" };
+    system = c.system;
+    return { pages: [] };
+  });
+  const t = await turn([{ role: "user", text: "document how we deploy this service" }, { role: "assistant", text: "ok" }], { key: p.key, name: p.name }, "s-style");
+  await runQueueOnce();
+  await ok("POST", "/wiki/compose", { project_id: p.id, turn_ids: [t.id] });
+  await runQueueOnce();
+  assert.match(system, /builds the table of contents from them, so do not write a manual table of contents/);
+  assert.match(system, /Use a table whenever items share fields/);
+  assert.match(system, /you may restructure it into sections, lists and tables while keeping every fact/);
+  llmReset();
+});
+
+test("ADR-0037: treeOrder lists every page once, children after their parent, cycles and missing parents at the top", () => {
+  const pg = (id: number, parent_id: number | null) => ({ id, parent_id, slug: `s${id}`, title: `t${id}` });
+  const order = treeOrder([pg(1, null), pg(2, 1), pg(3, 99), pg(4, 5), pg(5, 4), pg(6, 2)]);
+  assert.deepEqual(
+    order.map((o) => [o.page.id, o.depth]),
+    [[1, 0], [2, 1], [6, 2], [3, 0], [5, 0], [4, 1]],
+  );
 });

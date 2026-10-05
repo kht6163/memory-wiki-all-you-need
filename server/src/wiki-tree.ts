@@ -87,6 +87,34 @@ export function suggestTree(pages: TreePage[], links: Map<number, Set<string>>):
   return out;
 }
 
+/**
+ * Pages in tree order with their depth: each page followed by the pages under
+ * it, siblings in the given order. A parent that is not in `pages` (trash,
+ * another wiki) or a cycle puts the page at the top level, so every page
+ * appears exactly once (same rule as the web's buildTree).
+ */
+export function treeOrder<P extends TreePage>(pages: P[]): { page: P; depth: number }[] {
+  const byId = new Map(pages.map((p) => [p.id, p]));
+  const up = new Map<number, number>();
+  const hangsUnder = (from: number, target: number) => {
+    for (let at: number | undefined = from, n = 0; at !== undefined && n <= pages.length; at = up.get(at), n++) if (at === target) return true;
+    return false;
+  };
+  for (const p of pages) if (p.parent_id != null && byId.has(p.parent_id) && !hangsUnder(p.parent_id, p.id)) up.set(p.id, p.parent_id);
+  const kids = new Map<number, P[]>();
+  for (const p of pages) {
+    const at = up.get(p.id);
+    if (at !== undefined) kids.set(at, [...(kids.get(at) ?? []), p]);
+  }
+  const out: { page: P; depth: number }[] = [];
+  const walk = (p: P, depth: number) => {
+    out.push({ page: p, depth });
+    for (const k of kids.get(p.id) ?? []) walk(k, depth + 1);
+  };
+  for (const p of pages) if (!up.has(p.id)) walk(p, 0);
+  return out;
+}
+
 /** Suggestions for one wiki (project id, or null for the global wiki), from the live pages and their links. */
 export function suggestedTree(projectId: number | null): TreeSuggestion[] {
   const pages = listPages(projectId);
