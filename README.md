@@ -104,6 +104,8 @@ flowchart LR
 
 ### 1. Run the server
 
+The server image is on [Docker Hub](https://hub.docker.com/r/kht6163/memory-wiki-all-you-need) for `linux/amd64` and `linux/arm64`. Tags: `X.Y.Z` (exact release), `X.Y` (latest patch of that minor, e.g. `0.8`), `latest`.
+
 Docker Compose example (put `LLM_API_KEY` in `.env`):
 
 ```yaml
@@ -124,12 +126,30 @@ services:
 
 The container runs as user `node` (uid 1000), so `./data` must be writable by it: `mkdir -p data && sudo chown 1000:1000 data`.
 
+Or with plain `docker run`:
+
+```sh
+mkdir -p data && sudo chown 1000:1000 data
+docker run -d --name memory-wiki --restart unless-stopped \
+  -p 127.0.0.1:8765:8765 -v "$PWD/data:/data" \
+  -e LLM_BASE_URL=http://<llm-host>:8317/v1 -e LLM_API_KEY=<key> -e TIMEZONE=Asia/Seoul \
+  kht6163/memory-wiki-all-you-need:0.8
+```
+
 To build from source instead, replace `image:` with `build: ./memory-wiki-all-you-need` (a clone of this repository).
 
 > [!WARNING]
 > There is no login. Bind only to `127.0.0.1` or a network you trust.
 
-Open `http://<server>:8765` for the web UI. Schema migrations run on startup; a newer DB is never opened by an older server, so back up before upgrading.
+Open `http://<server>:8765` for the web UI.
+
+**Upgrading** — back up `data/` first (schema migrations run on startup, and an older server refuses a newer DB, so a backup is your way back), then:
+
+```sh
+docker compose pull && docker compose up -d
+```
+
+Versions are listed under [tags](https://github.com/kht6163/memory-wiki-all-you-need/tags). Pin `X.Y.Z` if you want to choose when to upgrade.
 
 ### 2. Install the pi extension (on each machine)
 
@@ -221,6 +241,8 @@ npm run build        # web UI
 ```
 
 Requires Node 24 (`node:sqlite`, type stripping; no build step for the server). [GitHub Actions](.github/workflows/ci.yml) runs `npm ci` → typecheck → test → build on every push and PR, plus a Docker image build and headless-Chrome web smoke test.
+
+**Releases** — server, web UI and extension share one version number. Pushing a tag `vX.Y.Z` that matches the `package.json` versions makes [GitHub Actions](.github/workflows/release.yml) publish the server image to Docker Hub (amd64 + arm64). The extension is published to [npm](https://www.npmjs.com/package/pi-memory-wiki-all-you-need) with the same version.
 
 ## License
 

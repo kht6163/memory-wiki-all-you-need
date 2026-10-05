@@ -104,6 +104,8 @@ flowchart LR
 
 ### 1. 서버 실행
 
+서버 이미지는 [도커 허브](https://hub.docker.com/r/kht6163/memory-wiki-all-you-need)에 `linux/amd64`·`linux/arm64`로 있습니다. 태그는 `X.Y.Z`(그 버전), `X.Y`(그 minor의 최신 패치, 예: `0.8`), `latest`입니다.
+
 Docker Compose 예시입니다(`LLM_API_KEY`는 `.env`에 둡니다).
 
 ```yaml
@@ -124,12 +126,30 @@ services:
 
 컨테이너는 `node` 사용자(uid 1000)로 돌기 때문에 `./data`에 쓸 수 있어야 합니다: `mkdir -p data && sudo chown 1000:1000 data`.
 
+`docker run`으로 바로 띄울 수도 있습니다.
+
+```sh
+mkdir -p data && sudo chown 1000:1000 data
+docker run -d --name memory-wiki --restart unless-stopped \
+  -p 127.0.0.1:8765:8765 -v "$PWD/data:/data" \
+  -e LLM_BASE_URL=http://<llm-host>:8317/v1 -e LLM_API_KEY=<키> -e TIMEZONE=Asia/Seoul \
+  kht6163/memory-wiki-all-you-need:0.8
+```
+
 소스에서 직접 빌드하려면 `image:` 대신 `build: ./memory-wiki-all-you-need`(이 저장소를 받은 폴더)를 쓰세요.
 
 > [!WARNING]
 > 로그인 기능이 없습니다. `127.0.0.1`이나 신뢰하는 네트워크에만 바인딩하세요.
 
-웹 UI는 `http://<서버 주소>:8765`에서 열립니다. DB 스키마는 기동할 때 자동으로 올라가고, 더 새 버전의 DB는 열지 않으므로 업데이트 전에 백업해 두면 되돌릴 수 있습니다.
+웹 UI는 `http://<서버 주소>:8765`에서 열립니다.
+
+**업데이트** — 먼저 `data/`를 백업하세요. DB 스키마는 기동할 때 자동으로 올라가고 옛 서버는 더 새 DB를 열지 않으므로, 되돌릴 방법은 백업뿐입니다. 그다음:
+
+```sh
+docker compose pull && docker compose up -d
+```
+
+버전 목록은 [GitHub 태그](https://github.com/kht6163/memory-wiki-all-you-need/tags)에 있습니다. 올릴 시점을 직접 정하고 싶으면 `X.Y.Z`로 고정하세요.
 
 ### 2. pi 확장 설치 (각 PC)
 
@@ -221,6 +241,8 @@ npm run build        # 웹 UI
 ```
 
 Node 24가 필요합니다(`node:sqlite`, 타입 스트리핑 — 서버는 빌드 단계가 없습니다). [GitHub Actions](.github/workflows/ci.yml)가 push·PR마다 `npm ci` → typecheck → test → build를 돌리고, Docker 이미지 빌드와 헤드리스 Chrome 웹 스모크 테스트도 실행합니다.
+
+**출시** — 서버·웹 UI·확장은 같은 버전 번호를 씁니다. `package.json` 버전과 같은 `vX.Y.Z` 태그를 푸시하면 [GitHub Actions](.github/workflows/release.yml)가 서버 이미지를 도커 허브에 올립니다(amd64 + arm64). 확장은 같은 버전으로 [npm](https://www.npmjs.com/package/pi-memory-wiki-all-you-need)에 올립니다.
 
 ## 라이선스
 
