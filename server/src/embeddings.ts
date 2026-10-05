@@ -1,6 +1,7 @@
 import crypto from "node:crypto";
 import { config, embedEnabled } from "./config.ts";
 import { db, rowToEntry, type Entry } from "./db.ts";
+import { debugLog, msSince } from "./debug-log.ts";
 
 // Semantic search (ADR-0034): one vector per memory and per wiki page from an
 // optional OpenAI-compatible /embeddings endpoint, compared in JS (no native
@@ -171,29 +172,55 @@ let queryWarned = false;
  * After a failure the endpoint is skipped for a while (5 s after a timeout,
  * 30 s after an error) so a dead endpoint does not cost every request the timeout.
  */
-export async function queryVector(query: string, opts: { background?: boolean } = {}): Promise<Float32Array | null> {
-  if (!embedEnabled()) return null;
+/** What happened to one query embedding (filled when passed; for the debug log). */
+export interface QueryInfo {
+  result?: "off" | "empty" | "cache" | "backoff" | "ok" | "timeout" | "error";
+  ms?: number;
+  error?: string;
+}
+
+export async function queryVector(query: string, opts: { background?: boolean; info?: QueryInfo } = {}): Promise<Float32Array | null> {
+  const info = opts.info ?? {};
+  if (!embedEnabled()) {
+    info.result = "off";
+    return null;
+  }
   // Background work (turn curation) may wait and embed more text; the request path may not.
   const text = query.trim().slice(0, opts.background ? config.embed.docMaxChars : config.embed.queryMaxChars);
-  if (!text) return null;
+  if (!text) {
+    info.result = "empty";
+    return null;
+  }
   const hit = queryCache.get(text);
   if (hit) {
     queryCache.delete(text);
     queryCache.set(text, hit);
+    info.result = "cache";
     return hit;
   }
   const lane = opts.background ? "background" : "request";
-  if (Date.now() < downUntil[lane]) return null;
+  if (Date.now() < downUntil[lane]) {
+    info.result = "backoff";
+    return null;
+  }
+  const t0 = performance.now();
   try {
     const [v] = await embedTexts([config.embed.queryPrefix + text], opts.background ? Math.min(config.embed.timeoutMs, 15_000) : config.embed.queryTimeoutMs);
     queryCache.set(text, v);
     if (queryCache.size > QUERY_CACHE_MAX) queryCache.delete(queryCache.keys().next().value!);
     if (queryWarned) console.log("[embed] query embeddings are back");
     queryWarned = false;
+    info.result = "ok";
+    info.ms = msSince(t0);
+    debugLog("embed.query", { lane, chars: text.length, ms: info.ms });
     return v;
   } catch (err) {
     const timeout = (err as Error).name === "TimeoutError" || (err as Error).name === "AbortError";
     downUntil[lane] = Date.now() + (timeout ? 5_000 : 30_000);
+    info.result = timeout ? "timeout" : "error";
+    info.ms = msSince(t0);
+    info.error = (err as Error).message;
+    debugLog("embed.query", { lane, chars: text.length, ms: info.ms, result: info.result, error: info.error });
     if (!queryWarned) console.warn(`[embed] query embedding failed, keyword search only for now: ${(err as Error).message}`);
     queryWarned = true;
     return null;
@@ -272,11 +299,14 @@ export async function indexOnce(): Promise<number> {
   for (const kind of ["entry", "page"] as EmbedKind[]) {
     const docs = staleDocs(kind).slice(0, config.embed.batch);
     if (!docs.length) continue;
+    const t0 = performance.now();
     try {
       const vs = await embedTexts(docs.map((d) => d.text), config.embed.timeoutMs);
       docs.forEach((d, i) => save(kind, d, vs[i]));
+      debugLog("embed.index", { kind, ids: docs.map((d) => d.id), ms: msSince(t0) });
       return docs.length;
     } catch (err) {
+      debugLog("embed.index", { kind, ids: docs.map((d) => d.id), ms: msSince(t0), error: (err as Error).message });
       if (!isHttpError(err) || docs.length === 1) throw err;
     }
     const failed: { doc: Doc; err: Error }[] = [];
@@ -294,6 +324,7 @@ export async function indexOnce(): Promise<number> {
     if (!ok) throw failed[0].err;
     for (const { doc, err } of failed) {
       skipped.add(`${kind}:${doc.id}:${doc.hash}`);
+      debugLog("embed.skip", { kind, id: doc.id, error: err.message });
       console.warn(`[embed] ${kind} #${doc.id} refused, skipped until it changes: ${err.message}`);
     }
     return docs.length;

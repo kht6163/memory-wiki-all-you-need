@@ -82,6 +82,7 @@ flowchart LR
 - **Secrets** — secret-looking content is refused on save and masked in turn records.
 - **Human-only** — standing instructions and curation guidelines can only be written by humans.
 - **Fail-soft** — if the server is down or slow, pi keeps going after a short timeout (`MEMORY_TIMEOUT_MS`), reusing the last memory block it received.
+- **Debug mode** — turn it on from the web UI (or `DEBUG_MODE=1`) to collect one JSON-lines file per day under `data/logs/`: requests, why recall picked each memory (keyword score, similarity, graph route), searches, LLM prompts and replies, curation results and embedding calls. Secret-looking strings are masked; files are kept 14 days, at most 200 MB a day.
 - **Cancelable jobs** — wiki compose, graph backfill and review jobs can be cancelled and resumed.
 
 ## Screenshots
@@ -105,14 +106,14 @@ flowchart LR
 
 ### 1. Run the server
 
-The server image is on [Docker Hub](https://hub.docker.com/r/kht6163/memory-wiki-all-you-need) for `linux/amd64` and `linux/arm64`. Tags: `X.Y.Z` (exact release), `X.Y` (latest patch of that minor, e.g. `0.11`), `latest`.
+The server image is on [Docker Hub](https://hub.docker.com/r/kht6163/memory-wiki-all-you-need) for `linux/amd64` and `linux/arm64`. Tags: `X.Y.Z` (exact release), `X.Y` (latest patch of that minor, e.g. `0.12`), `latest`.
 
 Docker Compose example (put `LLM_API_KEY` in `.env`):
 
 ```yaml
 services:
   memory:
-    image: kht6163/memory-wiki-all-you-need:0.11   # amd64 / arm64
+    image: kht6163/memory-wiki-all-you-need:0.12   # amd64 / arm64
     restart: unless-stopped
     environment:
       LLM_BASE_URL: http://<llm-host>:8317/v1
@@ -134,7 +135,7 @@ mkdir -p data && sudo chown 1000:1000 data
 docker run -d --name memory-wiki --restart unless-stopped \
   -p 127.0.0.1:8765:8765 -v "$PWD/data:/data" \
   -e LLM_BASE_URL=http://<llm-host>:8317/v1 -e LLM_API_KEY=<key> -e TIMEZONE=Asia/Seoul \
-  kht6163/memory-wiki-all-you-need:0.11
+  kht6163/memory-wiki-all-you-need:0.12
 ```
 
 **Optional: semantic search.** Add an embedding service to the same compose file. bge-m3 is multilingual and runs on CPU (about 55 ms per short query; the model, about 2.3 GB, is downloaded on first start):
@@ -209,6 +210,8 @@ Both save the URL to `~/.pi/agent/extensions/memory-wiki-all-you-need.json` (or 
 | `EMBED_QUERY_TIMEOUT_MS` | 700 | Per-request query embedding; slower → keyword-only for that request |
 | `EMBED_RECALL_MIN_SIMILARITY` / `EMBED_SEARCH_MIN_SIMILARITY` | 0.55 / 0.45 | Cosine floor for meaning-only matches in recall / search (tuned for bge-m3) |
 | `EMBED_QUERY_PREFIX` / `EMBED_DOC_PREFIX` | – | For models that need prefixes (e5: `query: ` / `passage: `) |
+| `DEBUG_MODE` | off | `1` keeps debug mode on (otherwise the switch on the web page `#/debug`) |
+| `DEBUG_LOG_KEEP_DAYS` / `DEBUG_LOG_MAX_MB` | 14 / 200 | Debug log retention and per-day size cap |
 | `CONTEXT_BUDGET_CHARS` | 8000 | System-prompt memory block budget |
 | `RECALL_BUDGET_CHARS` / `RECALL_LIMIT` | 3000 / 6 | Per-prompt recall |
 | `WIKI_COMPOSE_CHUNK_CHARS` | 40000 | Turn-record chars per compose LLM call |

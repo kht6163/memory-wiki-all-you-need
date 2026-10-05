@@ -68,6 +68,10 @@ export interface SearchOptions {
 export interface SearchHit {
   entry: Entry;
   score: number;
+  /** Keyword score before fusion and boosts (absent = no word matched). For the debug log. */
+  keyword?: number;
+  /** Cosine to the query vector (absent = not a vector candidate). For the debug log. */
+  similarity?: number;
 }
 
 /** Reciprocal rank fusion constant: smaller = the top of each list counts more. */
@@ -185,7 +189,9 @@ export function searchEntries(query: string, opts: SearchOptions = {}): SearchHi
     // Then prefer project-specific and pinned entries.
     if (entry.scope === "project") score *= 1.15;
     if (entry.pinned) score *= 1.1;
-    hits.push({ entry, score });
+    const kw = keyword.get(id);
+    const sim = similar.get(id);
+    hits.push({ entry, score, ...(kw === undefined ? {} : { keyword: kw }), ...(sim === undefined ? {} : { similarity: sim }) });
   }
   if (opts.boostEntities?.length && hits.length)
     applyEntityBoost(hits, opts.boostEntities, opts.allProjects ? undefined : (opts.projectId ?? -1));

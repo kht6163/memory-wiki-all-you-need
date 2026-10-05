@@ -1,6 +1,7 @@
-import { config, llmEnabled } from "./config.ts";
+import { config, llmEnabled, localDate } from "./config.ts";
 import { db, rowToEntry, type Entry, type Project, type Turn, type TurnResult } from "./db.ts";
 import { chatJson, LlmJsonError, type ChatMessage } from "./llm.ts";
+import { debugLog } from "./debug-log.ts";
 import { queryVector } from "./embeddings.ts";
 import { searchEntries } from "./search.ts";
 import {
@@ -207,12 +208,8 @@ function buildUserPrompt(turn: Turn, project: Project | null, candidates: Entry[
   ].join("\n");
 }
 
-/** YYYY-MM-DD of an ISO timestamp in the configured time zone. */
-export function localDate(iso: string): string {
-  const d = new Date(iso);
-  if (Number.isNaN(d.getTime())) return iso.slice(0, 10);
-  return new Intl.DateTimeFormat("en-CA", { timeZone: config.timezone, year: "numeric", month: "2-digit", day: "2-digit" }).format(d);
-}
+// localDate moved to config.ts (the debug log needs it without importing the worker); re-exported for existing callers.
+export { localDate };
 
 type Op = Record<string, unknown>;
 
@@ -573,12 +570,12 @@ export async function processTurn(turn: Turn) {
   ];
   let data: unknown;
   try {
-    ({ data } = await chatJson(messages));
+    ({ data } = await chatJson(messages, "curation"));
   } catch (err) {
     // A malformed reply is usually a one-off: ask once more before failing the turn (bounded).
     if (!(err instanceof LlmJsonError)) throw err;
     console.warn(`[worker] turn ${turn.id}: unreadable LLM reply, retrying once: ${err.message.slice(0, 120)}`);
-    ({ data } = await chatJson([...messages, { role: "user", content: "Your previous reply was not valid JSON. Reply with ONLY the JSON object." }]));
+    ({ data } = await chatJson([...messages, { role: "user", content: "Your previous reply was not valid JSON. Reply with ONLY the JSON object." }], "curation"));
   }
   const obj = (data ?? {}) as { ops?: unknown; note?: unknown };
   const ops = Array.isArray(obj.ops) ? (obj.ops as Op[]) : [];
@@ -598,6 +595,17 @@ export async function processTurn(turn: Turn) {
     ...(inferred.length ? { inferred } : {}),
     note: typeof obj.note === "string" ? obj.note : undefined,
     model: config.llm.model,
+    ms: Date.now() - started,
+  });
+  debugLog("curation", {
+    turn: turn.id,
+    project: project?.key ?? null,
+    candidates: candidates.map((c) => c.id),
+    ops,
+    applied,
+    skipped,
+    inferred,
+    note: typeof obj.note === "string" ? obj.note : undefined,
     ms: Date.now() - started,
   });
   console.log(`[worker] turn ${turn.id} done: ${applied.length} change(s) in ${Date.now() - started}ms`);

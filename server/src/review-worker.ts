@@ -141,7 +141,7 @@ async function runReview(job: ReviewJob, between: () => Promise<void>) {
               ...(policy ? ["", policy] : []),
             ].join("\n"),
           },
-        ]);
+        ], "review");
         // Cancelled while the LLM was answering: keep nothing from this batch.
         if (isReviewJobCancelled(job.id)) return;
         const raw = (data as { proposals?: unknown })?.proposals;

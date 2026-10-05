@@ -82,6 +82,7 @@ flowchart LR
 - **비밀값** — 비밀값처럼 보이는 내용은 저장을 거부하고, 턴 기록에서는 가립니다.
 - **사람 전용** — 고정 지시와 정리 방침은 사람만 쓰고 고칠 수 있습니다.
 - **fail-soft** — 서버가 꺼져 있거나 느려도 짧은 타임아웃(`MEMORY_TIMEOUT_MS`) 뒤 pi 턴이 그대로 진행되고, 마지막으로 받은 메모리 블록을 다시 씁니다.
+- **디버그 모드** — 웹(또는 `DEBUG_MODE=1`)에서 켜면 `data/logs/`에 날짜별 JSON-lines 파일로 모읍니다. 요청, 회상이 메모리를 고른 이유(키워드 점수·유사도·그래프 경로), 검색, LLM 프롬프트와 응답, 턴 정리 결과, 임베딩 호출이 남습니다. 비밀값 형태는 가리고, 14일 보관·하루 최대 200MB입니다.
 - **작업 취소** — 위키 정리·그래프 백필·점검 작업은 취소했다가 이어서 다시 실행할 수 있습니다.
 
 ## 스크린샷
@@ -105,14 +106,14 @@ flowchart LR
 
 ### 1. 서버 실행
 
-서버 이미지는 [도커 허브](https://hub.docker.com/r/kht6163/memory-wiki-all-you-need)에 `linux/amd64`·`linux/arm64`로 있습니다. 태그는 `X.Y.Z`(그 버전), `X.Y`(그 minor의 최신 패치, 예: `0.11`), `latest`입니다.
+서버 이미지는 [도커 허브](https://hub.docker.com/r/kht6163/memory-wiki-all-you-need)에 `linux/amd64`·`linux/arm64`로 있습니다. 태그는 `X.Y.Z`(그 버전), `X.Y`(그 minor의 최신 패치, 예: `0.12`), `latest`입니다.
 
 Docker Compose 예시입니다(`LLM_API_KEY`는 `.env`에 둡니다).
 
 ```yaml
 services:
   memory:
-    image: kht6163/memory-wiki-all-you-need:0.11   # amd64 / arm64
+    image: kht6163/memory-wiki-all-you-need:0.12   # amd64 / arm64
     restart: unless-stopped
     environment:
       LLM_BASE_URL: http://<llm-host>:8317/v1
@@ -134,7 +135,7 @@ mkdir -p data && sudo chown 1000:1000 data
 docker run -d --name memory-wiki --restart unless-stopped \
   -p 127.0.0.1:8765:8765 -v "$PWD/data:/data" \
   -e LLM_BASE_URL=http://<llm-host>:8317/v1 -e LLM_API_KEY=<키> -e TIMEZONE=Asia/Seoul \
-  kht6163/memory-wiki-all-you-need:0.11
+  kht6163/memory-wiki-all-you-need:0.12
 ```
 
 **선택: 의미 검색.** 같은 compose 파일에 임베딩 서비스를 더합니다. bge-m3는 다국어 모델이고 CPU로 돌아갑니다(짧은 질의 하나에 약 55ms, 모델 약 2.3GB는 첫 기동 때 내려받음).
@@ -209,6 +210,8 @@ pi install npm:pi-memory-wiki-all-you-need
 | `EMBED_QUERY_TIMEOUT_MS` | 700 | 요청마다 하는 질의 임베딩 제한 시간, 넘으면 그 요청은 키워드만 |
 | `EMBED_RECALL_MIN_SIMILARITY` / `EMBED_SEARCH_MIN_SIMILARITY` | 0.55 / 0.45 | 뜻으로만 찾은 메모리의 cosine 하한(회상 / 검색, bge-m3 기준) |
 | `EMBED_QUERY_PREFIX` / `EMBED_DOC_PREFIX` | – | 접두어가 필요한 모델용(e5: `query: ` / `passage: `) |
+| `DEBUG_MODE` | 끔 | `1`이면 디버그 모드를 항상 켬(아니면 웹 `#/debug`의 스위치) |
+| `DEBUG_LOG_KEEP_DAYS` / `DEBUG_LOG_MAX_MB` | 14 / 200 | 디버그 기록 보관 일수, 하루 파일 상한 |
 | `CONTEXT_BUDGET_CHARS` | 8000 | 시스템 프롬프트 메모리 블록 예산 |
 | `RECALL_BUDGET_CHARS` / `RECALL_LIMIT` | 3000 / 6 | 프롬프트별 회상 |
 | `WIKI_COMPOSE_CHUNK_CHARS` | 40000 | 위키 정리 LLM 호출 1회에 넣는 턴 기록 글자 수 |

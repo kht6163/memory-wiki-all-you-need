@@ -418,6 +418,8 @@ export interface WikiHit {
   page: WikiPage;
   score: number;
   snippet: string;
+  /** Cosine to the query vector when it was a vector candidate (debug log). */
+  similarity?: number;
 }
 
 /** Same fusion as searchEntries (ADR-0034); `vector` = the query's embedding or null (keyword only). */
@@ -481,12 +483,16 @@ export function searchWiki(
     keyword.set(page.id, { score: score * (0.5 + matched / terms.length), first });
   }
   const similar: number[] = [];
+  const sims = new Map<number, number>();
   if (vector) {
     const rows = db
       .prepare(`SELECT w.id, w.updated_at FROM wiki_pages w WHERE ${where.join(" AND ")}`)
       .all(...args)
       .map((r) => ({ id: Number(r.id), updated_at: String(r.updated_at) }));
-    for (const n of nearest("page", vector, rows, opts.minSimilarity ?? config.embed.searchMinSimilarity, Math.max(limit * 3, 30))) similar.push(n.id);
+    for (const n of nearest("page", vector, rows, opts.minSimilarity ?? config.embed.searchMinSimilarity, Math.max(limit * 3, 30))) {
+      similar.push(n.id);
+      sims.set(n.id, n.sim);
+    }
     const missing = similar.filter((id) => !found.has(id));
     if (missing.length)
       for (const r of db.prepare(`SELECT * FROM wiki_pages WHERE id IN (${missing.map(() => "?").join(",")})`).all(...missing)) found.set(Number(r.id), toPage(r));
@@ -509,7 +515,8 @@ export function searchWiki(
     const first = kw?.first ?? -1;
     const start = Math.max(0, first - 100);
     const snippet = first < 0 ? page.body.slice(0, 240) : `${start > 0 ? "…" : ""}${page.body.slice(start, start + 320)}`;
-    hits.push({ page, score, snippet: snippet.replace(/\s+/g, " ") });
+    const sim = sims.get(id);
+    hits.push({ page, score, snippet: snippet.replace(/\s+/g, " "), ...(sim === undefined ? {} : { similarity: sim }) });
   }
   hits.sort((a, b) => b.score - a.score);
   return hits.slice(0, limit);

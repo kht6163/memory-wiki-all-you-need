@@ -68,6 +68,19 @@ export const config = {
     queryPrefix: process.env.EMBED_QUERY_PREFIX ?? "",
     docPrefix: process.env.EMBED_DOC_PREFIX ?? "",
   },
+  /**
+   * Debug mode (ADR-0035): JSON lines per local day under logDir. DEBUG_MODE=1
+   * forces it on; otherwise the switch in <DATA_DIR>/debug.json (web / PUT /api/debug).
+   */
+  debug: {
+    env: /^(1|true|on|yes)$/i.test(process.env.DEBUG_MODE?.trim() ?? ""),
+    logDir: process.env.DEBUG_LOG_DIR ?? path.join(process.env.DATA_DIR ?? path.resolve("data"), "logs"),
+    keepDays: int("DEBUG_LOG_KEEP_DAYS", 14),
+    /** A day's file stops growing at this size (one "truncated" line marks it). */
+    maxBytesPerDay: int("DEBUG_LOG_MAX_MB", 200) * 1024 * 1024,
+    /** Any single string in an event is cut to this many characters. */
+    maxStringChars: int("DEBUG_LOG_MAX_STRING", 20_000),
+  },
   /** Character budget for the stable memory block injected into the system prompt. */
   contextBudget: int("CONTEXT_BUDGET_CHARS", 8000),
   /** Character budget for per-prompt recall. */
@@ -102,6 +115,13 @@ export const config = {
     everyDays: int("REVIEW_EVERY_DAYS", 0),
   },
 };
+
+/** YYYY-MM-DD of an ISO timestamp in the configured time zone. */
+export function localDate(iso: string): string {
+  const d = new Date(iso);
+  if (Number.isNaN(d.getTime())) return iso.slice(0, 10);
+  return new Intl.DateTimeFormat("en-CA", { timeZone: config.timezone, year: "numeric", month: "2-digit", day: "2-digit" }).format(d);
+}
 
 export const llmEnabled = () => Boolean(config.llm.baseUrl);
 export const embedEnabled = () => Boolean(config.embed.baseUrl);

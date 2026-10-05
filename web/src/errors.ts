@@ -106,6 +106,10 @@ const RULES: Rule[] = [
   [/^cannot merge a project into itself$/, () => "프로젝트를 자기 자신에 합칠 수 없습니다"],
   [/^into is required$/, () => "합칠 대상 프로젝트를 골라야 합니다"],
   [/^a and b must be different projects$/, () => "서로 다른 두 프로젝트를 골라야 합니다"],
+  [/^enabled must be true or false$/, () => "디버그 모드는 켜기 또는 끄기만 고를 수 있습니다"],
+  [/^date must be YYYY-MM-DD$/, () => "날짜는 YYYY-MM-DD 형식이어야 합니다"],
+  [/^no debug log for that day$/, () => "그날의 디버그 기록이 없습니다"],
+  [/^debug mode is forced on by DEBUG_MODE$/, () => "서버 환경 변수 DEBUG_MODE로 켜져 있어 여기서 끌 수 없습니다"],
   [/^a and b must be project ids$/, () => "프로젝트 id가 올바르지 않습니다"],
   // not found
   [/^(entry|page|project|entity|revision|job|proposal|turn) not found$/, (n) => `${NOUN[n]} 찾을 수 없습니다`],

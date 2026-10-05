@@ -1,6 +1,7 @@
 import { Hono, type Context } from "hono";
 import { buildContext } from "./context.ts";
-import { embedStats, queryVector } from "./embeddings.ts";
+import { DebugForcedError, debugEnabled, debugLog, debugLogStream, debugState, listDebugLogs, msSince, setDebug } from "./debug-log.ts";
+import { embedStats, queryVector, type QueryInfo } from "./embeddings.ts";
 import { CATEGORIES, type Entry, type Scope } from "./db.ts";
 import { searchEntries, searchTurns } from "./search.ts";
 import {
@@ -101,8 +102,21 @@ import {
 
 export const api = new Hono();
 
+// Debug mode: one "http" line per request (polling and the debug endpoints themselves excluded).
+const UNLOGGED = new Set(["/api/health", "/api/stats", "/health", "/stats"]);
+api.use("*", async (c, next) => {
+  if (!debugEnabled()) return next();
+  const t0 = performance.now();
+  await next();
+  const path = c.req.path;
+  if (UNLOGGED.has(path) || path.includes("/debug")) return;
+  const url = new URL(c.req.url);
+  debugLog("http", { method: c.req.method, path, query: url.search || undefined, status: c.res.status, ms: msSince(t0) });
+});
+
 api.onError((err, c) => {
   if (err instanceof HttpError) return c.json({ error: err.message }, err.status as 400);
+  if (err instanceof DebugForcedError) return c.json({ error: err.message }, 409);
   console.error(err);
   return c.json({ error: (err as Error).message }, 500);
 });
@@ -131,23 +145,65 @@ function projectFromRef(ref: ProjectRef | null | undefined) {
 // Keyword-only scores keep their 2 decimals (unchanged output with embeddings off).
 const roundScore = (n: number, fused: boolean) => (fused ? Math.round(n * 10000) / 10000 : Math.round(n * 100) / 100);
 
-api.get("/health", (c) => c.json({ ok: true, llm: llmEnabled() ? config.llm.model : null, ...stats(), ...wikiStats(), ...graphStats(), ...reviewStats(), ...embedStats() }));
+api.get("/health", (c) =>
+  c.json({ ok: true, llm: llmEnabled() ? config.llm.model : null, debug: debugEnabled(), ...stats(), ...wikiStats(), ...graphStats(), ...reviewStats(), ...embedStats() }),
+);
+
+/** One "context" debug line: the prompt, what was injected and why recall picked what it did. */
+function logContext(type: string, project: { id: number; key: string } | null, prompt: string, ctx: { included: number[]; recalled: number[]; recall: string; system: string }, debug: object) {
+  debugLog(type, {
+    project: project ? { id: project.id, key: project.key } : null,
+    prompt,
+    included: ctx.included,
+    recalled: ctx.recalled,
+    systemChars: ctx.system.length,
+    recallChars: ctx.recall.length,
+    ...debug,
+  });
+}
+
+// ------------------------------------------------------------------ debug mode
+
+api.get("/debug", (c) => c.json({ ...debugState(), dir: config.debug.logDir, keepDays: config.debug.keepDays, maxMbPerDay: config.debug.maxBytesPerDay / 1048576, files: listDebugLogs() }));
+api.put("/debug", async (c) => {
+  const b = await body<{ enabled?: unknown }>(c);
+  if (typeof b.enabled !== "boolean") throw new HttpError(400, "enabled must be true or false");
+  setDebug(b.enabled);
+  return c.json({ ...debugState(), dir: config.debug.logDir, keepDays: config.debug.keepDays, maxMbPerDay: config.debug.maxBytesPerDay / 1048576, files: listDebugLogs() });
+});
+api.get("/debug/logs/:date", (c) => {
+  const date = c.req.param("date");
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(date)) throw new HttpError(400, "date must be YYYY-MM-DD");
+  const stream = debugLogStream(date, c.req.query("type") || undefined);
+  if (!stream) throw new HttpError(404, "no debug log for that day");
+  // Streamed (a day can be 200 MB). Shown as text in the browser ("열기"); ndjson as a download ("받기").
+  const download = c.req.query("download") === "1";
+  return c.body(stream, 200, {
+    "content-type": download ? "application/x-ndjson; charset=utf-8" : "text/plain; charset=utf-8",
+    ...(download ? { "content-disposition": `attachment; filename="memory-wiki-debug-${date}.jsonl"` } : {}),
+  });
+});
 
 /** Called by the pi extension before every run. Upserts the project. */
 api.post("/context", async (c) => {
   const b = await body<{ project?: ProjectRef | null; prompt?: string }>(c);
   const project = projectFromRef(b.project);
-  const ctx = await buildContext(project, String(b.prompt ?? "").slice(0, 8000));
+  const prompt = String(b.prompt ?? "").slice(0, 8000);
+  const { debug, ...ctx } = await buildContext(project, prompt);
   // Only prompt-specific recall counts as use; the stable block is shown every time.
   recordUsage(ctx.recalled, "recall");
   recordShown(ctx.included);
+  if (debug) logContext("context", project, prompt, ctx, debug);
   return c.json({ project, ...ctx });
 });
 
 api.get("/context/preview", async (c) => {
   const id = num(c.req.query("project_id"));
   const project = id ? getProject(id) : null;
-  return c.json({ project, ...(await buildContext(project, c.req.query("prompt") ?? "")) });
+  const prompt = c.req.query("prompt") ?? "";
+  const { debug, ...ctx } = await buildContext(project, prompt);
+  if (debug) logContext("context.preview", project, prompt, ctx, debug);
+  return c.json({ project, ...ctx });
 });
 
 api.post("/turns", async (c) => {
@@ -158,7 +214,9 @@ api.post("/turns", async (c) => {
 
 api.get("/search", async (c) => {
   const q = c.req.query("q") ?? "";
-  const vector = await queryVector(q);
+  const t0 = performance.now();
+  const info: QueryInfo = {};
+  const vector = await queryVector(q, { info });
   const key = c.req.query("project");
   const projectId = num(c.req.query("project_id")) ?? (key ? getProjectByKey(key)?.id : undefined);
   const scope = c.req.query("scope") as Scope | undefined;
@@ -173,6 +231,14 @@ api.get("/search", async (c) => {
   });
   // via=agent: the memory_search tool (web searches do not count as use).
   if (c.req.query("via") === "agent") recordUsage(hits.map((h) => h.entry.id), "search");
+  debugLog("search", {
+    q,
+    via: c.req.query("via") ?? "web",
+    params: Object.fromEntries(new URL(c.req.url).searchParams),
+    embed: info,
+    hits: hits.map((h) => ({ id: h.entry.id, score: h.score, keyword: h.keyword, similarity: h.similarity })),
+    ms: msSince(t0),
+  });
   const st = entryStates(hits.map((h) => h.entry));
   return c.json(hits.map((h) => ({ ...h.entry, ...st.get(h.entry.id), score: roundScore(h.score, Boolean(vector)) })));
 });
@@ -253,7 +319,7 @@ api.put("/policy", async (c) => {
 });
 
 api.get("/meta", (c) => c.json({ categories: CATEGORIES, llm: llmEnabled() ? config.llm.model : null }));
-api.get("/stats", (c) => c.json({ ...stats(), ...wikiStats(), ...graphStats(), ...reviewStats(), ...embedStats() }));
+api.get("/stats", (c) => c.json({ debug: debugEnabled(), ...stats(), ...wikiStats(), ...graphStats(), ...reviewStats(), ...embedStats() }));
 
 api.get("/projects", (c) => c.json(listProjects()));
 // Registered before /projects/:id so "similar" is never read as an id.
@@ -492,15 +558,17 @@ api.post("/wiki/pages/:id/revert", async (c) => {
 });
 api.get("/wiki/search", async (c) => {
   const q = c.req.query("q") ?? "";
-  const vector = await queryVector(q);
-  return c.json(
-    searchWiki(q, {
+  const t0 = performance.now();
+  const info: QueryInfo = {};
+  const vector = await queryVector(q, { info });
+  const hits = searchWiki(q, {
       projectId: c.req.query("all") === "1" ? undefined : wikiScope(c),
       allProjects: c.req.query("all") === "1",
       limit: num(c.req.query("limit")) ?? 10,
       vector,
-    }).map((h) => ({ ...h.page, body: undefined, snippet: h.snippet, score: roundScore(h.score, Boolean(vector)) })),
-  );
+  });
+  debugLog("wiki.search", { q, embed: info, hits: hits.map((h) => ({ id: h.page.id, slug: h.page.slug, score: h.score, similarity: h.similarity })), ms: msSince(t0) });
+  return c.json(hits.map((h) => ({ ...h.page, body: undefined, snippet: h.snippet, score: roundScore(h.score, Boolean(vector)) })));
 });
 /** Agent read: the page from the project wiki, falling back to the global wiki ("global:slug" forces global). */
 api.get("/wiki/read", (c) => {

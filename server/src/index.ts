@@ -5,8 +5,13 @@ import { serveStatic } from "@hono/node-server/serve-static";
 import { Hono } from "hono";
 import { api } from "./api.ts";
 import { config, embedEnabled, llmEnabled } from "./config.ts";
+import { captureConsole, debugState, pruneDebugLogs } from "./debug-log.ts";
 import { startEmbedder } from "./embeddings.ts";
 import { startWorker } from "./worker.ts";
+
+// Debug mode also keeps the console in the day file (ADR-0035); old day files go at startup.
+captureConsole();
+pruneDebugLogs();
 
 const app = new Hono();
 app.route("/api", api);
@@ -72,5 +77,5 @@ startEmbedder();
 
 serve({ fetch: app.fetch, port: config.port, hostname: config.host }, (info) => {
   console.log(`memory-wiki-all-you-need listening on http://${info.address}:${info.port}`);
-  console.log(`data: ${config.dataDir} | llm: ${llmEnabled() ? `${config.llm.model} @ ${config.llm.baseUrl}` : "disabled"} | embeddings: ${embedEnabled() ? `${config.embed.model} @ ${config.embed.baseUrl}` : "off"}`);
+  console.log(`data: ${config.dataDir} | llm: ${llmEnabled() ? `${config.llm.model} @ ${config.llm.baseUrl}` : "disabled"} | embeddings: ${embedEnabled() ? `${config.embed.model} @ ${config.embed.baseUrl}` : "off"} | debug: ${debugState().enabled ? `on (${debugState().source}) → ${config.debug.logDir}` : "off"}`);
 });

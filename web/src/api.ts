@@ -158,7 +158,19 @@ export interface SessionHit {
   snippet: string;
 }
 
+/** Debug mode (ADR-0035): the switch, where day files go and which exist. */
+export interface DebugInfo {
+  enabled: boolean;
+  source: "env" | "file" | "default";
+  dir: string;
+  keepDays: number;
+  maxMbPerDay: number;
+  files: { date: string; bytes: number }[];
+}
+
 export interface Stats {
+  /** Debug mode is on (the server is writing day files). */
+  debug: boolean;
   reviewProposals: number;
   reviewRunning: number;
   entities: number;
@@ -461,6 +473,8 @@ export interface WikiLint {
 export const api = {
   meta: () => request<{ categories: string[]; llm: string | null }>("GET", "/meta"),
   stats: () => request<Stats>("GET", "/stats"),
+  debug: () => request<DebugInfo>("GET", "/debug"),
+  setDebug: (enabled: boolean) => request<DebugInfo>("PUT", "/debug", { enabled }),
   projects: () => request<Project[]>("GET", "/projects"),
   project: (id: number) => request<Project>("GET", `/projects/${id}`),
   updateProject: (id: number, patch: Partial<Pick<Project, "name" | "description">>) => request<Project>("PATCH", `/projects/${id}`, patch),

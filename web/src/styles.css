@@ -499,6 +499,9 @@ button.nav-label:hover {
 .foot-line.bad {
   color: var(--color-danger-text);
 }
+.foot-line.warn {
+  color: var(--color-warn-text);
+}
 .foot-row {
   display: flex;
   align-items: center;

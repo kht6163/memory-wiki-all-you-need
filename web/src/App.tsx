@@ -18,6 +18,7 @@ import {
   TurnPage,
   TurnsPage,
 } from "./pages/OtherPages.tsx";
+import { DebugPage } from "./pages/DebugPage.tsx";
 import { EntitiesPage, EntityPage } from "./pages/GraphPages.tsx";
 
 const GraphPage = lazy(() => import("./pages/GraphView.tsx").then((m) => ({ default: m.GraphPage })));
@@ -157,6 +158,7 @@ export function App() {
   else if (p0 === "search") page = <SearchPage q={route.query.get("q") ?? ""} />;
   else if (p0 === "trash") page = <TrashPage />;
   else if (p0 === "preview") page = <PreviewPage projectId={num(route.query.get("project"))} />;
+  else if (p0 === "debug") page = <DebugPage />;
   else
     page = (
       <div className="page">
@@ -255,6 +257,7 @@ export function App() {
             )}
           </NavItem>
           <NavItem href="#/preview" icon="eye" label="주입 미리보기" active={p0 === "preview"} />
+          <NavItem href="#/debug" icon="file-text" label="디버그 모드" active={p0 === "debug"} />
           <NavItem href="#/trash" icon="trash-2" label="휴지통" active={p0 === "trash"}>
             {s && s.trash > 0 && <span className="count">{s.trash}</span>}
           </NavItem>
@@ -329,6 +332,12 @@ function SidebarFooter({ stats: s }: { stats: Stats | undefined }) {
         <span className={`live-dot${jobs ? "" : " idle"}`} aria-hidden="true" />
         백그라운드 작업 <span className="tabular">{jobs}</span>
       </div>
+      {s?.debug && (
+        <a className="foot-line warn" href="#/debug" title="디버그 모드: 요청과 프롬프트를 날짜별 파일로 기록 중">
+          <Icon name="file-text" size={14} />
+          디버그 기록 중
+        </a>
+      )}
       {failures > 0 && s && (
         <a className="foot-line bad" href={s.errors > 0 ? "#/turns?status=error" : "#/wiki-jobs"}>
           <Icon name="alert-triangle" size={14} />

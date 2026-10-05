@@ -77,7 +77,7 @@ async function runBackfill(job: GraphJob, between: () => Promise<void>) {
           role: "user",
           content: ["KNOWN ENTITIES:", known.join(", ") || "(none yet)", "", "MEMORIES:", batch.map(fmt).join("\n")].join("\n"),
         },
-      ]);
+      ], "graph-backfill");
       // Cancelled while the LLM was answering: write nothing.
       if (isGraphJobCancelled(job.id)) return;
       const items = Array.isArray((data as { memories?: unknown })?.memories) ? ((data as { memories: Record<string, unknown>[] }).memories) : [];

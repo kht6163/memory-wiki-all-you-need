@@ -1,6 +1,7 @@
 import { config } from "./config.ts";
 import type { Entry, Project } from "./db.ts";
-import { queryVector } from "./embeddings.ts";
+import { debugEnabled, msSince } from "./debug-log.ts";
+import { queryVector, type QueryInfo } from "./embeddings.ts";
 import { entityEntries, getEntity, linkedNeighbors, mentionedEntities } from "./graph.ts";
 import { entityExtraLimit, entityMentionCounts, searchEntries } from "./search.ts";
 import { entryState, getEntry, isActive, promptDescription, visibleEntries } from "./store.ts";
@@ -75,6 +76,22 @@ export interface BuiltContext {
   recall: string;
   included: number[];
   recalled: number[];
+  /**
+   * Why recall picked what it did (debug mode only; the API strips it before
+   * replying): every search hit with its keyword score and cosine, the graph
+   * extras with their route, what the budget cut, and the prompt embedding.
+   */
+  debug?: RecallDebug;
+}
+
+export interface RecallDebug {
+  hits: { id: number; score: number; keyword?: number; similarity?: number }[];
+  replaced: { old: number; next: number }[];
+  mentioned: number[];
+  extras: { id: number; via: string }[];
+  cut: number[];
+  embed?: QueryInfo;
+  ms?: number;
 }
 
 /**
@@ -82,10 +99,18 @@ export interface BuiltContext {
  * once and never waits longer than EMBED_QUERY_TIMEOUT_MS; null = keyword recall).
  */
 export async function buildContext(project: Project | null, prompt: string): Promise<BuiltContext> {
-  return buildContextWith(project, prompt, prompt.trim() ? await queryVector(prompt) : null);
+  const t0 = performance.now();
+  const info: QueryInfo = {};
+  const ctx = buildContextWith(project, prompt, prompt.trim() ? await queryVector(prompt, { info }) : null);
+  if (ctx.debug) {
+    ctx.debug.embed = info;
+    ctx.debug.ms = msSince(t0);
+  }
+  return ctx;
 }
 
 export function buildContextWith(project: Project | null, prompt: string, vector: Float32Array | null): BuiltContext {
+  const debug: RecallDebug | undefined = debugEnabled() ? { hits: [], replaced: [], mentioned: [], extras: [], cut: [] } : undefined;
   // Superseded and expired memories are history: never injected (they stay searchable).
   const all = visibleEntries(project?.id ?? null, { activeOnly: true });
   const used = new Set<number>();
@@ -159,7 +184,10 @@ export function buildContextWith(project: Project | null, prompt: string, vector
     // A memory found only by meaning (no shared word) must clear the stricter recall floor:
     // it is injected without the agent asking for it.
     const semantic = { vector, minSimilarity: config.embed.recallMinSimilarity };
-    for (const h of searchEntries(prompt, { projectId: pid, limit: config.recallLimit, excludeIds: used, boostEntities: mentioned, ...semantic })) {
+    const hits = searchEntries(prompt, { projectId: pid, limit: config.recallLimit, excludeIds: used, boostEntities: mentioned, ...semantic });
+    if (debug) debug.hits = hits.map((h) => ({ id: h.entry.id, score: h.score, keyword: h.keyword, similarity: h.similarity }));
+    if (debug) debug.mentioned = mentioned;
+    for (const h of hits) {
       if (h.entry.category === "standing" || seen.has(h.entry.id)) continue;
       picks.push({ e: h.entry });
       seen.add(h.entry.id);
@@ -214,11 +242,19 @@ export function buildContextWith(project: Project | null, prompt: string, vector
         addExtra(n.entry, `${viaLabel(n.type, n.dir, n.via)} (2-hop)`);
       }
     }
+    if (debug) {
+      debug.replaced = replacedBy;
+      debug.extras = extras.map((x) => ({ id: x.e.id, via: x.via }));
+    }
     const lines: string[] = [];
     let size = 0;
-    for (const p of [...picks, ...extras]) {
+    const order = [...picks, ...extras];
+    for (const [i, p] of order.entries()) {
       const line = p.via ? `${fmtEntry(p.e)} (graph: ${p.via})` : fmtEntry(p.e);
-      if (size + line.length > config.recallBudget) break;
+      if (size + line.length > config.recallBudget) {
+        if (debug) debug.cut = order.slice(i).map((x) => x.e.id);
+        break;
+      }
       lines.push(line);
       recalled.push(p.e.id);
       size += line.length;
@@ -228,5 +264,5 @@ export function buildContextWith(project: Project | null, prompt: string, vector
     }
   }
 
-  return { system, recall, included: [...used], recalled };
+  return { system, recall, included: [...used], recalled, ...(debug ? { debug } : {}) };
 }

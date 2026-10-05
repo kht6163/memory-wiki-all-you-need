@@ -143,7 +143,7 @@ async function composeChunk(job: WikiJob, project: Project | null, chunk: { ids:
   const { data } = await chatJson([
     { role: "system", content: COMPOSE_PROMPT },
     { role: "user", content: userPrompt },
-  ]);
+  ], "wiki-compose");
   // Cancelled while the LLM was answering: write nothing.
   if (isJobCancelled(job.id)) return null;
   const obj = (data ?? {}) as { pages?: unknown; note?: unknown };

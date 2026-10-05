@@ -1,11 +1,25 @@
 import { config } from "./config.ts";
+import { debugLog, msSince } from "./debug-log.ts";
 
 export interface ChatMessage {
   role: "system" | "user" | "assistant";
   content: string;
 }
 
-export async function chatJson(messages: ChatMessage[]): Promise<{ data: unknown; raw: string }> {
+/** `label` names the caller in the debug log (curation, review, wiki-compose, graph-backfill). */
+export async function chatJson(messages: ChatMessage[], label = "llm"): Promise<{ data: unknown; raw: string }> {
+  const t0 = performance.now();
+  try {
+    const out = await chatJsonOnce(messages);
+    debugLog("llm", { label, model: config.llm.model, ms: msSince(t0), messages, raw: out.raw });
+    return out;
+  } catch (err) {
+    debugLog("llm", { label, model: config.llm.model, ms: msSince(t0), messages, error: (err as Error).message });
+    throw err;
+  }
+}
+
+async function chatJsonOnce(messages: ChatMessage[]): Promise<{ data: unknown; raw: string }> {
   const ctrl = AbortSignal.timeout(config.llm.timeoutMs);
   const res = await fetch(`${config.llm.baseUrl}/chat/completions`, {
     method: "POST",
