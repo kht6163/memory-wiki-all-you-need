@@ -515,6 +515,9 @@ export default function memoryAllYouNeed(pi: ExtensionAPI) {
       mode: Type.Optional(Type.Union([Type.Literal("replace"), Type.Literal("append")], { description: "For an existing page. Default replace" })),
       global: Type.Optional(Type.Boolean({ description: "Write to the global wiki instead of this project's" })),
       reason: Type.Optional(Type.String({ description: "Short change note for the page history" })),
+      parent: Type.Optional(
+        Type.String({ description: "Slug of an existing page in the same wiki to put this page under (pages form a tree); empty string = top level; omit to leave it where it is" }),
+      ),
     }),
     async execute(_id, p) {
       const res = await call<{ action: string; page: { slug: string; title: string; project_id: number | null } }>("POST", "/agent/wiki", {

@@ -118,6 +118,7 @@
   --content-narrow: 760px;
   --content-wide: 1200px;
   --toc-w: 200px;
+  --tree-w: 220px;
 
   color-scheme: light;
 }

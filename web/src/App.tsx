@@ -143,7 +143,7 @@ export function App() {
     const p3 = route.path[3];
     if (!p2) page = <WikiHome key={scope} scope={scope} />;
     else if (p2 === "~compose") page = <WikiCompose key={`compose-${scope}`} scope={scope} />;
-    else if (p2 === "~new") page = <WikiEdit key={`new-${scope}-${route.query.get("slug") ?? ""}`} scope={scope} initialSlug={route.query.get("slug") ?? undefined} />;
+    else if (p2 === "~new") page = <WikiEdit key={`new-${scope}-${route.query.get("slug") ?? ""}-${route.query.get("parent") ?? ""}`} scope={scope} initialSlug={route.query.get("slug") ?? undefined} />;
     else if (p3 === "edit") page = <WikiEdit key={`edit-${scope}-${p2}`} scope={scope} slug={p2} />;
     else page = <WikiPageView key={`${scope}-${p2}`} scope={scope} slug={p2} />;
   } else if (p0 === "wiki-jobs") page = <WikiJobsPage scope={route.query.has("project") ? num(route.query.get("project")) ?? 0 : undefined} />;

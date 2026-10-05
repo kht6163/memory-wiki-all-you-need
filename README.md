@@ -72,6 +72,7 @@ flowchart LR
 
 **Wiki**
 - **Per-project and global wikis** — `[[slug]]` links, `[#id]` memory references, history, revert, backlinks, search, locking.
+- **Page tree** — put pages under other pages; collapsible tree, breadcrumbs and a page-tree rail. A flat wiki gets grouping suggestions (e.g. ADRs under their index page) that change nothing until you apply them.
 - **Compose from turns** — the LLM turns conversations and tool output into pages, chunked by `WIKI_COMPOSE_CHUNK_CHARS`; never automatic.
 - **Wiki lint** — orphan pages, missing links, citations of deleted memories, empty pages (no LLM).
 
@@ -106,14 +107,14 @@ flowchart LR
 
 ### 1. Run the server
 
-The server image is on [Docker Hub](https://hub.docker.com/r/kht6163/memory-wiki-all-you-need) for `linux/amd64` and `linux/arm64`. Tags: `X.Y.Z` (exact release), `X.Y` (latest patch of that minor, e.g. `0.12`), `latest`.
+The server image is on [Docker Hub](https://hub.docker.com/r/kht6163/memory-wiki-all-you-need) for `linux/amd64` and `linux/arm64`. Tags: `X.Y.Z` (exact release), `X.Y` (latest patch of that minor, e.g. `0.13`), `latest`.
 
 Docker Compose example (put `LLM_API_KEY` in `.env`):
 
 ```yaml
 services:
   memory:
-    image: kht6163/memory-wiki-all-you-need:0.12   # amd64 / arm64
+    image: kht6163/memory-wiki-all-you-need:0.13   # amd64 / arm64
     restart: unless-stopped
     environment:
       LLM_BASE_URL: http://<llm-host>:8317/v1
@@ -135,7 +136,7 @@ mkdir -p data && sudo chown 1000:1000 data
 docker run -d --name memory-wiki --restart unless-stopped \
   -p 127.0.0.1:8765:8765 -v "$PWD/data:/data" \
   -e LLM_BASE_URL=http://<llm-host>:8317/v1 -e LLM_API_KEY=<key> -e TIMEZONE=Asia/Seoul \
-  kht6163/memory-wiki-all-you-need:0.12
+  kht6163/memory-wiki-all-you-need:0.13
 ```
 
 **Optional: semantic search.** Add an embedding service to the same compose file. bge-m3 is multilingual and runs on CPU (about 55 ms per short query; the model, about 2.3 GB, is downloaded on first start):

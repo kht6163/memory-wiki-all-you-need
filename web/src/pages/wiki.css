@@ -414,3 +414,193 @@ a.wiki-row:focus-visible {
   display: inline-flex;
   gap: var(--space-1_5);
 }
+
+/* ------------------------------------------------------------ page tree (ADR-0036) */
+/* --depth is set per row inline (style="--depth: n"); 0 is the default. */
+.wiki-tree,
+.wiki-tree-rail {
+  --depth: 0;
+}
+.wiki-tree {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+}
+.wiki-tree-item {
+  display: flex;
+  align-items: flex-start;
+  padding-left: calc(var(--space-2) + var(--depth, 0) * 22px);
+}
+.wiki-tree-item + .wiki-tree-item {
+  border-top: 1px solid var(--color-border);
+}
+.wiki-tree-item > .tree-toggle,
+.wiki-tree-item > .tree-toggle-spacer {
+  align-self: flex-start;
+  margin-top: calc(var(--space-3) - 1px);
+}
+.wiki-tree .list-row {
+  flex: 1;
+  min-width: 0;
+  border-top: 0;
+  padding-left: var(--space-2);
+}
+.tree-toggle,
+.tree-toggle-spacer {
+  flex: none;
+  width: 22px;
+  height: 22px;
+  align-self: center;
+}
+.tree-toggle {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  padding: 0;
+  border: 0;
+  border-radius: var(--radius-sm);
+  background: transparent;
+  color: var(--color-text-3);
+  cursor: pointer;
+}
+.tree-toggle:hover {
+  background: var(--color-surface-3);
+  color: var(--color-text);
+}
+.tree-toggle:focus-visible {
+  outline: 2px solid var(--color-accent);
+  outline-offset: 1px;
+}
+.tree-tools {
+  display: flex;
+  justify-content: flex-end;
+  gap: var(--space-1);
+  margin: calc(-1 * var(--space-2)) 0 var(--space-2);
+}
+
+/* rail on a page: left column on wide screens, top of the right rail otherwise */
+.wiki-tree-rail ul {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+}
+.wiki-tree-rail li {
+  display: flex;
+  align-items: flex-start;
+  gap: 2px;
+  padding-left: calc(var(--depth, 0) * 14px);
+}
+.wiki-tree-rail .tree-toggle,
+.wiki-tree-rail .tree-toggle-spacer {
+  width: 18px;
+  height: 18px;
+  margin-top: 2px;
+}
+.wiki-tree-rail a {
+  display: block;
+  padding: 2px 0;
+  line-height: 1.45;
+  color: var(--color-text-2);
+  overflow-wrap: anywhere;
+  font-size: var(--text-sm);
+}
+.wiki-tree-rail a:hover {
+  color: var(--color-accent-text);
+  text-decoration: none;
+}
+.wiki-tree-rail a.active {
+  color: var(--color-accent-text);
+  font-weight: 600;
+}
+.wiki-tree-rail .toc-title {
+  display: flex;
+  align-items: center;
+  gap: var(--space-1);
+}
+.with-tree .tree-left {
+  display: none;
+}
+.tree-in-rail + .wiki-rail-toc,
+.tree-in-rail + .wiki-rail-section {
+  margin-top: var(--space-5);
+}
+@media (min-width: 1400px) {
+  .with-toc.with-tree {
+    grid-template-columns: var(--tree-w) minmax(0, var(--content-w)) var(--toc-w);
+  }
+  .with-tree .tree-left {
+    display: block;
+    position: sticky;
+    top: var(--space-10);
+    align-self: start;
+    max-height: calc(100vh - 2 * var(--space-10));
+    overflow-y: auto;
+    padding-right: var(--space-3);
+    border-right: 1px solid var(--color-border);
+  }
+  .with-tree .tree-in-rail {
+    display: none;
+  }
+  /* Fixed columns: the article never slides into the tree column. */
+  .with-tree > .tree-left {
+    grid-column: 1;
+  }
+  .with-tree > article {
+    grid-column: 2;
+  }
+  .with-tree > aside {
+    grid-column: 3;
+  }
+  .with-tree .tree-in-rail + .wiki-rail-toc,
+  .with-tree .tree-in-rail + .wiki-rail-section {
+    margin-top: 0;
+  }
+}
+
+/* child pages at the end of a page */
+.wiki-children {
+  margin: var(--space-8) 0 var(--space-6);
+}
+.wiki-children .section-head .btn {
+  margin-left: auto;
+}
+.wiki-children-list {
+  margin: 0;
+  padding-left: var(--space-5);
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-1);
+}
+
+/* "group these pages" suggestions on the wiki home */
+.tree-suggest {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-3);
+  margin-bottom: var(--space-5);
+  padding: var(--space-4);
+}
+.tree-suggest-head {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--space-2);
+}
+.tree-suggest-head .icon {
+  color: var(--color-accent-text);
+}
+.tree-suggest-group {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-1);
+  padding-left: var(--space-5);
+}
+.tree-suggest-group .check {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+}
+.tree-suggest-actions {
+  display: flex;
+  gap: var(--space-2);
+}

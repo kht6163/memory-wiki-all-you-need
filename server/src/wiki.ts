@@ -18,6 +18,8 @@ export interface WikiPage {
   body: string;
   locked: boolean;
   source: Source;
+  /** Page this one sits under in the same wiki (null = top level). See movePage / ADR-0036. */
+  parent_id: number | null;
   created_at: string;
   updated_at: string;
   deleted_at: string | null;
@@ -68,6 +70,7 @@ const toPage = (r: Row): WikiPage => ({
   body: String(r.body),
   locked: Boolean(r.locked),
   source: r.source as Source,
+  parent_id: r.parent_id == null ? null : Number(r.parent_id),
   created_at: String(r.created_at),
   updated_at: String(r.updated_at),
   deleted_at: r.deleted_at == null ? null : String(r.deleted_at),
@@ -180,7 +183,89 @@ function writeRevision(p: WikiPage, action: WikiRevision["action"], meta: PageMe
   return Number(res.lastInsertRowid);
 }
 
-export function createPage(projectId: number | null, input: { slug?: string; title: string; body?: string; locked?: boolean }, meta: PageMeta): WikiPage {
+// ------------------------------------------------------------------- tree
+
+/** Deepest a page may sit (top level = 1). */
+export const MAX_TREE_DEPTH = 8;
+
+/**
+ * Checks that `parentId` may hold page `pageId` (null for a page not created
+ * yet) in wiki `projectId`: a live page of the same wiki, not the page itself,
+ * not one of its descendants, and the result no deeper than MAX_TREE_DEPTH.
+ * Throws HttpError otherwise (G-066).
+ */
+export function checkParent(projectId: number | null, pageId: number | null, parentId: number | null) {
+  if (parentId == null) return;
+  if (!Number.isInteger(parentId) || parentId <= 0) throw new HttpError(400, "parent_id must be a page id or null");
+  if (pageId != null && parentId === pageId) throw new HttpError(400, "a page cannot be its own parent");
+  const parent = getPage(parentId);
+  if (!parent) throw new HttpError(404, "parent page not found");
+  if ((parent.project_id ?? 0) !== (projectId ?? 0)) throw new HttpError(400, "parent must be in the same wiki");
+  if (parent.deleted_at) throw new HttpError(400, "parent page is in the trash");
+  // Walk up from the parent: meeting the page means a cycle; the steps give the depth.
+  let depth = 1;
+  for (let at: WikiPage | null = parent; at; at = at.parent_id == null ? null : getPage(at.parent_id)) {
+    if (pageId != null && at.id === pageId) throw new HttpError(400, "parent cannot be a page under this one");
+    if (++depth > MAX_TREE_DEPTH + 1) break;
+  }
+  // depth = the page's level under this parent; its deepest descendant sits subtreeHeight levels lower.
+  if (depth + (pageId == null ? 0 : subtreeHeight(pageId)) > MAX_TREE_DEPTH) throw new HttpError(400, `the tree would be too deep (max ${MAX_TREE_DEPTH} levels)`);
+}
+
+/** Levels below `pageId` (0 = no children). Trashed children count too: restoring one reattaches it and its subtree. */
+function subtreeHeight(pageId: number, guard = 0): number {
+  if (guard > MAX_TREE_DEPTH) return guard;
+  let h = 0;
+  for (const r of db.prepare(`SELECT id FROM wiki_pages WHERE parent_id = ?`).all(pageId)) h = Math.max(h, 1 + subtreeHeight(Number(r.id), guard + 1));
+  return h;
+}
+
+/**
+ * On restore (or reviving a slug), a kept parent_id may no longer fit: the
+ * parent was moved meanwhile and the tree got deeper, or the parent is gone.
+ * Such a page goes back to the top level instead (a parent in the trash is
+ * kept: the web shows the page at the top until that parent comes back).
+ */
+function liftIfInvalid(id: number) {
+  const p = getPage(id);
+  if (!p || p.parent_id == null) return;
+  const parent = getPage(p.parent_id);
+  if (parent?.deleted_at) return;
+  try {
+    checkParent(p.project_id, id, p.parent_id);
+  } catch {
+    db.prepare(`UPDATE wiki_pages SET parent_id = NULL WHERE id = ?`).run(id);
+  }
+}
+
+/**
+ * Puts a page under another page of the same wiki (null = top level). The
+ * only write path for parent_id. Like `locked`, a move bumps updated_at but
+ * writes no revision: revisions hold content, and a revert never moves a page.
+ */
+export function movePage(id: number, parentId: number | null, meta: PageMeta): WikiPage {
+  const cur = getPage(id);
+  if (!cur || cur.deleted_at) throw new HttpError(404, "page not found");
+  if (cur.locked && meta.author !== "human") throw new HttpError(423, "page is locked");
+  if (cur.parent_id === parentId) return cur;
+  checkParent(cur.project_id, id, parentId);
+  db.prepare(`UPDATE wiki_pages SET parent_id = ?, updated_at = ? WHERE id = ?`).run(parentId, now(), id);
+  return getPage(id)!;
+}
+
+/** Applies several moves at once: all are checked first and applied in one transaction, or none (G-066). */
+export function movePages(moves: { id: number; parent_id: number | null }[], meta: PageMeta): WikiPage[] {
+  if (!Array.isArray(moves) || !moves.length) throw new HttpError(400, "moves must be a non-empty list");
+  if (moves.length > 500) throw new HttpError(400, "too many moves (max 500)");
+  for (const m of moves) if (!m || typeof m !== "object" || !Number.isInteger(m.id)) throw new HttpError(400, "each move needs a page id and a parent_id");
+  return transaction(() => moves.map((m) => movePage(Number(m.id), m.parent_id == null ? null : Number(m.parent_id), meta)));
+}
+
+export function createPage(
+  projectId: number | null,
+  input: { slug?: string; title: string; body?: string; locked?: boolean; parent_id?: number | null },
+  meta: PageMeta,
+): WikiPage {
   if (projectId != null && !getProject(projectId)) throw new HttpError(404, "project not found");
   const title = input.title?.trim() ?? "";
   const body = (input.body ?? "").trim();
@@ -188,20 +273,23 @@ export function createPage(projectId: number | null, input: { slug?: string; tit
   const slug = slugify(input.slug || title);
   const existing = getPageBySlug(projectId, slug);
   if (existing && !existing.deleted_at) throw new HttpError(409, `page "${slug}" already exists`);
+  if (input.parent_id !== undefined) checkParent(projectId, existing?.id ?? null, input.parent_id);
   const page = transaction(() => {
     if (existing) {
       // Re-creating a deleted slug revives the row so its history stays together.
       db.prepare(`UPDATE wiki_pages SET title = ?, body = ?, locked = ?, source = ?, deleted_at = NULL, updated_at = ? WHERE id = ?`).run(
         title, body, input.locked ? 1 : 0, meta.author, now(), existing.id,
       );
+      if (input.parent_id !== undefined) db.prepare(`UPDATE wiki_pages SET parent_id = ? WHERE id = ?`).run(input.parent_id, existing.id);
+      else liftIfInvalid(existing.id);
       const p = getPage(existing.id)!;
       indexDerived(p);
       writeRevision(p, "restore", meta);
       return p;
     }
     const res = db
-      .prepare(`INSERT INTO wiki_pages (project_id, slug, title, body, locked, source) VALUES (?, ?, ?, ?, ?, ?)`)
-      .run(projectId, slug, title, body, input.locked ? 1 : 0, meta.author);
+      .prepare(`INSERT INTO wiki_pages (project_id, slug, title, body, locked, source, parent_id) VALUES (?, ?, ?, ?, ?, ?, ?)`)
+      .run(projectId, slug, title, body, input.locked ? 1 : 0, meta.author, input.parent_id ?? null);
     const p = getPage(Number(res.lastInsertRowid))!;
     indexDerived(p);
     writeRevision(p, "create", meta);
@@ -210,10 +298,18 @@ export function createPage(projectId: number | null, input: { slug?: string; tit
   return page;
 }
 
-export function updatePage(id: number, patch: { title?: string; body?: string; locked?: boolean }, meta: PageMeta): WikiPage {
+export function updatePage(id: number, patch: { title?: string; body?: string; locked?: boolean; parent_id?: number | null }, meta: PageMeta): WikiPage {
   const cur = getPage(id);
   if (!cur || cur.deleted_at) throw new HttpError(404, "page not found");
   if (cur.locked && meta.author !== "human") throw new HttpError(423, "page is locked");
+  if (patch.parent_id !== undefined && patch.parent_id !== cur.parent_id) {
+    // A move plus a content edit: both or neither.
+    return transaction(() => {
+      movePage(id, patch.parent_id ?? null, meta);
+      const { parent_id: _, ...rest } = patch;
+      return updatePage(id, rest, meta);
+    });
+  }
   const title = patch.title !== undefined ? patch.title.trim() : cur.title;
   const body = patch.body !== undefined ? patch.body.trim() : cur.body;
   const locked = patch.locked !== undefined ? Boolean(patch.locked) : cur.locked;
@@ -249,6 +345,7 @@ export function restorePage(id: number, meta: PageMeta): WikiPage {
   if (!cur.deleted_at) return cur;
   return transaction(() => {
     db.prepare(`UPDATE wiki_pages SET deleted_at = NULL, updated_at = ? WHERE id = ?`).run(now(), id);
+    liftIfInvalid(id);
     const p = getPage(id)!;
     writeRevision(p, "restore", meta);
     return p;

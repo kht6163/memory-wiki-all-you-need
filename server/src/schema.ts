@@ -646,6 +646,19 @@ CREATE TABLE wiki_embeddings (
 `);
     },
   },
+  {
+    version: 15,
+    name: "wiki page tree",
+    up(db) {
+      // A page may sit under another page of the same wiki (wiki-tree.ts,
+      // ADR-0036). NULL = top level. Deleting the parent row (never done by
+      // the app: pages go to the trash) lifts the children to the top level.
+      db.exec(`
+ALTER TABLE wiki_pages ADD COLUMN parent_id INTEGER REFERENCES wiki_pages(id) ON DELETE SET NULL;
+CREATE INDEX wiki_pages_parent ON wiki_pages(parent_id);
+`);
+    },
+  },
 ];
 
 /**

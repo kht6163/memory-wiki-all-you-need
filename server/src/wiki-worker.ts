@@ -19,6 +19,7 @@ import {
   type WikiPage,
   isJobCancelled,
   runningWikiJobs,
+  movePage,
 } from "./wiki.ts";
 
 // Compose job: the LLM reads selected turn records (the real conversations and
@@ -41,6 +42,7 @@ What to skip: chit-chat, one-off tasks with no reusable lesson, dead ends that t
 Page set:
 - Prefer extending existing pages. Typical slugs: overview, architecture, conventions, decisions, environment, workflows, troubleshooting, glossary. Create a new page only when a topic clearly deserves its own page.
 - "overview" is the entry page: what this is, the big picture, and [[links]] to the other pages. Create it if the wiki has none.
+- Pages form a tree ("(under x)" in ALL PAGES). A page you create may name a "parent": the slug of a broader existing page (or one you create in this response) it belongs under, e.g. one decision record under "decisions", or a second part under the first. On an update, add "parent" only to move a page that clearly sits in the wrong place; otherwise leave it out so the page stays where people put it. Never put a page under "overview", and never move "overview".
 
 Writing rules:
 - Write in the language the user speaks in the transcripts (Korean if they speak Korean). Keep technical identifiers, commands and paths as-is.
@@ -56,7 +58,7 @@ Writing rules:
 
 Respond with ONLY a JSON object:
 {"pages":[
-  {"action":"create","slug":"kebab-or-korean-slug","title":"...","body":"...","reason":"..."},
+  {"action":"create","slug":"kebab-or-korean-slug","title":"...","body":"...","parent":"optional-parent-slug","reason":"..."},
   {"action":"update","slug":"existing-slug","title":"...","body":"...","reason":"..."},
   {"action":"delete","slug":"existing-slug","reason":"..."}
 ],"note":"one short sentence"}`;
@@ -129,8 +131,15 @@ async function composeChunk(job: WikiJob, project: Project | null, chunk: { ids:
     `DATE: ${new Date().toISOString().slice(0, 10)}`,
     instruction ? `INSTRUCTION: ${instruction}` : "",
     "",
-    "ALL PAGES (slug — title):",
-    pages.length ? pages.map((p) => `- ${p.slug} — ${p.title}${p.locked ? " (locked)" : ""}`).join("\n") : "(no pages yet)",
+    "ALL PAGES (slug — title, and the page each one sits under):",
+    pages.length
+      ? pages
+          .map((p) => {
+            const parent = p.parent_id == null ? undefined : pages.find((q) => q.id === p.parent_id);
+            return `- ${p.slug} — ${p.title}${parent ? ` (under ${parent.slug})` : ""}${p.locked ? " (locked)" : ""}`;
+          })
+          .join("\n")
+      : "(no pages yet)",
     "",
     "CURRENT BODIES of the pages you may update:",
     blocks.join("\n\n") || "(none)",
@@ -155,6 +164,8 @@ async function composeChunk(job: WikiJob, project: Project | null, chunk: { ids:
 
   const applied: Applied[] = [];
   const meta = { author: "llm" as const, jobId: job.id };
+  // "parent" is applied after every page op, so a parent created later in the same reply exists.
+  const moves: { slug: string; parent: string }[] = [];
   for (const op of ops.slice(0, 10)) {
     try {
       const action = String(op.action ?? "");
@@ -176,13 +187,32 @@ async function composeChunk(job: WikiJob, project: Project | null, chunk: { ids:
         const p = updatePage(existing.id, { title, body }, { ...meta, reason });
         touched.add(p.id);
         applied.push({ action: "update", slug, title: p.title, pageId: p.id });
+        // An update may move a page under another one, never back to the top (that would undo a person's placement).
+        if (typeof op.parent === "string" && op.parent.trim()) moves.push({ slug: p.slug, parent: op.parent });
       } else {
         const p = createPage(job.project_id, { slug, title, body }, { ...meta, reason });
         touched.add(p.id);
         applied.push({ action: "create", slug: p.slug, title: p.title, pageId: p.id });
+        if (typeof op.parent === "string") moves.push({ slug: p.slug, parent: op.parent });
       }
     } catch (err) {
       console.warn(`[wiki] job ${job.id}: page op rejected: ${(err as Error).message}`);
+    }
+  }
+  // Only pages written in this reply move; a bad parent (unknown, overview, a cycle) is ignored, never fatal.
+  for (const m of moves) {
+    try {
+      const page = getPageBySlug(job.project_id, m.slug);
+      if (!page || page.deleted_at || page.slug === "overview") continue;
+      let parentId: number | null = null;
+      if (m.parent.trim()) {
+        const parent = getPageBySlug(job.project_id, m.parent);
+        if (!parent || parent.deleted_at || parent.slug === "overview") continue;
+        parentId = parent.id;
+      }
+      movePage(page.id, parentId, meta);
+    } catch (err) {
+      console.warn(`[wiki] job ${job.id}: parent of "${m.slug}" ignored: ${(err as Error).message}`);
     }
   }
   return { applied, note: typeof obj.note === "string" ? obj.note : "" };

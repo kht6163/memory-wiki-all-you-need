@@ -30,6 +30,7 @@ import {
 import { Icon } from "../components/Icon.tsx";
 import { PageHeader } from "../components/PageHeader.tsx";
 import { SkeletonList, SkeletonPage } from "../components/Skeleton.tsx";
+import { ChildPages, ParentSelect, TreeCrumbs, TreeSuggestCard, WikiTreeList, WikiTreeRail } from "./WikiTree.tsx";
 
 /** Tabs shared by a project's (or the global) wiki, memory and turn views. */
 export function ScopeTabs({ scope, active }: { scope: number; active: "wiki" | "memory" | "user" | "turns" | "jobs" | "graph" }) {
@@ -105,10 +106,12 @@ export function WikiHome({ scope }: { scope: number }) {
   const overview = pages.data?.find((p) => p.slug === "overview");
   const others = useMemo(() => pages.data?.filter((p) => p.slug !== "overview") ?? [], [pages.data]);
   const q = filter.trim().toLowerCase();
-  const shown = useMemo(
-    () => (q ? others.filter((p) => p.title.toLowerCase().includes(q) || p.slug.toLowerCase().includes(q) || p.body.toLowerCase().includes(q)) : others),
+  const matches = useMemo(
+    () => (q ? others.filter((p) => p.title.toLowerCase().includes(q) || p.slug.toLowerCase().includes(q) || p.body.toLowerCase().includes(q)).length : others.length),
     [others, q],
   );
+  // Suggestions are refetched whenever a page changes (moves included).
+  const pagesVersion = useMemo(() => (pages.data ?? []).map((p) => `${p.id}:${p.updated_at}`).join(","), [pages.data]);
 
   return (
     <article className="page">
@@ -169,12 +172,13 @@ export function WikiHome({ scope }: { scope: number }) {
           <Markdown wikiScope={scope}>{stripTitle(overview.body, overview.title)}</Markdown>
         </section>
       )}
+      {others.length > 1 && <TreeSuggestCard scope={scope} version={pagesVersion} onApplied={pages.reload} />}
       {pages.data && pages.data.length > 0 && <WikiLintPanel scope={scope} />}
       {others.length > 0 && (
         <>
           <div className="section-head">
             <h2>모든 페이지</h2>
-            <span className="count">{q ? `${shown.length} / ${others.length}` : others.length}</span>
+            <span className="count">{q ? `${matches} / ${others.length}` : others.length}</span>
             <input
               className="filter"
               type="search"
@@ -185,12 +189,8 @@ export function WikiHome({ scope }: { scope: number }) {
               onKeyDown={(e) => e.key === "Escape" && setFilter("")}
             />
           </div>
-          {shown.length ? (
-            <div className="list">
-              {shown.map((p) => (
-                <WikiPageRow key={p.id} scope={scope} page={p} />
-              ))}
-            </div>
+          {matches ? (
+            <WikiTreeList scope={scope} pages={others} filter={filter} />
           ) : (
             <div className="list">
               <Empty
@@ -207,28 +207,6 @@ export function WikiHome({ scope }: { scope: number }) {
         </>
       )}
     </article>
-  );
-}
-
-function WikiPageRow({ scope, page: p }: { scope: number; page: WikiPage }) {
-  const line = firstLine(p.body);
-  return (
-    <a className="list-row wiki-row" href={pageHref(scope, p.slug)}>
-      <div className="wiki-row-head">
-        {p.locked && (
-          <span className="wiki-row-lock" title="잠김 — LLM과 에이전트가 수정하지 않음" role="img" aria-label="잠김">
-            <Icon name="lock" size={13} />
-          </span>
-        )}
-        <span className="wiki-row-title">{p.title}</span>
-        <span className="wiki-row-slug mono">{p.slug}</span>
-      </div>
-      {line && <div className="wiki-row-line">{line}</div>}
-      <div className="wiki-meta">
-        <span className={`dot src-${p.source}`} aria-hidden />
-        {SOURCE_LABEL[p.source]} · <Time iso={p.updated_at} />
-      </div>
-    </a>
   );
 }
 
@@ -369,13 +347,6 @@ function stripTitle(body: string, title: string): string {
   return m && m[1].trim() === title.trim() ? body.slice(m[0].length) : body;
 }
 
-function firstLine(body: string): string {
-  const line = body
-    .split("\n")
-    .map((l) => l.trim())
-    .find((l) => l && !l.startsWith("#") && !l.startsWith("|") && !l.startsWith("```"));
-  return (line ?? "").replace(/\s*\[#\d+\]/g, "").replace(/\[\[([^\]|]+)(?:\|([^\]]+))?\]\]/g, (_m, a, b) => b ?? a).replace(/[*_`>]/g, "").slice(0, 140);
-}
 
 // ------------------------------------------------------------- page view
 
@@ -415,6 +386,9 @@ export function WikiPageView({ scope, slug }: { scope: number; slug: string }) {
   const detail = useData(() => (bySlug.data ? api.wikiPage(bySlug.data.id) : Promise.resolve(null)), [bySlug.data?.id, bySlug.data?.updated_at]);
   const missing = useData(() => api.wikiMissing(scope || null), [scope, bySlug.data?.updated_at]);
   const missingSet = useMemo(() => new Set((missing.data ?? []).map((m) => m.to)), [missing.data]);
+  // The wiki's pages, for the tree rail, breadcrumbs and child pages.
+  const all = useData(() => api.wikiPages(scope || null), [scope, bySlug.data?.updated_at]);
+  const pages = all.data ?? [];
   const bodyRef = useRef<HTMLDivElement>(null);
   const d = detail.data;
   const { items: toc, active } = useHeadings(bodyRef, d ? `${d.page.id}:${d.page.updated_at}` : "");
@@ -441,14 +415,11 @@ export function WikiPageView({ scope, slug }: { scope: number; slug: string }) {
   const p = d.page;
 
   return (
-    <div className="with-toc">
+    <div className="with-toc with-tree">
+      <WikiTreeRail scope={scope} pages={pages} current={p} className="tree-left" />
       <article className="page">
         <PageHeader
-          crumbs={
-            <>
-              <a href={`#/w/${scope}`}>{name} 위키</a> / <span className="mono">{p.slug}</span>
-            </>
-          }
+          crumbs={<TreeCrumbs scope={scope} name={name} pages={pages} current={p} />}
           title={p.title}
           busy={detail.loading}
           actions={
@@ -505,6 +476,7 @@ export function WikiPageView({ scope, slug }: { scope: number; slug: string }) {
             {stripTitle(p.body, p.title) || "_빈 페이지_"}
           </Markdown>
         </div>
+        <ChildPages scope={scope} pages={pages} current={p} />
         <h2>수정 이력</h2>
         <ol className="history">
           {d.revisions.map((r, i) => (
@@ -513,6 +485,7 @@ export function WikiPageView({ scope, slug }: { scope: number; slug: string }) {
         </ol>
       </article>
       <aside className="toc wiki-rail" aria-label="페이지 정보">
+        <WikiTreeRail scope={scope} pages={pages} current={p} className="tree-in-rail" />
         {toc.length > 1 && (
           <nav className="wiki-rail-toc" aria-label="목차">
             <div className="toc-title">목차</div>
@@ -625,7 +598,9 @@ export function WikiEdit({ scope, slug, initialSlug }: { scope: number; slug?: s
   const existing = useData(() => (slug ? api.wikiBySlug(scope || null, slug) : Promise.resolve(null)), [scope, slug]);
   // Existing page slugs, so the preview draws links to pages that do not exist yet dotted (like the page view).
   const scopePages = useData(() => api.wikiPages(scope || null), [scope]);
-  const initial = { title: initialSlug ?? "", slug: initialSlug ?? "", body: "", locked: false };
+  // "하위 페이지 만들기" opens ~new?parent=<id>.
+  const parentParam = Number(new URLSearchParams(window.location.hash.split("?")[1] ?? "").get("parent")) || null;
+  const initial = { title: initialSlug ?? "", slug: initialSlug ?? "", body: "", locked: false, parent_id: parentParam as number | null };
   const [form, setForm] = useState(initial);
   const [base, setBase] = useState(() => JSON.stringify(initial));
   const [error, setError] = useState<string | null>(null);
@@ -638,7 +613,7 @@ export function WikiEdit({ scope, slug, initialSlug }: { scope: number; slug?: s
     const p = existing.data;
     if (!p || loaded.current) return;
     loaded.current = true;
-    const next = { title: p.title, slug: p.slug, body: p.body, locked: p.locked };
+    const next = { title: p.title, slug: p.slug, body: p.body, locked: p.locked, parent_id: p.parent_id };
     setForm(next);
     setBase(JSON.stringify(next));
   }, [existing.data]);
@@ -667,10 +642,10 @@ export function WikiEdit({ scope, slug, initialSlug }: { scope: number; slug?: s
     setSaving(true);
     setError(null);
     try {
-      const { title, body, locked } = form;
+      const { title, body, locked, parent_id } = form;
       const p = existing.data
-        ? await api.updateWikiPage(existing.data.id, { title, body, locked })
-        : await api.createWikiPage({ project_id: scope || null, slug: form.slug || title, title, body, locked });
+        ? await api.updateWikiPage(existing.data.id, { title, body, locked, parent_id })
+        : await api.createWikiPage({ project_id: scope || null, slug: form.slug || title, title, body, locked, parent_id });
       await act(async () => p, { success: "저장했습니다" });
       leaveTo(`/w/${scope}/${encodeURIComponent(p.slug)}`);
     } catch (e) {
@@ -743,6 +718,9 @@ export function WikiEdit({ scope, slug, initialSlug }: { scope: number; slug?: s
               slug (주소)
               <input value={form.slug} placeholder={slugify(form.title || "page")} onChange={(e) => set("slug", e.target.value)} />
             </label>
+          )}
+          {scopePages.data && (
+            <ParentSelect pages={scopePages.data} self={existing.data} value={form.parent_id} onChange={(v) => set("parent_id", v)} />
           )}
           <label className="check">
             <input type="checkbox" checked={form.locked} onChange={(e) => set("locked", e.target.checked)} />

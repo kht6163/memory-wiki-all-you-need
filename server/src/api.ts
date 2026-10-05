@@ -98,7 +98,10 @@ import {
   searchWiki,
   updatePage,
   wikiStats,
+  movePages,
+  slugify,
 } from "./wiki.ts";
+import { suggestedTree } from "./wiki-tree.ts";
 
 export const api = new Hono();
 
@@ -528,6 +531,12 @@ function wikiScope(c: Context): number | null {
 
 api.get("/wiki/pages", (c) => c.json(listPages(wikiScope(c), { deleted: c.req.query("deleted") === "1" })));
 api.get("/wiki/missing", (c) => c.json(missingLinks(wikiScope(c))));
+// Page tree (ADR-0036): suggested parents for flat pages (read-only), and applying chosen moves at once.
+api.get("/wiki/tree/suggest", (c) => c.json(suggestedTree(wikiScope(c))));
+api.post("/wiki/tree/apply", async (c) => {
+  const b = await body<{ moves?: { id: number; parent_id: number | null }[] }>(c);
+  return c.json(movePages(b.moves ?? [], { author: "human" }));
+});
 api.get("/wiki/lint", (c) => c.json(lintWiki(wikiScope(c))));
 api.get("/wiki/pages/:id", (c) => {
   const p = getPage(idParam(c));
@@ -546,7 +555,7 @@ api.get("/wiki/by-slug", (c) => {
   return c.json(p);
 });
 api.post("/wiki/pages", async (c) => {
-  const b = await body<{ project_id?: number | null; slug?: string; title: string; body?: string; locked?: boolean }>(c);
+  const b = await body<{ project_id?: number | null; slug?: string; title: string; body?: string; locked?: boolean; parent_id?: number | null }>(c);
   return c.json(createPage(b.project_id || null, b, { author: "human" }), 201);
 });
 api.patch("/wiki/pages/:id", async (c) => c.json(updatePage(idParam(c), await body(c), { author: "human" })));
@@ -637,21 +646,38 @@ api.post("/wiki/compose", async (c) => {
  * Locked pages refuse agent writes (423). Default wiki: the agent's project.
  */
 api.post("/agent/wiki", async (c) => {
-  const b = await body<{ project?: ProjectRef | null; global?: boolean; slug: string; title?: string; body: string; mode?: "replace" | "append"; reason?: string }>(
-    c,
-  );
+  const b = await body<{
+    project?: ProjectRef | null;
+    global?: boolean;
+    slug: string;
+    title?: string;
+    body: string;
+    mode?: "replace" | "append";
+    reason?: string;
+    /** Slug of the page to put this one under (same wiki); "" = top level; absent = unchanged. */
+    parent?: string;
+  }>(c);
   const project = b.global ? null : projectFromRef(b.project);
   const projectId = project?.id ?? null;
   const text = String(b.body ?? "").trim();
   if (!text) throw new HttpError(400, "body is required");
   const meta = { author: "agent" as const, reason: b.reason ?? null };
+  let parentId: number | null | undefined;
+  if (typeof b.parent === "string") {
+    if (!b.parent.trim()) parentId = null;
+    else {
+      const parent = getPageBySlug(projectId, b.parent);
+      if (!parent || parent.deleted_at) throw new HttpError(404, `parent page "${slugify(b.parent)}" not found in this wiki`);
+      parentId = parent.id;
+    }
+  }
   const existing = getPageBySlug(projectId, String(b.slug ?? b.title ?? ""));
   if (!existing || existing.deleted_at) {
-    const page = createPage(projectId, { slug: b.slug, title: b.title?.trim() || b.slug, body: text }, meta);
+    const page = createPage(projectId, { slug: b.slug, title: b.title?.trim() || b.slug, body: text, parent_id: parentId }, meta);
     return c.json({ action: "create", page }, 201);
   }
   const next = b.mode === "append" ? `${existing.body.trimEnd()}\n\n${text}` : text;
-  const page = updatePage(existing.id, { title: b.title?.trim() || undefined, body: next }, meta);
+  const page = updatePage(existing.id, { title: b.title?.trim() || undefined, body: next, parent_id: parentId }, meta);
   return c.json({ action: b.mode === "append" ? "append" : "replace", page });
 });
 api.post("/wiki/jobs/:id/retry", (c) => c.json(retryJob(idParam(c))));

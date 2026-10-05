@@ -72,6 +72,7 @@ flowchart LR
 
 **위키**
 - **프로젝트별·전역 위키** — `[[slug]]` 링크, `[#id]` 메모리 참조, 이력·되돌리기·백링크·검색·잠금을 지원합니다.
+- **페이지 트리** — 페이지를 다른 페이지 아래에 둡니다. 접고 펴는 트리, 경로, 페이지 트리 레일을 보여 주고, 평평한 위키에는 묶음 제안(예: ADR들을 목록 페이지 아래로)을 띄웁니다. 적용하기 전에는 아무것도 바뀌지 않습니다.
 - **턴 기록으로 정리** — LLM이 대화와 도구 실행 결과를 읽어 페이지에 반영합니다. `WIKI_COMPOSE_CHUNK_CHARS` 단위로 나눠 처리하며, 자동으로는 돌지 않습니다.
 - **위키 점검** — 고아 페이지, 없는 페이지 링크, 지워진 메모리 인용, 빈 페이지를 찾습니다(LLM 없음).
 
@@ -106,14 +107,14 @@ flowchart LR
 
 ### 1. 서버 실행
 
-서버 이미지는 [도커 허브](https://hub.docker.com/r/kht6163/memory-wiki-all-you-need)에 `linux/amd64`·`linux/arm64`로 있습니다. 태그는 `X.Y.Z`(그 버전), `X.Y`(그 minor의 최신 패치, 예: `0.12`), `latest`입니다.
+서버 이미지는 [도커 허브](https://hub.docker.com/r/kht6163/memory-wiki-all-you-need)에 `linux/amd64`·`linux/arm64`로 있습니다. 태그는 `X.Y.Z`(그 버전), `X.Y`(그 minor의 최신 패치, 예: `0.13`), `latest`입니다.
 
 Docker Compose 예시입니다(`LLM_API_KEY`는 `.env`에 둡니다).
 
 ```yaml
 services:
   memory:
-    image: kht6163/memory-wiki-all-you-need:0.12   # amd64 / arm64
+    image: kht6163/memory-wiki-all-you-need:0.13   # amd64 / arm64
     restart: unless-stopped
     environment:
       LLM_BASE_URL: http://<llm-host>:8317/v1
@@ -135,7 +136,7 @@ mkdir -p data && sudo chown 1000:1000 data
 docker run -d --name memory-wiki --restart unless-stopped \
   -p 127.0.0.1:8765:8765 -v "$PWD/data:/data" \
   -e LLM_BASE_URL=http://<llm-host>:8317/v1 -e LLM_API_KEY=<키> -e TIMEZONE=Asia/Seoul \
-  kht6163/memory-wiki-all-you-need:0.12
+  kht6163/memory-wiki-all-you-need:0.13
 ```
 
 **선택: 의미 검색.** 같은 compose 파일에 임베딩 서비스를 더합니다. bge-m3는 다국어 모델이고 CPU로 돌아갑니다(짧은 질의 하나에 약 55ms, 모델 약 2.3GB는 첫 기동 때 내려받음).

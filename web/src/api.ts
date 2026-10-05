@@ -203,9 +203,18 @@ export interface WikiPage {
   body: string;
   locked: boolean;
   source: Source;
+  /** Page this one sits under (null = top level). */
+  parent_id: number | null;
   created_at: string;
   updated_at: string;
   deleted_at: string | null;
+}
+
+/** A suggested parent for a flat page (ADR-0036). */
+export interface TreeSuggestion {
+  page: { id: number; slug: string; title: string };
+  parent: { id: number; slug: string; title: string };
+  reason: "continuation" | "index";
 }
 
 export interface WikiRevision {
@@ -548,8 +557,11 @@ export const api = {
   wikiBySlug: (project_id: number | null, slug: string) => request<WikiPage>("GET", `/wiki/by-slug${qs({ project_id: project_id ?? 0, slug })}`),
   wikiPage: (id: number) =>
     request<{ page: WikiPage; project: Project | null; revisions: WikiRevision[]; backlinks: PageRef[]; cites: Entry[] }>("GET", `/wiki/pages/${id}`),
-  createWikiPage: (p: { project_id: number | null; slug?: string; title: string; body: string; locked?: boolean }) => request<WikiPage>("POST", "/wiki/pages", p),
-  updateWikiPage: (id: number, patch: Partial<Pick<WikiPage, "title" | "body" | "locked">>) => request<WikiPage>("PATCH", `/wiki/pages/${id}`, patch),
+  createWikiPage: (p: { project_id: number | null; slug?: string; title: string; body: string; locked?: boolean; parent_id?: number | null }) =>
+    request<WikiPage>("POST", "/wiki/pages", p),
+  updateWikiPage: (id: number, patch: Partial<Pick<WikiPage, "title" | "body" | "locked" | "parent_id">>) => request<WikiPage>("PATCH", `/wiki/pages/${id}`, patch),
+  wikiTreeSuggest: (project_id: number | null) => request<TreeSuggestion[]>("GET", `/wiki/tree/suggest${qs({ project_id: project_id ?? 0 })}`),
+  applyWikiTree: (moves: { id: number; parent_id: number | null }[]) => request<WikiPage[]>("POST", "/wiki/tree/apply", { moves }),
   deleteWikiPage: (id: number) => request<WikiPage>("DELETE", `/wiki/pages/${id}`),
   restoreWikiPage: (id: number) => request<WikiPage>("POST", `/wiki/pages/${id}/restore`),
   revertWikiPage: (id: number, revisionId: number) => request<WikiPage>("POST", `/wiki/pages/${id}/revert`, { revisionId }),
