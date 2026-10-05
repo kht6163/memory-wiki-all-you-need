@@ -1,39 +1,41 @@
 # pi-memory-wiki-all-you-need
 
-[memory-wiki-all-you-need](https://github.com/kht6163/memory-wiki-all-you-need) 서버에 붙는 pi 확장입니다.
+The [pi](https://github.com/earendil-works/pi) extension for [memory-wiki-all-you-need](https://github.com/kht6163/memory-wiki-all-you-need) — a central memory + LLM wiki server for the pi coding agent. ([한국어](https://github.com/kht6163/memory-wiki-all-you-need/blob/main/README.ko.md))
 
-- 매 요청 전에 서버의 메모리(전역·사용자·이 프로젝트)를 프롬프트에 넣습니다.
-- 턴이 끝나면 대화를 서버로 보내고, 서버의 LLM이 메모리를 정리합니다.
-- 메모리·위키 도구를 에이전트에게 줍니다.
+- **Injects memory into every request** — global, user and current-project memories go into the system prompt before each turn, and related memories are recalled per prompt.
+- **Curates after each turn** — the finished turn is sent to the server, whose LLM adds, updates or removes memories.
+- **Gives the agent tools** — `memory_search`, `session_search`, `memory_add`, `memory_replace`, `memory_remove`, `memory_graph`, `wiki_search`, `wiki_read`, `wiki_write`, plus `/memory`, `/memory-pin`, `/memory-flush`, `/wiki-compose`.
 
-프로젝트는 git `origin` 주소로 구분합니다. 서버가 꺼져 있거나 느려도 pi 턴을 막지 않습니다(타임아웃 뒤 메모리 없이 진행).
+Projects are identified by the git `origin` URL. The extension is fail-soft: if the server is down or slow, pi keeps going after a short timeout and reuses the last memory block it received.
 
-서버가 따로 있어야 합니다. 서버 설치는 [저장소 README](https://github.com/kht6163/memory-wiki-all-you-need#readme)를 보세요.
+You need a running server. See the [main README](https://github.com/kht6163/memory-wiki-all-you-need#readme) for how to set one up.
 
-## 설치
+## Install
 
 ```sh
 pi install npm:pi-memory-wiki-all-you-need
 ```
 
-서버 주소를 환경 변수로 알려 줍니다(셸 설정 파일 등에).
+Tell the extension where the server is (e.g. in your shell profile):
 
 ```sh
-export MEMORY_SERVER_URL=http://<서버 주소>:8765
+export MEMORY_SERVER_URL=http://<server>:8765
 ```
 
-서버의 `/install.sh`로 이미 설치했다면 `~/.pi/agent/extensions/memory-wiki-all-you-need`를 지운 뒤 npm으로 설치하세요. 둘 다 있으면 확장이 두 번 실행됩니다.
+If you already installed the extension with the server's `/install.sh`, delete `~/.pi/agent/extensions/memory-wiki-all-you-need` first. With both installed, the extension runs twice.
 
-## 환경 변수
+Update with `pi update`.
 
-| env | 기본값 | 설명 |
+## Environment variables
+
+| Variable | Default | Description |
 |---|---|---|
-| `MEMORY_SERVER_URL` | `http://127.0.0.1:8765` | 서버 주소 |
-| `MEMORY_SETTLE_DELAY_MS` | 8000 | 턴이 끝나고 서버로 보내기까지 기다리는 시간 |
-| `MEMORY_TIMEOUT_MS` | 1500 | 주입할 메모리를 조회하는 타임아웃 |
-| `MEMORY_PROJECT` | (자동) | 프로젝트 key를 직접 지정 |
-| `MEMORY_DISABLED=1` | | 끄기 |
+| `MEMORY_SERVER_URL` | `http://127.0.0.1:8765` | Server URL |
+| `MEMORY_SETTLE_DELAY_MS` | `8000` | Wait after a turn settles before sending it to the server |
+| `MEMORY_TIMEOUT_MS` | `1500` | Timeout for fetching memory to inject |
+| `MEMORY_PROJECT` | (auto) | Override the project key |
+| `MEMORY_DISABLED=1` | | Disable the extension |
 
-## 라이선스
+## License
 
 MIT
