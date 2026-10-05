@@ -121,14 +121,25 @@ export interface FakeCtx {
   cwd: string;
   hasUI: boolean;
   sessionManager: { getSessionId(): string };
-  ui: { setStatus(key: string, msg: string | undefined): void; notify(msg: string, level?: string): void };
+  ui: {
+    setStatus(key: string, msg: string | undefined): void;
+    notify(msg: string, level?: string): void;
+    select(title: string, options: string[]): Promise<string | undefined>;
+    input(title: string, placeholder?: string): Promise<string | undefined>;
+  };
   notices: { msg: string; level?: string }[];
   status: (string | undefined)[];
+  /** Answers for ui.select / ui.input, used in order (undefined = the user cancelled). */
+  answers: (string | undefined)[];
+  /** What select/input were asked: title and options or placeholder. */
+  asked: { kind: "select" | "input"; title: string; options?: string[]; placeholder?: string }[];
 }
 
 export function makeCtx(cwd: string, sessionId = "sess-x"): FakeCtx {
   const notices: { msg: string; level?: string }[] = [];
   const status: (string | undefined)[] = [];
+  const answers: (string | undefined)[] = [];
+  const asked: FakeCtx["asked"] = [];
   return {
     cwd,
     hasUI: true,
@@ -136,9 +147,13 @@ export function makeCtx(cwd: string, sessionId = "sess-x"): FakeCtx {
     ui: {
       setStatus: (_key, msg) => void status.push(msg),
       notify: (msg, level) => void notices.push({ msg, level }),
+      select: async (title, options) => (asked.push({ kind: "select", title, options }), answers.shift()),
+      input: async (title, placeholder) => (asked.push({ kind: "input", title, placeholder }), answers.shift()),
     },
     notices,
     status,
+    answers,
+    asked,
   };
 }
 

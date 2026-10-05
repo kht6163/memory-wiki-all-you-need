@@ -6,7 +6,7 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { after, before, test } from "node:test";
-import { beforeAgentStartEvent, loadExtension, makeCtx, quietErrors, startMockServer, type FakePi, type MockServer } from "./X-ext-harness.ts";
+import { beforeAgentStartEvent, loadExtension, makeCtx, makePi, quietErrors, startMockServer, type FakePi, type MockServer } from "./X-ext-harness.ts";
 
 let srv: MockServer;
 let srv2: MockServer;
@@ -115,4 +115,101 @@ test("ADR-0033: /memory-server leaves a broken settings file alone and says so",
   assert.match(ctx.notices.at(-1)!.msg, /fix or remove the file/);
   assert.equal(fs.readFileSync(file, "utf8"), '{"project": "keep-me",}');
   fs.writeFileSync(file, saved);
+});
+
+test("ADR-0033: /memory-config <key> <value> saves and applies at once; unset removes the key", async () => {
+  const ctx = makeCtx(agentDir);
+  const cfg = pi.commands.get("memory-config")!;
+  await cfg.handler("timeoutMs 2500", ctx);
+  assert.equal(read().timeoutMs, 2500);
+  assert.match(ctx.notices.at(-1)!.msg, /timeoutMs = 2500 {2}\(settings file\)/);
+  await cfg.handler("project github.com/test/changed", ctx);
+  await pi.emit("before_agent_start", beforeAgentStartEvent("p"), ctx);
+  const req = srv2.requests.filter((r) => r.path === "/api/context").at(-1)!; // srv2: set by the /memory-server test above
+  assert.equal(req.body.project.key, "github.com/test/changed", "the project override applies without a restart");
+  await cfg.handler("unset project", ctx);
+  assert.equal("project" in read(), false);
+  await cfg.handler("disabled true", ctx);
+  assert.equal(read().disabled, true);
+  assert.match(ctx.notices.at(-1)!.msg, /run \/reload to apply/);
+  await cfg.handler("unset disabled", ctx);
+  for (const bad of ["timeoutMs 0", "timeoutMs abc", "settleDelayMs -1", "disabled maybe", "serverUrl ftp://x", "nope 1", "unset nope"]) {
+    const before = JSON.stringify(read());
+    await cfg.handler(bad, ctx);
+    assert.equal(ctx.notices.at(-1)!.level, "error", bad);
+    assert.equal(JSON.stringify(read()), before, bad);
+  }
+  await cfg.handler("timeoutMs", ctx);
+  assert.match(ctx.notices.at(-1)!.msg, /^timeoutMs = 2500/);
+});
+
+test("ADR-0033: /memory-config with no arguments lets you pick a setting and type a value", async () => {
+  const ctx = makeCtx(agentDir);
+  const cfg = pi.commands.get("memory-config")!;
+  ctx.answers.push(undefined); // cancelled: nothing changes
+  await cfg.handler("", ctx);
+  assert.equal(ctx.asked[0].kind, "select");
+  assert.deepEqual(ctx.asked[0].options!.map((o) => o.split(" ")[0]), ["serverUrl", "timeoutMs", "settleDelayMs", "project", "disabled"]);
+  const pick = ctx.asked[0].options!.find((o) => o.startsWith("settleDelayMs"))!;
+  ctx.answers.push(pick, "9000");
+  await cfg.handler("", ctx);
+  assert.equal(read().settleDelayMs, 9000);
+  assert.equal(ctx.asked.at(-1)!.kind, "input");
+  ctx.answers.push(ctx.asked[0].options!.find((o) => o.startsWith("settleDelayMs"))!, "unset");
+  await cfg.handler("", ctx);
+  assert.equal("settleDelayMs" in read(), false);
+  ctx.answers.push(ctx.asked[0].options!.find((o) => o.startsWith("disabled"))!, "true");
+  await cfg.handler("", ctx);
+  assert.equal(read().disabled, true);
+  await cfg.handler("unset disabled", ctx);
+});
+
+test("ADR-0033: /memory-config autocompletes keys, unset targets and true/false", async () => {
+  const { configCompletions } = await import("../../pi-extension/index.ts");
+  assert.deepEqual(configCompletions("")!.map((i) => i.label), ["serverUrl", "timeoutMs", "settleDelayMs", "project", "disabled", "unset"]);
+  assert.deepEqual(configCompletions("se")!.map((i) => i.value), ["serverUrl ", "settleDelayMs "]);
+  assert.deepEqual(configCompletions("unset p")!.map((i) => i.value), ["unset project"]);
+  assert.deepEqual(configCompletions("disabled t")!.map((i) => i.value), ["disabled true"]);
+  assert.equal(configCompletions("timeoutMs 1"), null);
+  assert.equal(configCompletions("zzz"), null);
+});
+
+test("ADR-0033: only MEMORY_DISABLED=1 counts as an env override, like resolveSettings", async () => {
+  const { envOverrides } = await import("../../pi-extension/index.ts");
+  assert.equal(envOverrides("disabled", { MEMORY_DISABLED: "0" }), null);
+  assert.equal(envOverrides("disabled", { MEMORY_DISABLED: "1" }), "1");
+  assert.equal(envOverrides("timeoutMs", { MEMORY_TIMEOUT_MS: " " }), null);
+  assert.equal(envOverrides("timeoutMs", { MEMORY_TIMEOUT_MS: "900" }), "900");
+  const ctx = makeCtx(agentDir);
+  process.env.MEMORY_DISABLED = "0";
+  process.env.MEMORY_TIMEOUT_MS = "900";
+  try {
+    await pi.commands.get("memory-config")!.handler("disabled true", ctx);
+    assert.match(ctx.notices.at(-1)!.msg, /run \/reload to apply/, "MEMORY_DISABLED=0 does not override the file");
+    await pi.commands.get("memory-config")!.handler("timeoutMs 2000", ctx);
+    assert.equal(ctx.notices.at(-1)!.level, "warning");
+    assert.match(ctx.notices.at(-1)!.msg, /MEMORY_TIMEOUT_MS=900 still overrides it/);
+    await pi.commands.get("memory-config")!.handler("timeoutMs", ctx);
+    assert.match(ctx.notices.at(-1)!.msg, /timeoutMs = 900 {2}\(env MEMORY_TIMEOUT_MS\)/);
+  } finally {
+    delete process.env.MEMORY_DISABLED;
+    delete process.env.MEMORY_TIMEOUT_MS;
+  }
+});
+
+test("ADR-0033: when disabled, only /memory-config is registered and it can turn the extension back on", async () => {
+  const mod = await import("../../pi-extension/index.ts");
+  assert.equal(read().disabled, true, "left on by the previous test");
+  const off = makePi();
+  mod.default(off.api);
+  assert.deepEqual([...off.commands.keys()], ["memory-config"]);
+  assert.equal(off.tools.size, 0);
+  const ctx = makeCtx(agentDir);
+  await off.commands.get("memory-config")!.handler("", ctx);
+  assert.match(ctx.notices.at(-1)!.msg, /\/memory-config disabled false/);
+  await off.commands.get("memory-config")!.handler("disabled false", ctx);
+  assert.equal(read().disabled, false);
+  const on = makePi();
+  mod.default(on.api);
+  assert.ok(on.commands.has("memory") && on.tools.size > 0, "registered again after the reload");
 });

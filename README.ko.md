@@ -207,7 +207,7 @@ pi install npm:pi-memory-wiki-all-you-need
 <details>
 <summary><b>확장 설정</b></summary>
 
-`~/.pi/agent/extensions/memory-wiki-all-you-need.json` — 모든 키는 생략할 수 있습니다. 같은 뜻의 환경 변수가 있으면 파일보다 우선합니다(한 셸에서만 잠깐 바꿀 때 편합니다).
+`~/.pi/agent/extensions/memory-wiki-all-you-need.json` — 모든 키는 생략할 수 있습니다. pi 안에서 `/memory-config`로 바꾸거나(예: `/memory-config timeoutMs 3000`, 인자 없이 쓰면 목록에서 고름) 파일을 직접 고칩니다. 같은 뜻의 환경 변수가 있으면 파일보다 우선합니다(한 셸에서만 잠깐 바꿀 때 편합니다).
 
 | 키 | 덮어쓰는 환경 변수 | 기본값 | 설명 |
 |---|---|---|---|
@@ -215,7 +215,7 @@ pi install npm:pi-memory-wiki-all-you-need
 | `settleDelayMs` | `MEMORY_SETTLE_DELAY_MS` | 8000 | 에이전트가 완전히 대기 상태가 된 뒤 턴을 보내기까지 기다리는 시간 |
 | `timeoutMs` | `MEMORY_TIMEOUT_MS` | 1500 | 주입할 메모리를 조회하는 타임아웃 |
 | `project` | `MEMORY_PROJECT` | (자동) | 프로젝트 키 직접 지정 |
-| `disabled` | `MEMORY_DISABLED=1` | `false` | 확장 끄기 |
+| `disabled` | `MEMORY_DISABLED=1` | `false` | 확장 끄기(`/memory-config disabled false`로 다시 켬) |
 
 </details>
 
@@ -236,7 +236,8 @@ pi install npm:pi-memory-wiki-all-you-need
 | 명령 | 하는 일 |
 |---|---|
 | `/memory` | 서버 상태와 이 프로젝트의 위키 링크 |
-| `/memory-server [url]` | 서버 주소와 그 출처를 보여 주거나, 새 주소를 설정 파일에 저장 |
+| `/memory-config [key [value]]` | 확장 설정을 보거나 바꿈(인자 없이 쓰면 목록에서 고름), `/memory-config unset <key>`로 지움. 바로 적용됨 |
+| `/memory-server [url]` | 서버 주소와 그 출처를 보여 주거나, 새 주소를 저장(`/memory-config serverUrl <url>`과 같음) |
 | `/memory-pin <text> [--project]` | 모든 세션에 주입되는 고정 지시 추가 |
 | `/memory-flush` | 모아 둔 턴을 기다리지 않고 지금 보냄 |
 | `/wiki-compose [정리 방향]` | 현재 세션의 턴을 서버 LLM으로 위키에 정리 |

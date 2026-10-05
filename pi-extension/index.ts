@@ -91,11 +91,99 @@ export function resolveSettings(env: Record<string, string | undefined>, file: M
 const settings = resolveSettings(process.env, readConfig());
 let SERVER = settings.server;
 let serverSource = settings.source;
-const envServer = settings.envServer;
-const SETTLE_DELAY_MS = settings.settleDelayMs;
-const CONTEXT_TIMEOUT_MS = settings.timeoutMs;
-const PROJECT_OVERRIDE = settings.project;
-const DISABLED = settings.disabled;
+let SETTLE_DELAY_MS = settings.settleDelayMs;
+let CONTEXT_TIMEOUT_MS = settings.timeoutMs;
+let PROJECT_OVERRIDE = settings.project;
+
+/** Re-read env + file after /memory-config or /memory-server changed the file. "disabled" needs /reload. */
+function applySettings() {
+  const next = resolveSettings(process.env, readConfig());
+  SERVER = next.server;
+  serverSource = next.source;
+  SETTLE_DELAY_MS = next.settleDelayMs;
+  CONTEXT_TIMEOUT_MS = next.timeoutMs;
+  PROJECT_OVERRIDE = next.project;
+  return next;
+}
+
+export type SettingKey = keyof MemoryConfig;
+/** The keys /memory-config knows: what they mean, the env var that overrides them, and how a typed value parses. */
+export const SETTINGS: Record<SettingKey, { env: string; help: string; parse: (v: string) => MemoryConfig[SettingKey] }> = {
+  serverUrl: {
+    env: "MEMORY_SERVER_URL",
+    help: "memory server URL",
+    parse: (v) => {
+      const u = new URL(v.trim());
+      if (u.protocol !== "http:" && u.protocol !== "https:") throw new Error("expected http(s)://<server>:8765");
+      return cleanUrl(u.origin + u.pathname);
+    },
+  },
+  timeoutMs: { env: "MEMORY_TIMEOUT_MS", help: "timeout for fetching memory before each request (ms)", parse: (v) => positiveInt(v, 1) },
+  settleDelayMs: { env: "MEMORY_SETTLE_DELAY_MS", help: "wait after pi settles before sending the turn (ms)", parse: (v) => positiveInt(v, 0) },
+  project: {
+    env: "MEMORY_PROJECT",
+    help: "fixed project key instead of the git origin",
+    parse: (v) => {
+      if (!v.trim()) throw new Error("empty project key (use unset to go back to the git origin)");
+      return v.trim();
+    },
+  },
+  disabled: {
+    env: "MEMORY_DISABLED",
+    help: "turn the extension off (applies after /reload; /memory-config disabled false turns it back on)",
+    parse: (v) => {
+      const t = v.trim().toLowerCase();
+      if (["true", "on", "yes", "1"].includes(t)) return true;
+      if (["false", "off", "no", "0"].includes(t)) return false;
+      throw new Error("expected true or false");
+    },
+  },
+};
+export const SETTING_KEYS = Object.keys(SETTINGS) as SettingKey[];
+
+/** Whether the env var really overrides the file for this key (same rules as resolveSettings). */
+export function envOverrides(key: SettingKey, env: Record<string, string | undefined> = process.env): string | null {
+  const v = env[SETTINGS[key].env]?.trim();
+  if (!v) return null;
+  if (key === "disabled") return v === "1" ? v : null;
+  return v;
+}
+
+function positiveInt(v: string, min: number): number {
+  const n = Number(v.trim());
+  if (!Number.isInteger(n) || n < min) throw new Error(`expected a whole number ≥ ${min}`);
+  return n;
+}
+
+/** Current value of a key as shown to people, with where it comes from. */
+function describeSetting(key: SettingKey): string {
+  const file = readConfig();
+  const env = envOverrides(key);
+  const eff = resolveSettings(process.env, file);
+  const value =
+    key === "serverUrl" ? eff.server : key === "timeoutMs" ? eff.timeoutMs : key === "settleDelayMs" ? eff.settleDelayMs : key === "project" ? eff.project || "(git origin)" : eff.disabled;
+  const from = env ? `env ${SETTINGS[key].env}` : file[key] !== undefined ? "settings file" : "default";
+  return `${key} = ${value}  (${from})`;
+}
+
+/** Autocomplete for /memory-config: keys, "unset <key>", and true/false for disabled. */
+export function configCompletions(prefix: string): { value: string; label: string; description?: string }[] | null {
+  const parts = prefix.split(/\s+/);
+  if (parts.length <= 1) {
+    const items = [...SETTING_KEYS.map((k) => ({ value: `${k} `, label: k, description: SETTINGS[k].help })), { value: "unset ", label: "unset", description: "remove a key from the settings file" }];
+    const hits = items.filter((i) => i.label.startsWith(parts[0] ?? ""));
+    return hits.length ? hits : null;
+  }
+  if (parts[0] === "unset" && parts.length === 2) {
+    const hits = SETTING_KEYS.filter((k) => k.startsWith(parts[1])).map((k) => ({ value: `unset ${k}`, label: k }));
+    return hits.length ? hits : null;
+  }
+  if (parts[0] === "disabled" && parts.length === 2) {
+    const hits = ["true", "false"].filter((v) => v.startsWith(parts[1])).map((v) => ({ value: `disabled ${v}`, label: v }));
+    return hits.length ? hits : null;
+  }
+  return null;
+}
 const MAX_BUFFER = 600;
 
 interface TurnMessage {
@@ -179,11 +267,40 @@ function fmtEntries(entries: EntryLite[]): string {
 }
 
 const SOURCE_LABEL = { env: "MEMORY_SERVER_URL", file: "settings file", default: "built-in default" } as const;
+const isSettingKey = (k: string): k is SettingKey => (SETTING_KEYS as string[]).includes(k);
 const unreachableHint = () =>
   serverSource === "env" ? "" : `\nSet the server with /memory-server http://<server>:8765 (saved to ${configPath()})`;
 
 export default function memoryAllYouNeed(pi: ExtensionAPI) {
-  if (DISABLED) return;
+  if (resolveSettings(process.env, readConfig()).disabled) {
+    // Off: register nothing but a /memory-config that can turn it back on.
+    pi.registerCommand("memory-config", {
+      description: "memory extension is off — /memory-config disabled false, then /reload",
+      getArgumentCompletions: (prefix) => configCompletions(prefix),
+      handler: async (args, ctx) => {
+        const [first = "", second = ""] = args.trim().split(/\s+/);
+        const key = first === "unset" ? second : first;
+        const raw = args.trim().slice(first.length).trim();
+        if (!isSettingKey(key) || (first !== "unset" && !raw)) {
+          ctx.ui.notify(
+            envOverrides("disabled")
+              ? "memory extension is off: MEMORY_DISABLED=1 is set in this shell — unset it and restart pi"
+              : `memory extension is off (${configPath()}). Turn it on: /memory-config disabled false, then /reload`,
+            "info",
+          );
+          return;
+        }
+        try {
+          writeConfig({ [key]: first === "unset" ? undefined : SETTINGS[key].parse(raw) } as MemoryConfig);
+        } catch (err) {
+          ctx.ui.notify(`could not update ${key}: ${(err as Error).message}`, "error");
+          return;
+        }
+        ctx.ui.notify(`${key} saved to ${configPath()} — run /reload to apply`, "info");
+      },
+    });
+    return;
+  }
 
   let sessionId = "";
   let cwd = process.cwd();
@@ -463,43 +580,97 @@ export default function memoryAllYouNeed(pi: ExtensionAPI) {
     },
   });
 
-  pi.registerCommand("memory-server", {
-    description: "Show or set the memory server URL: /memory-server [http://<server>:8765]  (saved to the settings file)",
-    handler: async (args, ctx) => {
-      const url = cleanUrl(args);
-      if (!url) {
-        ctx.ui.notify(`memory server: ${SERVER} (from ${SOURCE_LABEL[serverSource]})\nsettings: ${configPath()}`, "info");
-        return;
-      }
-      let parsed: URL;
-      try {
-        parsed = new URL(url);
-        if (parsed.protocol !== "http:" && parsed.protocol !== "https:") throw new Error("not http(s)");
-      } catch {
-        ctx.ui.notify(`not a server URL: ${url} (expected http://<server>:8765)`, "error");
-        return;
-      }
-      const next = cleanUrl(parsed.origin + parsed.pathname);
-      try {
-        writeConfig({ serverUrl: next });
-      } catch (err) {
-        ctx.ui.notify(`could not update ${configPath()}: ${(err as Error).message} — fix or remove the file and try again`, "error");
-        return;
-      }
-      if (envServer) {
-        ctx.ui.notify(`saved to ${configPath()}, but MEMORY_SERVER_URL=${envServer} still overrides it in this shell`, "warning");
-        return;
-      }
-      SERVER = next;
-      serverSource = "file";
+  /** Save one key (undefined removes it), apply it now and tell the user what happened. */
+  async function saveSetting(ctx: ExtensionContext, key: SettingKey, value: MemoryConfig[SettingKey]) {
+    const before = SERVER;
+    try {
+      writeConfig({ [key]: value } as MemoryConfig);
+    } catch (err) {
+      ctx.ui.notify(`could not update ${configPath()}: ${(err as Error).message} — fix or remove the file and try again`, "error");
+      return;
+    }
+    applySettings();
+    const env = envOverrides(key);
+    const what = value === undefined ? `${key} removed from ${configPath()}` : `${key} saved to ${configPath()}`;
+    if (env) {
+      ctx.ui.notify(`${what}, but ${SETTINGS[key].env}=${env} still overrides it in this shell`, "warning");
+      return;
+    }
+    if (key === "project") {
+      project = resolveProject(cwd, PROJECT_OVERRIDE);
+      setStatus(ctx, project ? `🧠 ${project.name}` : "🧠 global");
+    }
+    if (key === "disabled") {
+      ctx.ui.notify(`${what} — run /reload to apply`, "info");
+      return;
+    }
+    if (key === "serverUrl" && SERVER !== before) {
       warned = false;
       cachedSystem = ""; // the fallback block belonged to the old server
       try {
         const h = await call<{ entries: number }>("GET", "/health", undefined, 3000);
-        ctx.ui.notify(`memory server set to ${SERVER} (${h.entries} memories) — saved to ${configPath()}`, "info");
+        ctx.ui.notify(`memory server set to ${SERVER} (${h.entries} memories) — ${what}`, "info");
       } catch (err) {
-        ctx.ui.notify(`saved ${SERVER} to ${configPath()}, but it is not reachable: ${(err as Error).message}`, "warning");
+        ctx.ui.notify(`${what}, but ${SERVER} is not reachable: ${(err as Error).message}`, "warning");
       }
+      return;
+    }
+    ctx.ui.notify(`${describeSetting(key)} — ${what}`, "info");
+  }
+
+  async function setFromText(ctx: ExtensionContext, key: SettingKey, raw: string) {
+    let value: MemoryConfig[SettingKey];
+    try {
+      value = SETTINGS[key].parse(raw);
+    } catch (err) {
+      ctx.ui.notify(`invalid ${key}: ${(err as Error).message}`, "error");
+      return;
+    }
+    await saveSetting(ctx, key, value);
+  }
+
+  pi.registerCommand("memory-config", {
+    description: "Show or change the extension settings: /memory-config [key [value]] · /memory-config unset <key>",
+    getArgumentCompletions: (prefix) => configCompletions(prefix),
+    handler: async (args, ctx) => {
+      const [first = "", ...rest] = args.trim().split(/\s+/);
+      const restText = args.trim().slice(first.length).trim();
+      if (first === "unset") {
+        const key = rest[0] ?? "";
+        if (!isSettingKey(key)) return ctx.ui.notify(`usage: /memory-config unset <${SETTING_KEYS.join("|")}>`, "error");
+        return saveSetting(ctx, key, undefined);
+      }
+      if (first && !isSettingKey(first)) {
+        return ctx.ui.notify(`unknown setting "${first}" — one of ${SETTING_KEYS.join(", ")}`, "error");
+      }
+      if (first && restText) return setFromText(ctx, first as SettingKey, restText);
+      if (first) return ctx.ui.notify(`${describeSetting(first as SettingKey)}\n${SETTINGS[first as SettingKey].help}`, "info");
+      // No arguments: list everything, and in the TUI let the user pick one to change.
+      const lines = SETTING_KEYS.map(describeSetting);
+      if (!ctx.hasUI) return ctx.ui.notify(`${lines.join("\n")}\nsettings: ${configPath()}`, "info");
+      const picked = await ctx.ui.select(`memory settings — ${configPath()}`, lines);
+      if (!picked) return;
+      const key = picked.split(" ")[0] as SettingKey;
+      if (key === "disabled") {
+        const v = await ctx.ui.select("disabled (applies after /reload)", ["false", "true", "unset"]);
+        if (!v) return;
+        return v === "unset" ? saveSetting(ctx, key, undefined) : setFromText(ctx, key, v);
+      }
+      const typed = await ctx.ui.input(`${key}: ${SETTINGS[key].help} — type "unset" to remove`, describeSetting(key).split(" = ")[1].split("  (")[0]);
+      if (typed === undefined || !typed.trim()) return;
+      return typed.trim() === "unset" ? saveSetting(ctx, key, undefined) : setFromText(ctx, key, typed);
+    },
+  });
+
+  pi.registerCommand("memory-server", {
+    description: "Show or set the memory server URL: /memory-server [http://<server>:8765]  (same as /memory-config serverUrl)",
+    handler: async (args, ctx) => {
+      const url = args.trim();
+      if (!url) {
+        ctx.ui.notify(`memory server: ${SERVER} (from ${SOURCE_LABEL[serverSource]})\nsettings: ${configPath()}`, "info");
+        return;
+      }
+      await setFromText(ctx, "serverUrl", url);
     },
   });
 

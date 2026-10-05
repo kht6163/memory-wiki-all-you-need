@@ -207,7 +207,7 @@ Both save the URL to `~/.pi/agent/extensions/memory-wiki-all-you-need.json` (or 
 <details>
 <summary><b>Extension settings</b></summary>
 
-`~/.pi/agent/extensions/memory-wiki-all-you-need.json` — every key is optional. An environment variable with the same meaning overrides the file (handy for a one-off shell).
+`~/.pi/agent/extensions/memory-wiki-all-you-need.json` — every key is optional. Change them inside pi with `/memory-config` (e.g. `/memory-config timeoutMs 3000`, or no arguments to pick from a list) or edit the file. An environment variable with the same meaning overrides the file (handy for a one-off shell).
 
 | Key | Env override | Default | Description |
 |---|---|---|---|
@@ -215,7 +215,7 @@ Both save the URL to `~/.pi/agent/extensions/memory-wiki-all-you-need.json` (or 
 | `settleDelayMs` | `MEMORY_SETTLE_DELAY_MS` | 8000 | Wait after the agent settles before sending the turn |
 | `timeoutMs` | `MEMORY_TIMEOUT_MS` | 1500 | Timeout for fetching the injected memory |
 | `project` | `MEMORY_PROJECT` | (auto) | Override the project key |
-| `disabled` | `MEMORY_DISABLED=1` | `false` | Disable the extension |
+| `disabled` | `MEMORY_DISABLED=1` | `false` | Disable the extension (`/memory-config disabled false` turns it back on) |
 
 </details>
 
@@ -236,7 +236,8 @@ Both save the URL to `~/.pi/agent/extensions/memory-wiki-all-you-need.json` (or 
 | Command | What it does |
 |---|---|
 | `/memory` | Server status and the wiki link for this project |
-| `/memory-server [url]` | Show the server URL and where it comes from, or save a new one to the settings file |
+| `/memory-config [key [value]]` | Show or change any extension setting (no arguments: pick from a list); `/memory-config unset <key>` removes one. Applies right away |
+| `/memory-server [url]` | Show the server URL and where it comes from, or save a new one (same as `/memory-config serverUrl <url>`) |
 | `/memory-pin <text> [--project]` | Add a standing instruction injected into every session |
 | `/memory-flush` | Send the buffered turn now instead of waiting |
 | `/wiki-compose [focus]` | Organize this session's turns into the wiki with the server LLM |

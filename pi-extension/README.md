@@ -4,7 +4,7 @@ The [pi](https://github.com/earendil-works/pi) extension for [memory-wiki-all-yo
 
 - **Injects memory into every request** — global, user and current-project memories go into the system prompt before each turn, and related memories are recalled per prompt.
 - **Curates after each turn** — the finished turn is sent to the server, whose LLM adds, updates or removes memories.
-- **Gives the agent tools** — `memory_search`, `session_search`, `memory_add`, `memory_replace`, `memory_remove`, `memory_graph`, `wiki_search`, `wiki_read`, `wiki_write`, plus `/memory`, `/memory-server`, `/memory-pin`, `/memory-flush`, `/wiki-compose`.
+- **Gives the agent tools** — `memory_search`, `session_search`, `memory_add`, `memory_replace`, `memory_remove`, `memory_graph`, `wiki_search`, `wiki_read`, `wiki_write`, plus `/memory`, `/memory-config`, `/memory-server`, `/memory-pin`, `/memory-flush`, `/wiki-compose`.
 
 Projects are identified by the git `origin` URL. The extension is fail-soft: if the server is down or slow, pi keeps going after a short timeout and reuses the last memory block it received.
 
@@ -36,7 +36,15 @@ Update with `pi update`.
 
 ## Settings
 
-All keys of `memory-wiki-all-you-need.json` are optional. An environment variable with the same meaning overrides the file.
+All keys of `memory-wiki-all-you-need.json` are optional. Change them inside pi with `/memory-config`:
+
+```text
+/memory-config                    # list the settings and pick one to change
+/memory-config timeoutMs 3000     # set a value (applies right away)
+/memory-config unset project      # remove a key (back to the default)
+```
+
+An environment variable with the same meaning overrides the file.
 
 | Key | Env override | Default | Description |
 |---|---|---|---|
@@ -44,7 +52,7 @@ All keys of `memory-wiki-all-you-need.json` are optional. An environment variabl
 | `settleDelayMs` | `MEMORY_SETTLE_DELAY_MS` | `8000` | Wait after a turn settles before sending it to the server |
 | `timeoutMs` | `MEMORY_TIMEOUT_MS` | `1500` | Timeout for fetching memory to inject |
 | `project` | `MEMORY_PROJECT` | (auto) | Override the project key |
-| `disabled` | `MEMORY_DISABLED=1` | `false` | Disable the extension |
+| `disabled` | `MEMORY_DISABLED=1` | `false` | Disable the extension (`/memory-config disabled false` turns it back on) |
 
 ## License
 
