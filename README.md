@@ -104,14 +104,14 @@ flowchart LR
 
 ### 1. Run the server
 
-The server image is on [Docker Hub](https://hub.docker.com/r/kht6163/memory-wiki-all-you-need) for `linux/amd64` and `linux/arm64`. Tags: `X.Y.Z` (exact release), `X.Y` (latest patch of that minor, e.g. `0.8`), `latest`.
+The server image is on [Docker Hub](https://hub.docker.com/r/kht6163/memory-wiki-all-you-need) for `linux/amd64` and `linux/arm64`. Tags: `X.Y.Z` (exact release), `X.Y` (latest patch of that minor, e.g. `0.10`), `latest`.
 
 Docker Compose example (put `LLM_API_KEY` in `.env`):
 
 ```yaml
 services:
   memory:
-    image: kht6163/memory-wiki-all-you-need:0.8   # amd64 / arm64
+    image: kht6163/memory-wiki-all-you-need:0.10   # amd64 / arm64
     restart: unless-stopped
     environment:
       LLM_BASE_URL: http://<llm-host>:8317/v1
@@ -133,7 +133,7 @@ mkdir -p data && sudo chown 1000:1000 data
 docker run -d --name memory-wiki --restart unless-stopped \
   -p 127.0.0.1:8765:8765 -v "$PWD/data:/data" \
   -e LLM_BASE_URL=http://<llm-host>:8317/v1 -e LLM_API_KEY=<key> -e TIMEZONE=Asia/Seoul \
-  kht6163/memory-wiki-all-you-need:0.8
+  kht6163/memory-wiki-all-you-need:0.10
 ```
 
 To build from source instead, replace `image:` with `build: ./memory-wiki-all-you-need` (a clone of this repository).

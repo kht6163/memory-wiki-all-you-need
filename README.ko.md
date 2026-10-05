@@ -104,14 +104,14 @@ flowchart LR
 
 ### 1. 서버 실행
 
-서버 이미지는 [도커 허브](https://hub.docker.com/r/kht6163/memory-wiki-all-you-need)에 `linux/amd64`·`linux/arm64`로 있습니다. 태그는 `X.Y.Z`(그 버전), `X.Y`(그 minor의 최신 패치, 예: `0.8`), `latest`입니다.
+서버 이미지는 [도커 허브](https://hub.docker.com/r/kht6163/memory-wiki-all-you-need)에 `linux/amd64`·`linux/arm64`로 있습니다. 태그는 `X.Y.Z`(그 버전), `X.Y`(그 minor의 최신 패치, 예: `0.10`), `latest`입니다.
 
 Docker Compose 예시입니다(`LLM_API_KEY`는 `.env`에 둡니다).
 
 ```yaml
 services:
   memory:
-    image: kht6163/memory-wiki-all-you-need:0.8   # amd64 / arm64
+    image: kht6163/memory-wiki-all-you-need:0.10   # amd64 / arm64
     restart: unless-stopped
     environment:
       LLM_BASE_URL: http://<llm-host>:8317/v1
@@ -133,7 +133,7 @@ mkdir -p data && sudo chown 1000:1000 data
 docker run -d --name memory-wiki --restart unless-stopped \
   -p 127.0.0.1:8765:8765 -v "$PWD/data:/data" \
   -e LLM_BASE_URL=http://<llm-host>:8317/v1 -e LLM_API_KEY=<키> -e TIMEZONE=Asia/Seoul \
-  kht6163/memory-wiki-all-you-need:0.8
+  kht6163/memory-wiki-all-you-need:0.10
 ```
 
 소스에서 직접 빌드하려면 `image:` 대신 `build: ./memory-wiki-all-you-need`(이 저장소를 받은 폴더)를 쓰세요.
