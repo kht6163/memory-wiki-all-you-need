@@ -174,6 +174,13 @@ export interface Stats {
   pages: number;
   wikiPending: number;
   wikiErrors: number;
+  /** Embedding model, or null when semantic search is off. */
+  embed: string | null;
+  /** Memories and wiki pages still waiting for a vector. */
+  embedPending: number;
+  /** Texts the embedding endpoint refused (skipped until they change). */
+  embedSkipped: number;
+  embedError: string | null;
 }
 
 export interface WikiPage {

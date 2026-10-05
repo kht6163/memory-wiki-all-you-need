@@ -1,5 +1,6 @@
 import { config } from "./config.ts";
 import { db, now, rowToEntry, transaction, type Entry, type Source } from "./db.ts";
+import { nearest } from "./embeddings.ts";
 import { extractTerms } from "./search.ts";
 import { findSecrets } from "./secrets.ts";
 import { HttpError, entryStates, getProject } from "./store.ts";
@@ -419,9 +420,15 @@ export interface WikiHit {
   snippet: string;
 }
 
-export function searchWiki(query: string, opts: { projectId?: number | null; allProjects?: boolean; limit?: number } = {}): WikiHit[] {
+/** Same fusion as searchEntries (ADR-0034); `vector` = the query's embedding or null (keyword only). */
+export function searchWiki(
+  query: string,
+  opts: { projectId?: number | null; allProjects?: boolean; limit?: number; vector?: Float32Array | null; minSimilarity?: number } = {},
+): WikiHit[] {
   const terms = extractTerms(query);
-  if (!terms.length) return [];
+  const vector = opts.vector ?? null;
+  if (!terms.length && !vector) return [];
+  const limit = opts.limit ?? 10;
   const where = ["w.deleted_at IS NULL"];
   const args: (string | number)[] = [];
   if (!opts.allProjects) {
@@ -447,7 +454,7 @@ export function searchWiki(query: string, opts: { projectId?: number | null; all
       .all(...args, ...short.flatMap((s) => [`%${esc(s)}%`, `%${esc(s)}%`])))
       found.set(Number(r.id), toPage(r));
   }
-  const hits: WikiHit[] = [];
+  const keyword = new Map<number, { score: number; first: number }>();
   for (const page of found.values()) {
     const title = page.title.toLowerCase();
     const body = page.body.toLowerCase();
@@ -471,14 +478,41 @@ export function searchWiki(query: string, opts: { projectId?: number | null; all
       score += best;
     }
     if (!matched) continue;
-    score *= 0.5 + matched / terms.length;
+    keyword.set(page.id, { score: score * (0.5 + matched / terms.length), first });
+  }
+  const similar: number[] = [];
+  if (vector) {
+    const rows = db
+      .prepare(`SELECT w.id, w.updated_at FROM wiki_pages w WHERE ${where.join(" AND ")}`)
+      .all(...args)
+      .map((r) => ({ id: Number(r.id), updated_at: String(r.updated_at) }));
+    for (const n of nearest("page", vector, rows, opts.minSimilarity ?? config.embed.searchMinSimilarity, Math.max(limit * 3, 30))) similar.push(n.id);
+    const missing = similar.filter((id) => !found.has(id));
+    if (missing.length)
+      for (const r of db.prepare(`SELECT * FROM wiki_pages WHERE id IN (${missing.map(() => "?").join(",")})`).all(...missing)) found.set(Number(r.id), toPage(r));
+  }
+  const kwRank = new Map([...keyword.entries()].sort((a, b) => b[1].score - a[1].score || b[0] - a[0]).map(([id], i) => [id, i]));
+  const vecRank = new Map(similar.map((id, i) => [id, i]));
+  const hits: WikiHit[] = [];
+  for (const id of new Set([...keyword.keys(), ...similar])) {
+    const page = found.get(id);
+    if (!page) continue;
+    const kw = keyword.get(id);
+    let score: number;
+    if (!vector) score = kw!.score;
+    else {
+      const k = kwRank.get(id);
+      const v = vecRank.get(id);
+      score = (k === undefined ? 0 : 1 / (20 + k)) + (v === undefined ? 0 : 1 / (20 + v));
+    }
     if (page.project_id != null) score *= 1.1;
+    const first = kw?.first ?? -1;
     const start = Math.max(0, first - 100);
     const snippet = first < 0 ? page.body.slice(0, 240) : `${start > 0 ? "…" : ""}${page.body.slice(start, start + 320)}`;
     hits.push({ page, score, snippet: snippet.replace(/\s+/g, " ") });
   }
   hits.sort((a, b) => b.score - a.score);
-  return hits.slice(0, opts.limit ?? 10);
+  return hits.slice(0, limit);
 }
 
 // -------------------------------------------------------------- job queue

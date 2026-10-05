@@ -5,6 +5,7 @@
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
+import { installFakeEmbeddings } from "./embed-stub.ts";
 import { installFakeLlm } from "./llm-stub.ts";
 
 const dir = fs.mkdtempSync(path.join(os.tmpdir(), "mwayn-test-"));
@@ -20,3 +21,6 @@ process.env.PI_CODING_AGENT_DIR = path.join(dir, "pi-agent");
 process.env.WEB_DIR = path.join(dir, "web");
 process.on("exit", () => fs.rmSync(dir, { recursive: true, force: true }));
 installFakeLlm(process.env.LLM_BASE_URL);
+// Embeddings stay off (EMBED_BASE_URL unset) so every other suite runs keyword-only;
+// the embedding suites set EMBED_BASE_URL to the fake before importing the server.
+installFakeEmbeddings();

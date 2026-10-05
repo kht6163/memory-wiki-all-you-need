@@ -4,7 +4,8 @@ import { serve } from "@hono/node-server";
 import { serveStatic } from "@hono/node-server/serve-static";
 import { Hono } from "hono";
 import { api } from "./api.ts";
-import { config, llmEnabled } from "./config.ts";
+import { config, embedEnabled, llmEnabled } from "./config.ts";
+import { startEmbedder } from "./embeddings.ts";
 import { startWorker } from "./worker.ts";
 
 const app = new Hono();
@@ -67,8 +68,9 @@ if (fs.existsSync(config.webDir)) {
 }
 
 startWorker();
+startEmbedder();
 
 serve({ fetch: app.fetch, port: config.port, hostname: config.host }, (info) => {
   console.log(`memory-wiki-all-you-need listening on http://${info.address}:${info.port}`);
-  console.log(`data: ${config.dataDir} | llm: ${llmEnabled() ? `${config.llm.model} @ ${config.llm.baseUrl}` : "disabled"}`);
+  console.log(`data: ${config.dataDir} | llm: ${llmEnabled() ? `${config.llm.model} @ ${config.llm.baseUrl}` : "disabled"} | embeddings: ${embedEnabled() ? `${config.embed.model} @ ${config.embed.baseUrl}` : "off"}`);
 });

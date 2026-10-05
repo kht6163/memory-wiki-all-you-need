@@ -619,6 +619,33 @@ CREATE INDEX project_pair_dismissed_b ON project_pair_dismissed(b);
 `);
     },
   },
+  {
+    version: 14,
+    name: "embedding vectors",
+    up(db) {
+      // One vector per memory / wiki page for semantic search (embeddings.ts,
+      // ADR-0034). text_hash covers model + embedded text: a row whose hash no
+      // longer matches is re-embedded, and vectors of another model are never compared.
+      db.exec(`
+CREATE TABLE entry_embeddings (
+  entry_id INTEGER PRIMARY KEY REFERENCES entries(id) ON DELETE CASCADE,
+  model TEXT NOT NULL,
+  text_hash TEXT NOT NULL,
+  dim INTEGER NOT NULL,
+  vector BLOB NOT NULL,
+  updated_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now'))
+);
+CREATE TABLE wiki_embeddings (
+  page_id INTEGER PRIMARY KEY REFERENCES wiki_pages(id) ON DELETE CASCADE,
+  model TEXT NOT NULL,
+  text_hash TEXT NOT NULL,
+  dim INTEGER NOT NULL,
+  vector BLOB NOT NULL,
+  updated_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now'))
+);
+`);
+    },
+  },
 ];
 
 /**

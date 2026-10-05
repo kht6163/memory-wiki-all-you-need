@@ -1,5 +1,6 @@
 import { Hono, type Context } from "hono";
 import { buildContext } from "./context.ts";
+import { embedStats, queryVector } from "./embeddings.ts";
 import { CATEGORIES, type Entry, type Scope } from "./db.ts";
 import { searchEntries, searchTurns } from "./search.ts";
 import {
@@ -126,23 +127,27 @@ function projectFromRef(ref: ProjectRef | null | undefined) {
 
 // ------------------------------------------------------------ agent-facing
 
-api.get("/health", (c) => c.json({ ok: true, llm: llmEnabled() ? config.llm.model : null, ...stats(), ...wikiStats(), ...graphStats(), ...reviewStats() }));
+// Fused search scores (ADR-0034) are small numbers: 2 decimals would flatten them.
+// Keyword-only scores keep their 2 decimals (unchanged output with embeddings off).
+const roundScore = (n: number, fused: boolean) => (fused ? Math.round(n * 10000) / 10000 : Math.round(n * 100) / 100);
+
+api.get("/health", (c) => c.json({ ok: true, llm: llmEnabled() ? config.llm.model : null, ...stats(), ...wikiStats(), ...graphStats(), ...reviewStats(), ...embedStats() }));
 
 /** Called by the pi extension before every run. Upserts the project. */
 api.post("/context", async (c) => {
   const b = await body<{ project?: ProjectRef | null; prompt?: string }>(c);
   const project = projectFromRef(b.project);
-  const ctx = buildContext(project, String(b.prompt ?? "").slice(0, 8000));
+  const ctx = await buildContext(project, String(b.prompt ?? "").slice(0, 8000));
   // Only prompt-specific recall counts as use; the stable block is shown every time.
   recordUsage(ctx.recalled, "recall");
   recordShown(ctx.included);
   return c.json({ project, ...ctx });
 });
 
-api.get("/context/preview", (c) => {
+api.get("/context/preview", async (c) => {
   const id = num(c.req.query("project_id"));
   const project = id ? getProject(id) : null;
-  return c.json({ project, ...buildContext(project, c.req.query("prompt") ?? "") });
+  return c.json({ project, ...(await buildContext(project, c.req.query("prompt") ?? "")) });
 });
 
 api.post("/turns", async (c) => {
@@ -151,8 +156,9 @@ api.post("/turns", async (c) => {
   return c.json({ id: t.id, status: t.status }, 202);
 });
 
-api.get("/search", (c) => {
+api.get("/search", async (c) => {
   const q = c.req.query("q") ?? "";
+  const vector = await queryVector(q);
   const key = c.req.query("project");
   const projectId = num(c.req.query("project_id")) ?? (key ? getProjectByKey(key)?.id : undefined);
   const scope = c.req.query("scope") as Scope | undefined;
@@ -163,11 +169,12 @@ api.get("/search", (c) => {
     limit: num(c.req.query("limit")) ?? 20,
     allProjects: c.req.query("all") === "1",
     inactive: c.req.query("inactive") === "1",
+    vector,
   });
   // via=agent: the memory_search tool (web searches do not count as use).
   if (c.req.query("via") === "agent") recordUsage(hits.map((h) => h.entry.id), "search");
   const st = entryStates(hits.map((h) => h.entry));
-  return c.json(hits.map((h) => ({ ...h.entry, ...st.get(h.entry.id), score: Math.round(h.score * 100) / 100 })));
+  return c.json(hits.map((h) => ({ ...h.entry, ...st.get(h.entry.id), score: roundScore(h.score, Boolean(vector)) })));
 });
 
 api.get("/session-search", (c) => {
@@ -246,7 +253,7 @@ api.put("/policy", async (c) => {
 });
 
 api.get("/meta", (c) => c.json({ categories: CATEGORIES, llm: llmEnabled() ? config.llm.model : null }));
-api.get("/stats", (c) => c.json({ ...stats(), ...wikiStats(), ...graphStats(), ...reviewStats() }));
+api.get("/stats", (c) => c.json({ ...stats(), ...wikiStats(), ...graphStats(), ...reviewStats(), ...embedStats() }));
 
 api.get("/projects", (c) => c.json(listProjects()));
 // Registered before /projects/:id so "similar" is never read as an id.
@@ -483,15 +490,18 @@ api.post("/wiki/pages/:id/revert", async (c) => {
   const b = await body<{ revisionId: number }>(c);
   return c.json(revertPage(idParam(c), Number(b.revisionId), { author: "human" }));
 });
-api.get("/wiki/search", (c) =>
-  c.json(
-    searchWiki(c.req.query("q") ?? "", {
+api.get("/wiki/search", async (c) => {
+  const q = c.req.query("q") ?? "";
+  const vector = await queryVector(q);
+  return c.json(
+    searchWiki(q, {
       projectId: c.req.query("all") === "1" ? undefined : wikiScope(c),
       allProjects: c.req.query("all") === "1",
       limit: num(c.req.query("limit")) ?? 10,
-    }).map((h) => ({ ...h.page, body: undefined, snippet: h.snippet, score: Math.round(h.score * 100) / 100 })),
-  ),
-);
+      vector,
+    }).map((h) => ({ ...h.page, body: undefined, snippet: h.snippet, score: roundScore(h.score, Boolean(vector)) })),
+  );
+});
 /** Agent read: the page from the project wiki, falling back to the global wiki ("global:slug" forces global). */
 api.get("/wiki/read", (c) => {
   let slug = c.req.query("slug") ?? "";

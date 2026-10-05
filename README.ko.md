@@ -55,6 +55,7 @@ flowchart LR
 - **턴 정리** — LLM이 관련 기존 메모리를 함께 보고 add / update / edit / delete / confirm을 정합니다. 모든 변경은 이력에 남아 되돌릴 수 있고, 똑같은 메모리는 다시 추가하지 않습니다.
 - **정확한 날짜** — "어제"는 정리한 날이 아니라 턴이 일어난 날(`TIMEZONE` 기준)로 적습니다. 메모리마다 어느 턴에서 추가·수정·확인됐는지도 남습니다.
 - **지난 사실** — 새 메모리가 옛 메모리를 `supersedes`로 대체하고, 임시 사실은 `valid_until`이 지나면 이력으로 넘어갑니다. 이력은 주입되지 않지만 검색할 수 있습니다.
+- **의미 검색(선택)** — 임베딩 서버(예: [infinity](https://github.com/michaelfeil/infinity) + `BAAI/bge-m3`)를 붙이면 메모리와 위키를 뜻으로도, 언어가 달라도 찾습니다. 한국어로 물어도 영어 메모리가 나옵니다. 키워드 검색은 그대로 함께 쓰고 두 순위를 합칩니다. 임베딩 서버가 죽거나 느리면 키워드 검색으로 돌아갑니다.
 - **검색 키워드** — 동의어·번역·다른 표기(`Postgres`, `포스트그레스`)는 검색과 회상에만 쓰이고 프롬프트에는 들어가지 않습니다.
 - **정리 방침** — 서버 LLM이 따를 규칙을 전역·프로젝트별로 사람이 적어 둡니다.
 - **프로젝트 구분** — git `origin` 주소를 정규화해 씁니다(`github.com/foo/bar`, worktree는 메인 저장소 기준). 원격이 없으면 `local/<폴더명>`, git 밖이면 전역만 씁니다. 설정 파일의 `project`(또는 `MEMORY_PROJECT`)로 직접 지정할 수 있습니다.
@@ -104,14 +105,14 @@ flowchart LR
 
 ### 1. 서버 실행
 
-서버 이미지는 [도커 허브](https://hub.docker.com/r/kht6163/memory-wiki-all-you-need)에 `linux/amd64`·`linux/arm64`로 있습니다. 태그는 `X.Y.Z`(그 버전), `X.Y`(그 minor의 최신 패치, 예: `0.10`), `latest`입니다.
+서버 이미지는 [도커 허브](https://hub.docker.com/r/kht6163/memory-wiki-all-you-need)에 `linux/amd64`·`linux/arm64`로 있습니다. 태그는 `X.Y.Z`(그 버전), `X.Y`(그 minor의 최신 패치, 예: `0.11`), `latest`입니다.
 
 Docker Compose 예시입니다(`LLM_API_KEY`는 `.env`에 둡니다).
 
 ```yaml
 services:
   memory:
-    image: kht6163/memory-wiki-all-you-need:0.10   # amd64 / arm64
+    image: kht6163/memory-wiki-all-you-need:0.11   # amd64 / arm64
     restart: unless-stopped
     environment:
       LLM_BASE_URL: http://<llm-host>:8317/v1
@@ -133,8 +134,21 @@ mkdir -p data && sudo chown 1000:1000 data
 docker run -d --name memory-wiki --restart unless-stopped \
   -p 127.0.0.1:8765:8765 -v "$PWD/data:/data" \
   -e LLM_BASE_URL=http://<llm-host>:8317/v1 -e LLM_API_KEY=<키> -e TIMEZONE=Asia/Seoul \
-  kht6163/memory-wiki-all-you-need:0.10
+  kht6163/memory-wiki-all-you-need:0.11
 ```
+
+**선택: 의미 검색.** 같은 compose 파일에 임베딩 서비스를 더합니다. bge-m3는 다국어 모델이고 CPU로 돌아갑니다(짧은 질의 하나에 약 55ms, 모델 약 2.3GB는 첫 기동 때 내려받음).
+
+```yaml
+  embed:
+    image: michaelf34/infinity:latest
+    command: ["v2", "--model-id", "BAAI/bge-m3", "--engine", "torch", "--port", "7997"]
+    restart: unless-stopped
+    volumes:
+      - ./embed-cache:/app/.cache
+```
+
+그리고 `memory`에 `EMBED_BASE_URL: http://embed:7997`을 넣습니다. 기존 메모리는 백그라운드에서 임베딩합니다(`/api/health`의 `embedPending`). 그동안에도 키워드로는 찾힙니다.
 
 소스에서 직접 빌드하려면 `image:` 대신 `build: ./memory-wiki-all-you-need`(이 저장소를 받은 폴더)를 쓰세요.
 
@@ -190,6 +204,11 @@ pi install npm:pi-memory-wiki-all-you-need
 | `LLM_TIMEOUT_MS` | 180000 | LLM 요청 타임아웃 |
 | `PORT` / `HOST` / `DATA_DIR` | 8765 / `0.0.0.0` / `./data` (Docker는 `/data`) | |
 | `TIMEZONE` | `UTC` | 상대 날짜를 풀 때 쓰는 시간대(IANA) |
+| `EMBED_BASE_URL` | – | OpenAI 호환 임베딩 URL(infinity면 `http://embed:7997`). 없으면 키워드 검색만 |
+| `EMBED_API_KEY` / `EMBED_MODEL` | – / `BAAI/bge-m3` | 모델을 바꾸면 전부 다시 임베딩 |
+| `EMBED_QUERY_TIMEOUT_MS` | 700 | 요청마다 하는 질의 임베딩 제한 시간, 넘으면 그 요청은 키워드만 |
+| `EMBED_RECALL_MIN_SIMILARITY` / `EMBED_SEARCH_MIN_SIMILARITY` | 0.55 / 0.45 | 뜻으로만 찾은 메모리의 cosine 하한(회상 / 검색, bge-m3 기준) |
+| `EMBED_QUERY_PREFIX` / `EMBED_DOC_PREFIX` | – | 접두어가 필요한 모델용(e5: `query: ` / `passage: `) |
 | `CONTEXT_BUDGET_CHARS` | 8000 | 시스템 프롬프트 메모리 블록 예산 |
 | `RECALL_BUDGET_CHARS` / `RECALL_LIMIT` | 3000 / 6 | 프롬프트별 회상 |
 | `WIKI_COMPOSE_CHUNK_CHARS` | 40000 | 위키 정리 LLM 호출 1회에 넣는 턴 기록 글자 수 |

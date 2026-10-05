@@ -1,6 +1,7 @@
 import { config, llmEnabled } from "./config.ts";
 import { db, rowToEntry, type Entry, type Project, type Turn, type TurnResult } from "./db.ts";
 import { chatJson, LlmJsonError, type ChatMessage } from "./llm.ts";
+import { queryVector } from "./embeddings.ts";
 import { searchEntries } from "./search.ts";
 import {
   ACTIVE_SQL,
@@ -106,14 +107,24 @@ Respond with ONLY a JSON object:
 
 export const CATEGORY_LIST = ["fact", "convention", "preference", "decision", "failure", "correction", "insight", "tool-quirk"];
 
-function candidateEntries(turn: Turn, project: Project | null): Entry[] {
+/** The turn's user/assistant text as an embedding for candidate search (null = keyword only). */
+function turnVector(turn: Turn): Promise<Float32Array | null> {
+  const text = turn.payload.messages
+    .filter((m) => m.role !== "tool")
+    .map((m) => m.text)
+    .join("\n");
+  return queryVector(text, { background: true });
+}
+
+function candidateEntries(turn: Turn, project: Project | null, vector: Float32Array | null): Entry[] {
   const query = turn.payload.messages
     .filter((m) => m.role !== "tool")
     .map((m) => m.text)
     .join("\n")
     .slice(0, 4000);
   const seen = new Map<number, Entry>();
-  for (const h of searchEntries(query, { projectId: project?.id ?? null, limit: 25 })) seen.set(h.entry.id, h.entry);
+  // With embeddings, near-duplicates in other words or another language are candidates too (ADR-0034).
+  for (const h of searchEntries(query, { projectId: project?.id ?? null, limit: 25, vector })) seen.set(h.entry.id, h.entry);
   // Always show the freshest memories of this project and the user profile so
   // recently learned facts get merged rather than duplicated.
   if (project) for (const e of listEntries({ scope: "project", projectId: project.id, limit: 15, activeOnly: true })) seen.set(e.id, e);
@@ -555,7 +566,7 @@ export async function processTurn(turn: Turn) {
   if (!llmEnabled()) return finishTurn(turn.id, "skipped", null, "LLM is not configured (LLM_BASE_URL)");
   if (isTrivial(turn)) return finishTurn(turn.id, "skipped", { ops: [], applied: [], note: "trivial turn" });
 
-  const candidates = candidateEntries(turn, project);
+  const candidates = candidateEntries(turn, project, await turnVector(turn));
   const messages: ChatMessage[] = [
     { role: "system", content: SYSTEM_PROMPT },
     { role: "user", content: buildUserPrompt(turn, project, candidates) },

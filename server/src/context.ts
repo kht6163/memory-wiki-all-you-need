@@ -1,5 +1,6 @@
 import { config } from "./config.ts";
 import type { Entry, Project } from "./db.ts";
+import { queryVector } from "./embeddings.ts";
 import { entityEntries, getEntity, linkedNeighbors, mentionedEntities } from "./graph.ts";
 import { entityExtraLimit, entityMentionCounts, searchEntries } from "./search.ts";
 import { entryState, getEntry, isActive, promptDescription, visibleEntries } from "./store.ts";
@@ -76,7 +77,15 @@ export interface BuiltContext {
   recalled: number[];
 }
 
-export function buildContext(project: Project | null, prompt: string): BuiltContext {
+/**
+ * `vector`: the prompt's embedding, fetched by the caller (buildContext embeds
+ * once and never waits longer than EMBED_QUERY_TIMEOUT_MS; null = keyword recall).
+ */
+export async function buildContext(project: Project | null, prompt: string): Promise<BuiltContext> {
+  return buildContextWith(project, prompt, prompt.trim() ? await queryVector(prompt) : null);
+}
+
+export function buildContextWith(project: Project | null, prompt: string, vector: Float32Array | null): BuiltContext {
   // Superseded and expired memories are history: never injected (they stay searchable).
   const all = visibleEntries(project?.id ?? null, { activeOnly: true });
   const used = new Set<number>();
@@ -147,7 +156,10 @@ export function buildContext(project: Project | null, prompt: string): BuiltCont
     // Entities the prompt names: they boost matching hits (hub-dampened) and pull in extras.
     const mentioned = mentionedEntities(prompt, 6);
     // Active hits only: history never takes a recall slot (standing ones are all in `used`).
-    for (const h of searchEntries(prompt, { projectId: pid, limit: config.recallLimit, excludeIds: used, boostEntities: mentioned })) {
+    // A memory found only by meaning (no shared word) must clear the stricter recall floor:
+    // it is injected without the agent asking for it.
+    const semantic = { vector, minSimilarity: config.embed.recallMinSimilarity };
+    for (const h of searchEntries(prompt, { projectId: pid, limit: config.recallLimit, excludeIds: used, boostEntities: mentioned, ...semantic })) {
       if (h.entry.category === "standing" || seen.has(h.entry.id)) continue;
       picks.push({ e: h.entry });
       seen.add(h.entry.id);
@@ -157,7 +169,7 @@ export function buildContext(project: Project | null, prompt: string): BuiltCont
     // bring nothing, so only superseded ones are searched, at most GRAPH_RECALL_EXTRA
     // (the most replacement extras addExtra takes anyway).
     const replacedBy: { old: number; next: number }[] = [];
-    for (const h of searchEntries(prompt, { projectId: pid, limit: config.graph.recallExtra, excludeIds: used, supersededOnly: true, boostEntities: mentioned })) {
+    for (const h of searchEntries(prompt, { projectId: pid, limit: config.graph.recallExtra, excludeIds: used, supersededOnly: true, boostEntities: mentioned, ...semantic })) {
       const st = entryState(h.entry);
       if (st.superseded_by) replacedBy.push({ old: h.entry.id, next: currentVersion(st.superseded_by) });
     }

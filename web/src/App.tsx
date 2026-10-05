@@ -316,11 +316,16 @@ function ProjectsNav({ projects, activeId, projectsActive }: { projects: Project
 
 function SidebarFooter({ stats: s }: { stats: Stats | undefined }) {
   const [theme, setTheme] = useTheme();
-  const jobs = s ? s.pending + s.wikiPending + s.graphPending + s.reviewRunning : 0;
+  const jobs = s ? s.pending + s.wikiPending + s.graphPending + s.reviewRunning + s.embedPending : 0;
   const failures = s ? s.errors + s.wikiErrors : 0;
   return (
     <div className="sidebar-foot">
-      <div className="foot-line" title={s ? `정리 대기 ${s.pending} · 위키 ${s.wikiPending} · 그래프 ${s.graphPending} · 점검 ${s.reviewRunning}` : undefined}>
+      <div className="foot-line" title={
+          s
+            ? `정리 대기 ${s.pending} · 위키 ${s.wikiPending} · 그래프 ${s.graphPending} · 점검 ${s.reviewRunning}${s.embed ? ` · 임베딩 ${s.embedPending}${s.embedError ? " (임베딩 서버 오류)" : ""}` : ""}`
+            : undefined
+        }
+      >
         <span className={`live-dot${jobs ? "" : " idle"}`} aria-hidden="true" />
         백그라운드 작업 <span className="tabular">{jobs}</span>
       </div>

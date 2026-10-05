@@ -20,6 +20,14 @@ function zone(name: string): string {
   }
 }
 
+/** A number in [min, max] (for similarity floors); anything else falls back. */
+function float(name: string, fallback: number, min: number, max: number): number {
+  const raw = process.env[name]?.trim();
+  if (!raw) return fallback;
+  const n = Number(raw);
+  return Number.isFinite(n) && n >= min && n <= max ? n : fallback;
+}
+
 export const config = {
   port: int("PORT", 8765),
   /** Users' local time zone, so "yesterday" at 01:00 KST resolves to the right day. */
@@ -33,6 +41,32 @@ export const config = {
     apiKey: process.env.LLM_API_KEY ?? "",
     model: process.env.LLM_MODEL ?? "gpt-6-luna",
     timeoutMs: int("LLM_TIMEOUT_MS", 180_000),
+  },
+  /**
+   * Optional embedding endpoint (OpenAI-compatible POST /embeddings, e.g. infinity
+   * or TEI serving BAAI/bge-m3). Unset EMBED_BASE_URL = keyword search only.
+   * The similarity floors are tuned for bge-m3 (ADR-0034); another model needs its own.
+   */
+  embed: {
+    baseUrl: (process.env.EMBED_BASE_URL ?? "").replace(/\/+$/, ""),
+    apiKey: process.env.EMBED_API_KEY ?? "",
+    model: process.env.EMBED_MODEL?.trim() || "BAAI/bge-m3",
+    /** Per batch of memory/page texts (background indexing). */
+    timeoutMs: int("EMBED_TIMEOUT_MS", 60_000),
+    /** Per query vector on the request path (/context); on timeout the search is keyword-only. */
+    queryTimeoutMs: int("EMBED_QUERY_TIMEOUT_MS", 700),
+    /** Query text cut to this many characters (CPU cost grows with length). */
+    queryMaxChars: int("EMBED_QUERY_MAX_CHARS", 500),
+    /** Memory/page text cut to this many characters before embedding. */
+    docMaxChars: int("EMBED_DOC_MAX_CHARS", 1200),
+    batch: int("EMBED_BATCH", 8),
+    /** A memory with no keyword match is recalled into the prompt only at or above this cosine. */
+    recallMinSimilarity: float("EMBED_RECALL_MIN_SIMILARITY", 0.55, -1, 1),
+    /** Same for memory_search / wiki search / the web (the caller judges the hits). */
+    searchMinSimilarity: float("EMBED_SEARCH_MIN_SIMILARITY", 0.45, -1, 1),
+    /** Prepended to queries / documents for models that need it (e5: "query: " / "passage: "). */
+    queryPrefix: process.env.EMBED_QUERY_PREFIX ?? "",
+    docPrefix: process.env.EMBED_DOC_PREFIX ?? "",
   },
   /** Character budget for the stable memory block injected into the system prompt. */
   contextBudget: int("CONTEXT_BUDGET_CHARS", 8000),
@@ -70,3 +104,4 @@ export const config = {
 };
 
 export const llmEnabled = () => Boolean(config.llm.baseUrl);
+export const embedEnabled = () => Boolean(config.embed.baseUrl);

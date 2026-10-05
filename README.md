@@ -55,6 +55,7 @@ flowchart LR
 - **Per-turn curation** — the LLM sees related existing memories and returns add / update / edit / delete / confirm; every change is versioned and revertible, and exact duplicates are skipped.
 - **Real dates** — "yesterday" is resolved to the day the turn happened (`TIMEZONE`), and each memory records which turns added, edited or confirmed it.
 - **Superseded facts** — a new memory can replace an old one via `supersedes`, and `valid_until` expires temporary facts; history stays searchable but is never injected.
+- **Semantic search (optional)** — with an embedding server (e.g. [infinity](https://github.com/michaelfeil/infinity) serving `BAAI/bge-m3`), memories and wiki pages are also found by meaning and across languages: a Korean question finds an English memory. Keyword search stays, and the two rankings are fused. If the embedding server is down or slow, search falls back to keywords.
 - **Search keywords** — synonyms and translations (`Postgres`, `포스트그레스`) help search and recall without entering the prompt.
 - **Curation guidelines** — global and per-project rules for the server LLM, written by humans.
 - **Project detection** — the normalized git `origin` URL (`github.com/foo/bar`; worktrees use the main repo), `local/<dir>` without a remote, global-only outside git. Override with `project` in the settings file (or `MEMORY_PROJECT`).
@@ -104,14 +105,14 @@ flowchart LR
 
 ### 1. Run the server
 
-The server image is on [Docker Hub](https://hub.docker.com/r/kht6163/memory-wiki-all-you-need) for `linux/amd64` and `linux/arm64`. Tags: `X.Y.Z` (exact release), `X.Y` (latest patch of that minor, e.g. `0.10`), `latest`.
+The server image is on [Docker Hub](https://hub.docker.com/r/kht6163/memory-wiki-all-you-need) for `linux/amd64` and `linux/arm64`. Tags: `X.Y.Z` (exact release), `X.Y` (latest patch of that minor, e.g. `0.11`), `latest`.
 
 Docker Compose example (put `LLM_API_KEY` in `.env`):
 
 ```yaml
 services:
   memory:
-    image: kht6163/memory-wiki-all-you-need:0.10   # amd64 / arm64
+    image: kht6163/memory-wiki-all-you-need:0.11   # amd64 / arm64
     restart: unless-stopped
     environment:
       LLM_BASE_URL: http://<llm-host>:8317/v1
@@ -133,8 +134,21 @@ mkdir -p data && sudo chown 1000:1000 data
 docker run -d --name memory-wiki --restart unless-stopped \
   -p 127.0.0.1:8765:8765 -v "$PWD/data:/data" \
   -e LLM_BASE_URL=http://<llm-host>:8317/v1 -e LLM_API_KEY=<key> -e TIMEZONE=Asia/Seoul \
-  kht6163/memory-wiki-all-you-need:0.10
+  kht6163/memory-wiki-all-you-need:0.11
 ```
+
+**Optional: semantic search.** Add an embedding service to the same compose file. bge-m3 is multilingual and runs on CPU (about 55 ms per short query; the model, about 2.3 GB, is downloaded on first start):
+
+```yaml
+  embed:
+    image: michaelf34/infinity:latest
+    command: ["v2", "--model-id", "BAAI/bge-m3", "--engine", "torch", "--port", "7997"]
+    restart: unless-stopped
+    volumes:
+      - ./embed-cache:/app/.cache
+```
+
+Then set `EMBED_BASE_URL: http://embed:7997` on `memory`. Existing memories are embedded in the background (`embedPending` in `/api/health`); until then they are still found by keywords.
 
 To build from source instead, replace `image:` with `build: ./memory-wiki-all-you-need` (a clone of this repository).
 
@@ -190,6 +204,11 @@ Both save the URL to `~/.pi/agent/extensions/memory-wiki-all-you-need.json` (or 
 | `LLM_TIMEOUT_MS` | 180000 | LLM request timeout |
 | `PORT` / `HOST` / `DATA_DIR` | 8765 / `0.0.0.0` / `./data` (`/data` in Docker) | |
 | `TIMEZONE` | `UTC` | IANA zone used to resolve relative dates |
+| `EMBED_BASE_URL` | – | OpenAI-compatible embeddings URL (e.g. `http://embed:7997` for infinity). Unset: keyword search only |
+| `EMBED_API_KEY` / `EMBED_MODEL` | – / `BAAI/bge-m3` | Changing the model re-embeds everything |
+| `EMBED_QUERY_TIMEOUT_MS` | 700 | Per-request query embedding; slower → keyword-only for that request |
+| `EMBED_RECALL_MIN_SIMILARITY` / `EMBED_SEARCH_MIN_SIMILARITY` | 0.55 / 0.45 | Cosine floor for meaning-only matches in recall / search (tuned for bge-m3) |
+| `EMBED_QUERY_PREFIX` / `EMBED_DOC_PREFIX` | – | For models that need prefixes (e5: `query: ` / `passage: `) |
 | `CONTEXT_BUDGET_CHARS` | 8000 | System-prompt memory block budget |
 | `RECALL_BUDGET_CHARS` / `RECALL_LIMIT` | 3000 / 6 | Per-prompt recall |
 | `WIKI_COMPOSE_CHUNK_CHARS` | 40000 | Turn-record chars per compose LLM call |

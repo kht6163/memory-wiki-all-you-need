@@ -1,4 +1,6 @@
+import { config } from "./config.ts";
 import { db, rowToEntry, type Entry, type Scope } from "./db.ts";
+import { nearest } from "./embeddings.ts";
 import { ACTIVE_SQL, NOT_SUPERSEDED_SQL } from "./store.ts";
 import { splitWords, STOPWORDS } from "./words.ts";
 
@@ -52,6 +54,15 @@ export interface SearchOptions {
    * one are boosted, less so for hub entities many memories mention.
    */
   boostEntities?: number[];
+  /**
+   * The query's embedding (embeddings.queryVector). When given, memories whose
+   * vector is at least `minSimilarity` close are candidates too, even with no
+   * shared word (another language, other wording), and the ranking fuses the
+   * keyword and vector ranks (ADR-0034). Null/absent = keyword search only.
+   */
+  vector?: Float32Array | null;
+  /** Cosine floor for vector candidates (default EMBED_SEARCH_MIN_SIMILARITY). */
+  minSimilarity?: number;
 }
 
 export interface SearchHit {
@@ -59,9 +70,16 @@ export interface SearchHit {
   score: number;
 }
 
+/** Reciprocal rank fusion constant: smaller = the top of each list counts more. */
+const RRF_K = 20;
+
+/** rank (0-based) of each id in a list ordered best first. */
+const ranks = (ids: number[]) => new Map(ids.map((id, i) => [id, i]));
+
 export function searchEntries(query: string, opts: SearchOptions = {}): SearchHit[] {
   const terms = extractTerms(query);
-  if (!terms.length) return [];
+  const vector = opts.vector ?? null;
+  if (!terms.length && !vector) return [];
   const limit = opts.limit ?? 20;
   const scopes = opts.scopes ?? ["global", "user", "project"];
 
@@ -103,7 +121,8 @@ export function searchEntries(query: string, opts: SearchOptions = {}): SearchHi
     for (const r of rows) candidates.set(Number(r.id), rowToEntry(r));
   }
 
-  const hits: SearchHit[] = [];
+  // Keyword score: what every memory matching a query word gets.
+  const keyword = new Map<number, number>();
   for (const entry of candidates.values()) {
     if (opts.excludeIds?.has(entry.id)) continue;
     const title = entry.title.toLowerCase();
@@ -128,8 +147,42 @@ export function searchEntries(query: string, opts: SearchOptions = {}): SearchHi
       score += best;
     }
     if (!matched) continue;
-    // Reward covering more of the query, then prefer project-specific and pinned entries.
-    score *= 0.5 + matched / terms.length;
+    // Reward covering more of the query.
+    keyword.set(entry.id, score * (0.5 + matched / terms.length));
+  }
+
+  // Vector candidates: every memory the same filters allow, by cosine to the query.
+  const similar = new Map<number, number>();
+  if (vector) {
+    const rows = db
+      .prepare(`SELECT e.id, e.updated_at FROM entries e WHERE ${where.join(" AND ")}`)
+      .all(...args)
+      .map((r) => ({ id: Number(r.id), updated_at: String(r.updated_at) }))
+      .filter((r) => !opts.excludeIds?.has(r.id));
+    for (const n of nearest("entry", vector, rows, opts.minSimilarity ?? config.embed.searchMinSimilarity, Math.max(limit * 3, 50))) similar.set(n.id, n.sim);
+    const missing = [...similar.keys()].filter((id) => !candidates.has(id));
+    if (missing.length)
+      for (const r of db.prepare(`SELECT * FROM entries WHERE id IN (${missing.map(() => "?").join(",")})`).all(...missing))
+        candidates.set(Number(r.id), rowToEntry(r));
+  }
+
+  // Without a query vector the keyword score is the score (unchanged ranking).
+  // With one, the two ranked lists are fused (reciprocal rank fusion): their
+  // scores are on different scales, ranks are not.
+  const kwRank = ranks([...keyword.entries()].sort((a, b) => b[1] - a[1] || b[0] - a[0]).map(([id]) => id));
+  const vecRank = ranks([...similar.keys()]);
+  const hits: SearchHit[] = [];
+  for (const id of new Set([...keyword.keys(), ...similar.keys()])) {
+    const entry = candidates.get(id);
+    if (!entry) continue;
+    let score: number;
+    if (!vector) score = keyword.get(id)!;
+    else {
+      const k = kwRank.get(id);
+      const v = vecRank.get(id);
+      score = (k === undefined ? 0 : 1 / (RRF_K + k)) + (v === undefined ? 0 : 1 / (RRF_K + v));
+    }
+    // Then prefer project-specific and pinned entries.
     if (entry.scope === "project") score *= 1.15;
     if (entry.pinned) score *= 1.1;
     hits.push({ entry, score });
