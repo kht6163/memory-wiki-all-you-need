@@ -166,6 +166,8 @@ test("G-069: approve and reject only what was reviewed — an agent change in be
   const made = (await agent(ref(p), { action: "create", name: "seen-cand", scope: "global", description: "d", body: "## A" })).data.skill;
   const id = (await ok<Any[]>("GET", "/skills?project_id=0")).find((s) => s.name === "seen-cand").id;
   const onScreen = await ok<Any>("GET", `/skills/${id}`);
+  // updated_at has millisecond resolution: an edit in the same millisecond would look unchanged (flaked on CI).
+  await new Promise((r) => setTimeout(r, 5));
   await agent(ref(p), { action: "update", name: "seen-cand", updated_at: made.updated_at, body: "## B (unseen)" });
   const stale = await call("POST", `/skills/${id}/approve`, { updated_at: onScreen.updated_at });
   assert.equal(stale.status, 409);
