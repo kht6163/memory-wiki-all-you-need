@@ -181,6 +181,7 @@ export function HomePage() {
         { n: s.errors, label: "정리 실패", href: "#/turns?status=error", icon: "circle-alert", tone: "bad" },
         { n: s.wikiErrors, label: "위키 정리 실패", href: "#/wiki-jobs", icon: "circle-alert", tone: "bad" },
         { n: s.reviewProposals, label: "점검 제안", href: "#/review", icon: "check-check", tone: "warn" },
+        { n: s.supersedesPending ?? 0, label: "확인할 대체", href: `#/review${s.supersedesPendingProject ? `?project=${s.supersedesPendingProject}` : ""}`, icon: "check-check", tone: "warn" },
         { n: s.unlinked, label: "엔티티 없는 메모리", href: "#/graph", icon: "share-2", tone: "warn" },
       ] satisfies Attention[]).filter((a) => a.n > 0)
     : [];

@@ -73,7 +73,7 @@ function currentCorpus(): NonNullable<typeof corpus> {
   const r = db
     .prepare(
       `SELECT (SELECT COUNT(*) FROM entries) AS n, (SELECT MAX(updated_at) FROM entries) AS u, (SELECT MAX(id) FROM entries) AS m,
-              (SELECT COUNT(*) || ':' || IFNULL(MAX(rowid), 0) FROM entry_links WHERE type = 'supersedes') AS l, date('now') AS d`,
+              (SELECT COUNT(*) || ':' || IFNULL(MAX(rowid), 0) || ':' || IFNULL(SUM(retires), 0) FROM entry_links WHERE type = 'supersedes') AS l, date('now') AS d`,
     )
     .get() as Record<string, unknown>;
   const key = `${r.n}|${r.u}|${r.m}|${r.l}|${r.d}`;

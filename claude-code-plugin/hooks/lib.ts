@@ -713,8 +713,11 @@ export function formatTool(name: string, a: Args, data: any): string {
         out: { because: "because of", depends_on: "depends on", supersedes: "replaces", related: "related to" },
         in: { because: "is the reason for", depends_on: "is needed by", supersedes: "was replaced by", related: "related to" },
       };
-      const links = (data.links as { dir: string; type: string; other: { id: number; title: string; category: string } }[])
-        .map((l) => `  ${verbs[l.dir]?.[l.type] ?? l.type} #${l.other.id} [${l.other.category}] ${l.other.title}`)
+      // An unconfirmed supersedes guess (G-084) replaces nothing yet.
+      const verbOf = (l: { dir: string; type: string; pending?: boolean }) =>
+        l.pending ? (l.dir === "out" ? "might replace (unconfirmed)" : "might be replaced by (unconfirmed)") : verbs[l.dir]?.[l.type] ?? l.type;
+      const links = (data.links as { dir: string; type: string; pending?: boolean; other: { id: number; title: string; category: string } }[])
+        .map((l) => `  ${verbOf(l)} #${l.other.id} [${l.other.category}] ${l.other.title}`)
         .join("\n");
       return `${fmtEntries([data.memory])}\nEntities: ${(data.entities as { name: string }[]).map((e) => e.name).join(", ") || "(none)"}${links ? `\nLinks:\n${links}` : "\nLinks: (none)"}`;
     }

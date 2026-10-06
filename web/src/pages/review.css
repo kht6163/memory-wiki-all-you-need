@@ -309,3 +309,29 @@
   color: var(--color-text);
   margin: var(--space-1) 0;
 }
+
+/* "확인할 대체" (G-084): the new / old pair on the left, three decisions on the right. */
+.supersede-row {
+  flex-direction: row;
+  align-items: center;
+  gap: var(--space-3);
+}
+.supersede-row .stale-main {
+  gap: var(--space-1);
+}
+.supersede-row .stale-title .badge,
+.supersede-row .stale-title .mono-num {
+  flex-shrink: 0;
+  white-space: nowrap;
+}
+.supersede-actions {
+  display: flex;
+  flex-shrink: 0;
+  gap: var(--space-1_5);
+}
+@media (max-width: 640px) {
+  .supersede-row {
+    flex-direction: column;
+    align-items: stretch;
+  }
+}

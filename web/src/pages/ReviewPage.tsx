@@ -1,6 +1,6 @@
 import "./review.css";
 import { useEffect, useRef, useState, type ReactNode } from "react";
-import { api, type Proposal, type ReviewJob } from "../api.ts";
+import { api, type PendingSupersede, type Proposal, type ReviewJob } from "../api.ts";
 import { describeError } from "../errors.ts";
 import { editProblems, entityChange, proposalEdits, type EditProblem } from "../proposal.ts";
 import {
@@ -290,6 +290,8 @@ export function ReviewPage({ projectId }: { projectId?: number }) {
         </div>
       )}
       <ErrorBox error={proposals.error} />
+
+      <PendingSupersedes projectId={projectId} />
 
       <div className="section-head">
         <h2>제안</h2>
@@ -738,5 +740,84 @@ function ProposalCard({
         )}
       </div>
     </section>
+  );
+}
+
+/**
+ * Supersedes guesses from the graph backfill (G-084): nothing is hidden until a person confirms.
+ * Confirm = add the same link as a person (it starts retiring the older memory); "관련" keeps
+ * the two linked without hiding either; 지우기 drops the guess.
+ */
+function PendingSupersedes({ projectId }: { projectId?: number }) {
+  const pending = useData(() => api.pendingSupersedes(projectId), [projectId]);
+  const [busy, setBusy] = useState<string | null>(null);
+  const list = pending.data ?? [];
+  if (!list.length) return null;
+  const run = async (s: PendingSupersede, how: "confirm" | "related" | "drop") => {
+    const key = `${s.from_id}-${s.to_id}`;
+    if (busy) return;
+    setBusy(key);
+    await act(
+      async () => {
+        if (how === "confirm") return api.addLink(s.from_id, s.to_id, "supersedes");
+        await api.removeLink(s.from_id, s.to_id, "supersedes");
+        if (how === "related") await api.addLink(s.from_id, s.to_id, "related");
+      },
+      {
+        success:
+          how === "confirm" ? `#${s.to_id}은(는) 이제 #${s.from_id}의 이력입니다` : how === "related" ? "관련 관계로 바꿨습니다" : "대체 제안을 지웠습니다",
+      },
+    );
+    // "관련으로" is two calls: if the second fails the first has still run, so reload either way.
+    pending.reload();
+    setBusy(null);
+  };
+  return (
+    <>
+      <div className="section-head">
+        <h2>확인할 대체</h2>
+        <span className="count">{list.length}</span>
+      </div>
+      <p className="section-desc">
+        그래프 붙이기의 LLM이 "새 메모리가 옛 메모리를 대체한다"고 본 쌍입니다. 확인하기 전에는 둘 다 주입·회상에 그대로 쓰입니다. 같은 사실의 새 버전일 때만 확인하세요. 같은 주제의 다른 사실이면 "관련"으로 바꾸고, 계획과 결과처럼 방향이 거꾸로면 지운 뒤 메모리 화면에서 반대로 잇습니다.
+      </p>
+      <div className="list">
+        {list.map((s) => {
+          const key = `${s.from_id}-${s.to_id}`;
+          return (
+            <div key={key} className="list-row supersede-row" aria-busy={busy === key || undefined}>
+              <div className="stale-main">
+                <div className="stale-title">
+                  <span className="badge">새</span>
+                  <CategoryBadge category={s.from.category} />
+                  <a href={`#/e/${s.from.id}`}>{s.from.title}</a>
+                  <span className="faint small mono-num">#{s.from.id}</span>
+                </div>
+                <div className="stale-title">
+                  <span className="badge">옛</span>
+                  <CategoryBadge category={s.to.category} />
+                  <a href={`#/e/${s.to.id}`}>{s.to.title}</a>
+                  <span className="faint small mono-num">#{s.to.id}</span>
+                </div>
+                <span className="job-meta">
+                  {s.author === "llm" ? "LLM 제안" : s.author === "human" ? "사람" : "에이전트"} · <Time iso={s.created_at} />
+                </span>
+              </div>
+              <div className="supersede-actions">
+                <button className="btn small primary" disabled={busy !== null} onClick={() => run(s, "confirm")} title={`#${s.to.id}을(를) 이력으로 돌립니다(주입·회상에서 빠짐)`}>
+                  대체 확인
+                </button>
+                <button className="btn small" disabled={busy !== null} onClick={() => run(s, "related")} title="대체 대신 관련 관계로 남깁니다">
+                  관련으로
+                </button>
+                <button className="btn small ghost" disabled={busy !== null} onClick={() => run(s, "drop")} title="이 대체 제안을 지웁니다">
+                  지우기
+                </button>
+              </div>
+            </div>
+          );
+        })}
+      </div>
+    </>
   );
 }

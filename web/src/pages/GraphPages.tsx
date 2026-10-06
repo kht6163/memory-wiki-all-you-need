@@ -44,6 +44,8 @@ export function EntityChips({ entities }: { entities: Entity[] }) {
 /** Plain-Korean reading of a link, so "supersedes" never leaves the direction to guesswork. */
 function linkExplain(l: EntryLink): string | null {
   const n = `#${l.other.id}`;
+  if (l.type === "supersedes" && l.pending)
+    return l.dir === "out" ? `이 메모리가 ${n}을(를) 대체한다는 제안 — 점검에서 확인 전` : `${n}이(가) 이 메모리를 대체한다는 제안 — 점검에서 확인 전`;
   if (l.type === "supersedes") return l.dir === "out" ? `이 메모리가 ${n}을(를) 대체` : `${n}이(가) 이 메모리를 대체`;
   if (l.type === "because") return l.dir === "out" ? `${n} 때문에 생긴 메모리` : `${n}이(가) 이 메모리 때문에 생김`;
   if (l.type === "depends_on") return l.dir === "out" ? `${n}을(를) 전제로 함` : `${n}이(가) 이 메모리를 전제로 함`;

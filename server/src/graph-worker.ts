@@ -16,7 +16,7 @@ const BACKFILL_PROMPT = `You build a knowledge graph over a coding agent's memor
 - links (only to ids in this batch, only when real and useful; most memories have 0-2):
   - "because": this memory exists because of the other
   - "depends_on": this only holds / works if the other holds
-  - "supersedes": this replaces the other
+  - "supersedes": this replaces the other (the same fact, newer or corrected — NOT a different fact on the same topic, NOT a plan replaced by its outcome in reverse; a person confirms it before the other is hidden)
   - "related": closely related, nothing more specific fits
 - Keep entities a memory already has unless they are clearly wrong.
 
@@ -95,7 +95,9 @@ async function runBackfill(job: GraphJob, between: () => Promise<void>) {
           for (const l of (Array.isArray(it.links) ? it.links : []).slice(0, 6) as Record<string, unknown>[]) {
             const to = Number(l?.to);
             if (!ids.has(to) || to === id || !isLinkType(l?.type)) continue;
-            if (addLink(id, to, l.type, "llm")) progress.links++;
+            // A guessed "supersedes" would hide the older memory from every prompt: half of 18 were
+            // wrong (G-084). It waits for a person on the review page instead.
+            if (addLink(id, to, l.type, "llm", { pending: l.type === "supersedes" })) progress.links++;
           }
         } catch (err) {
           console.warn(`[graph] backfill ${job.id}: memory #${id}: ${(err as Error).message}`);

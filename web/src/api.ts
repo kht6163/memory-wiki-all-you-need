@@ -247,6 +247,10 @@ export interface Stats {
   links: number;
   unlinked: number;
   graphPending: number;
+  /** Supersedes guesses waiting for a person (G-084). An older server sends none. */
+  supersedesPending?: number;
+  /** The oldest one's project (0 = global / user). */
+  supersedesPendingProject?: number;
   entries: number;
   projects: number;
   turns: number;
@@ -357,8 +361,20 @@ export interface EntryLink {
   type: LinkType;
   author: Source;
   created_at: string;
+  /** A supersedes guess that hides nothing until a person confirms it (G-084). */
+  pending?: boolean;
   dir: "out" | "in";
   other: { id: number; title: string; category: string; scope: string };
+}
+
+/** A supersedes link waiting for a person: `from` would replace (hide) `to`. G-084. */
+export interface PendingSupersede {
+  from_id: number;
+  to_id: number;
+  author: Source;
+  created_at: string;
+  from: { id: number; title: string; category: string };
+  to: { id: number; title: string; category: string };
 }
 
 export type GraphNode =
@@ -631,6 +647,7 @@ export const api = {
   retireBlockedProposals: (project_id: number | undefined) =>
     request<{ retired: number[] }>("POST", "/review/proposals/retire-blocked", { project_id: project_id ?? 0 }),
   dismissProposal: (id: number) => request<Proposal>("POST", `/review/proposals/${id}/dismiss`),
+  pendingSupersedes: (project_id?: number) => request<PendingSupersede[]>("GET", `/review/supersedes${qs({ project_id })}`),
   staleEntries: (project_id?: number, days?: number) => request<(Entry & { last_used_at: string | null })[]>("GET", `/review/stale${qs({ project_id, days })}`),
   retryGraphJob: (id: number) => request<GraphJob>("POST", `/graph/jobs/${id}/retry`),
   deleteEntry: (id: number) => request<Entry>("DELETE", `/entries/${id}`),

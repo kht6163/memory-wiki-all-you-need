@@ -84,6 +84,7 @@ import {
   getEntity,
   graphData,
   graphStats,
+  pendingSupersedes,
   isLinkType,
   linksOf,
   listEntities,
@@ -574,6 +575,8 @@ api.post("/review/proposals/apply", async (c) => c.json(applyProposals((await bo
 api.post("/review/proposals/:id/apply", (c) => c.json(applyProposal(idParam(c))));
 api.post("/review/proposals/:id/dismiss", (c) => c.json(dismissProposal(idParam(c))));
 /** Not used and not edited for `days` days (no LLM). */
+/** Supersedes guesses waiting for a person, one scope (project_id, or none = global / user). G-084. */
+api.get("/review/supersedes", (c) => c.json(pendingSupersedes(num(c.req.query("project_id")) || null)));
 api.get("/review/stale", (c) => {
   const pid = num(c.req.query("project_id"));
   return c.json(staleEntries(pid || null, num(c.req.query("days")) ?? config.review.staleDays));

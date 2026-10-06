@@ -813,7 +813,7 @@ export default function memoryAllYouNeed(pi: ExtensionAPI) {
             kind: "memory";
             memory: Mem;
             entities: { name: string; kind: string }[];
-            links: { dir: "out" | "in"; type: string; other: { id: number; title: string; category: string } }[];
+            links: { dir: "out" | "in"; type: string; pending?: boolean; other: { id: number; title: string; category: string } }[];
           }
       >("GET", `/graph/neighbors?${q}`);
       if (r.kind === "entity") {
@@ -821,8 +821,9 @@ export default function memoryAllYouNeed(pi: ExtensionAPI) {
         const rel = r.related.length ? `\nRelated entities: ${r.related.map((x) => x.name).join(", ")}` : "";
         return text(`${head}\n\n${fmtEntries(r.memories)}${rel}`);
       }
-      const verb = (l: { dir: string; type: string }) =>
-        l.dir === "out" ? { because: "because of", depends_on: "depends on", supersedes: "replaces", related: "related to" }[l.type] : { because: "is the reason for", depends_on: "is needed by", supersedes: "was replaced by", related: "related to" }[l.type];
+      // An unconfirmed supersedes guess (G-084) replaces nothing yet.
+      const verb = (l: { dir: string; type: string; pending?: boolean }) =>
+        l.pending ? (l.dir === "out" ? "might replace (unconfirmed)" : "might be replaced by (unconfirmed)") : l.dir === "out" ? { because: "because of", depends_on: "depends on", supersedes: "replaces", related: "related to" }[l.type] : { because: "is the reason for", depends_on: "is needed by", supersedes: "was replaced by", related: "related to" }[l.type];
       const links = r.links.map((l) => `  ${verb(l) ?? l.type} #${l.other.id} [${l.other.category}] ${l.other.title}`).join("\n");
       return text(
         `${fmtEntries([r.memory])}\nEntities: ${r.entities.map((e) => e.name).join(", ") || "(none)"}${links ? `\nLinks:\n${links}` : "\nLinks: (none)"}`,

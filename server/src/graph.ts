@@ -69,8 +69,12 @@ function endpointStamps(fromId: number, toId: number): { from_created_at: string
   return { from_created_at: getEntry(fromId)?.created_at ?? null, to_created_at: getEntry(toId)?.created_at ?? null };
 }
 
-/** Add a typed link between two live memories. Returns false when it already existed. */
-export function addLink(fromId: number, toId: number, type: LinkType, author: Source, opts: { revertOf?: number } = {}): boolean {
+/**
+ * Add a typed link between two live memories. Returns false when it already existed.
+ * `pending`: a supersedes link that retires nothing until a person confirms it (retires = 0;
+ * the graph backfill's guesses, G-084). Confirming = adding the same link without `pending`.
+ */
+export function addLink(fromId: number, toId: number, type: LinkType, author: Source, opts: { revertOf?: number; pending?: boolean } = {}): boolean {
   if (fromId === toId) throw new HttpError(400, "a memory cannot link to itself");
   if (!isLinkType(type)) throw new HttpError(400, `link type must be one of ${LINK_TYPES.join(", ")}`);
   const a = getEntry(fromId);
@@ -86,8 +90,10 @@ export function addLink(fromId: number, toId: number, type: LinkType, author: So
   return transaction(() => {
     const prior = db.prepare(`SELECT retires, author FROM entry_links WHERE from_id = ? AND to_id = ? AND type = ?`).get(fromId, toId, type);
     let changed: boolean;
-    if (type === "supersedes") {
-      // Making a pre-v0.6 (informational) supersedes link again turns it into a retiring one.
+    if (type === "supersedes" && opts.pending) {
+      changed = db.prepare(`INSERT OR IGNORE INTO entry_links (from_id, to_id, type, author, retires) VALUES (?, ?, 'supersedes', ?, 0)`).run(fromId, toId, author).changes > 0;
+    } else if (type === "supersedes") {
+      // Making a pre-v0.6 (informational) or pending supersedes link again turns it into a retiring one.
       const res = db
         .prepare(
           `INSERT INTO entry_links (from_id, to_id, type, author) VALUES (?, ?, 'supersedes', ?)
@@ -142,7 +148,9 @@ function removedLinkSnapshot(row: Row) {
  * Re-point every link of `fromId` to `toId` (used when memories are merged); links between the two are dropped.
  * Incoming retiring "supersedes" links are dropped, not moved: they say something replaced the
  * merged-away memory's fact, not the kept memory's — moving one would retire (hide) the kept memory
- * now or once its source is restored (G-026). Informational ones (retires = 0) move like any link.
+ * now or once its source is restored (G-026). Unconfirmed ones (retires = 0: a backfill guess or a
+ * pre-v0.6 link) are dropped too: confirming one later would hide the merged memory on a guess about
+ * the old fact (G-084).
  *
  * With `author`, each change is recorded in the same transaction with the existing link actions
  * (G-034): a dropped link as a "remove", a moved one as a "remove" of the old row plus an "add" of
@@ -154,7 +162,7 @@ export function moveLinks(fromId: number, toId: number, opts: { author?: Source 
   transaction(() => {
     if (opts.author) recordLinkMoves(fromId, toId, opts.author);
     db.prepare(`DELETE FROM entry_links WHERE (from_id = ? AND to_id = ?) OR (from_id = ? AND to_id = ?)`).run(fromId, toId, toId, fromId);
-    db.prepare(`DELETE FROM entry_links WHERE to_id = ? AND type = 'supersedes' AND retires = 1`).run(fromId);
+    db.prepare(`DELETE FROM entry_links WHERE to_id = ? AND type = 'supersedes'`).run(fromId);
     db.prepare(`UPDATE OR IGNORE entry_links SET from_id = ? WHERE from_id = ?`).run(toId, fromId);
     db.prepare(`UPDATE OR IGNORE entry_links SET to_id = ? WHERE to_id = ?`).run(toId, fromId);
     // Rows that would have duplicated an existing link stay behind; drop them.
@@ -175,7 +183,7 @@ function recordLinkMoves(fromId: number, toId: number, author: Source) {
     const [from, to, type] = [Number(row.from_id), Number(row.to_id), String(row.type)];
     recordGraphRevision({ target: "link", action: "remove", snapshot: removedLinkSnapshot(row), author });
     if (from === toId || to === toId) continue;
-    if (to === fromId && type === "supersedes" && Number(row.retires) === 1) continue;
+    if (to === fromId && type === "supersedes") continue;
     const [nf, nt] = from === fromId ? [toId, to] : [from, toId];
     if (exists.get(nf, nt, type)) continue;
     recordGraphRevision({
@@ -200,9 +208,42 @@ export function linksOf(entryId: number) {
     .all(entryId, entryId, entryId, entryId);
   return rows.map((r) => ({
     ...toLink(r),
+    // A supersedes link that retires nothing yet: waiting for a person (G-084).
+    pending: r.type === "supersedes" && Number(r.retires) === 0,
     dir: String(r.dir) as "out" | "in",
     other: { id: Number(r.other_id), title: String(r.other_title), category: String(r.other_category), scope: String(r.other_scope) },
   }));
+}
+
+export interface PendingSupersede {
+  from_id: number;
+  to_id: number;
+  author: Source;
+  created_at: string;
+  from: { id: number; title: string; category: string };
+  to: { id: number; title: string; category: string };
+}
+
+/**
+ * Supersedes links that retire nothing yet (the backfill's guesses, older informational ones),
+ * both memories alive, in one scope: a project's (its memories are being replaced) or, with
+ * null, the global / user memories'. Oldest first. G-084.
+ */
+export function pendingSupersedes(projectId: number | null): PendingSupersede[] {
+  const scope = projectId ? "o.project_id = ?" : "o.scope IN ('global','user')";
+  return db
+    .prepare(
+      `SELECT l.from_id, l.to_id, l.author, l.created_at, n.title AS nt, n.category AS nc, o.title AS ot, o.category AS oc
+       FROM entry_links l JOIN entries n ON n.id = l.from_id JOIN entries o ON o.id = l.to_id
+       WHERE l.type = 'supersedes' AND l.retires = 0 AND n.deleted_at IS NULL AND o.deleted_at IS NULL AND ${scope}
+       ORDER BY l.created_at, l.from_id`,
+    )
+    .all(...(projectId ? [projectId] : []))
+    .map((r) => ({
+      from_id: Number(r.from_id), to_id: Number(r.to_id), author: r.author as Source, created_at: String(r.created_at),
+      from: { id: Number(r.from_id), title: String(r.nt), category: String(r.nc) },
+      to: { id: Number(r.to_id), title: String(r.ot), category: String(r.oc) },
+    }));
 }
 
 export function entitiesOf(entryId: number): Entity[] {
@@ -643,6 +684,7 @@ export function linkedNeighbors(ids: number[], visibleFrom: number | null, types
               CASE WHEN l.from_id IN (${ph}) THEN 'out' ELSE 'in' END AS dir
        FROM entry_links l JOIN entries e ON e.id = CASE WHEN l.from_id IN (${ph}) THEN l.to_id ELSE l.from_id END
        WHERE (l.from_id IN (${ph}) OR l.to_id IN (${ph})) AND l.type IN (${tp}) AND e.deleted_at IS NULL
+         AND NOT (l.type = 'supersedes' AND l.retires = 0)
          AND (e.scope IN ('global','user') OR e.project_id = ?)`,
     )
     .all(...ids, ...ids, ...ids, ...ids, ...ids, ...types, visibleFrom ?? -1)
@@ -779,6 +821,16 @@ export function graphStats() {
       `SELECT COUNT(*) FROM entries e WHERE e.deleted_at IS NULL AND e.category != 'standing' AND NOT EXISTS (SELECT 1 FROM entry_entities ee WHERE ee.entry_id = e.id)`,
     ),
     graphPending: one(`SELECT COUNT(*) FROM graph_jobs WHERE status IN ('pending','processing')`),
+    // Supersedes guesses waiting for a person (G-084).
+    supersedesPending: one(
+      `SELECT COUNT(*) FROM entry_links l JOIN entries a ON a.id = l.from_id JOIN entries b ON b.id = l.to_id
+       WHERE l.type = 'supersedes' AND l.retires = 0 AND a.deleted_at IS NULL AND b.deleted_at IS NULL`,
+    ),
+    // Where the oldest one waits (the home card links there): a project id, or 0 = global / user.
+    supersedesPendingProject: one(
+      `SELECT IFNULL(b.project_id, 0) FROM entry_links l JOIN entries a ON a.id = l.from_id JOIN entries b ON b.id = l.to_id
+       WHERE l.type = 'supersedes' AND l.retires = 0 AND a.deleted_at IS NULL AND b.deleted_at IS NULL ORDER BY l.created_at LIMIT 1`,
+    ),
   };
 }
 

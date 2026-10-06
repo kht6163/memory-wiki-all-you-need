@@ -847,7 +847,7 @@ test("a review skips memories superseded after it was queued", async () => {
   assert.deepEqual(props.map((x) => x.entry_ids), [[b.id, d.id]]);
 });
 
-test("apply merge drops a retiring supersedes link into a merged-away memory instead of moving it onto the kept one", async () => {
+test("apply merge drops supersedes links into a merged-away memory (retiring or unconfirmed) instead of moving them onto the kept one", async () => {
   const p = await freshProject();
   const keep = await mem(p.id, "drop sup keep");
   const other = await mem(p.id, "drop sup other");
@@ -862,7 +862,7 @@ test("apply merge drops a retiring supersedes link into a merged-away memory ins
   assert.equal((await call("POST", `/review/proposals/${prop!.id}/apply`)).status, 200);
   assert.equal(db.prepare(`SELECT COUNT(*) AS n FROM entry_links WHERE from_id = ? AND type = 'supersedes'`).get(c.id)!.n, 0, "retiring link dropped");
   const moved = db.prepare(`SELECT retires FROM entry_links WHERE from_id = ? AND to_id = ? AND type = 'supersedes'`).get(info.id, keep.id) as any;
-  assert.equal(moved?.retires, 0, "an informational link still moves");
+  assert.equal(moved, undefined, "an unconfirmed (retires = 0) link is dropped too: confirming it would hide the merged memory (G-084)");
   // Restoring the replacement must not retire the merged memory.
   await ok("POST", `/entries/${c.id}/restore`);
   assert.equal((await getEntry(keep.id)).entry.superseded_by, null);
