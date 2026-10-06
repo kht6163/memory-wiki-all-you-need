@@ -222,11 +222,13 @@ Claude Code는 **memory-wiki** 플러그인으로 같은 서버에 붙습니다.
 | `EMBED_API_KEY` / `EMBED_MODEL` | – / `BAAI/bge-m3` | 모델을 바꾸면 전부 다시 임베딩 |
 | `EMBED_QUERY_TIMEOUT_MS` | 700 | 요청마다 하는 질의 임베딩 제한 시간, 넘으면 그 요청은 키워드만 |
 | `EMBED_RECALL_MIN_SIMILARITY` / `EMBED_SEARCH_MIN_SIMILARITY` | 0.55 / 0.45 | 뜻으로만 찾은 메모리의 cosine 하한(회상 / 검색, bge-m3 기준) |
+| `EMBED_RECALL_MIN_Z` / `EMBED_RECALL_KEYWORD_MIN_Z` | 3.5 / 2 | 회상만: 이 프롬프트의 평균 cosine보다 표준편차 몇 배 이상 가까워야 하는지 — 뜻으로 찾은 것 / 단어로 찾은 것(`0` = 끔) |
 | `EMBED_QUERY_PREFIX` / `EMBED_DOC_PREFIX` | – | 접두어가 필요한 모델용(e5: `query: ` / `passage: `) |
 | `DEBUG_MODE` | 끔 | `1`이면 디버그 모드를 항상 켬(아니면 웹 `#/debug`의 스위치) |
 | `DEBUG_LOG_KEEP_DAYS` / `DEBUG_LOG_MAX_MB` | 14 / 200 | 디버그 기록 보관 일수, 하루 파일 상한 |
 | `CONTEXT_BUDGET_CHARS` | 8000 | 시스템 프롬프트 메모리 블록 예산 |
 | `RECALL_BUDGET_CHARS` / `RECALL_LIMIT` | 3000 / 6 | 프롬프트별 회상 |
+| `RECALL_COMMON_RATIO` | 0.06 | 회상만: 메모리 중 이 비율(그리고 20개)보다 많은 메모리에 있는 단어는 그것만으로 회상하지 않음(`1` = 끔) |
 | `WIKI_COMPOSE` | (웹 스위치, 켬) | `1`/`0`이면 턴 기록으로 위키 정리를 켬·끔으로 고정(아니면 웹 `#/settings`의 스위치) |
 | `WIKI_COMPOSE_CHUNK_CHARS` | 40000 | 위키 정리 LLM 호출 1회에 넣는 턴 기록 글자 수 |
 | `WIKI_COMPOSE_MAX_TURNS` | 200 | 정리 작업 1건의 최대 턴 수 |
@@ -252,7 +254,7 @@ Claude Code는 **memory-wiki** 플러그인으로 같은 서버에 붙습니다.
 | `timeoutMs` | `MEMORY_TIMEOUT_MS` | 1500 | 주입할 메모리를 조회하는 타임아웃 |
 | `project` | `MEMORY_PROJECT` | (자동) | 프로젝트 키 직접 지정 |
 | `skillNudge` | `MEMORY_SKILL_NUDGE` | 8 | 한 번의 응답에서 도구를 이만큼(2종류 이상) 쓰고 `skill_manage`를 부르지 않았으면, 다음 요청 때 에이전트에게 절차를 스킬로 저장할지 살펴보라고 알림. `0`이면 끔 |
-| `showActivity` | `MEMORY_SHOW_ACTIVITY` | true | 요청에 끌어온 메모리(`memory_recall`)와 턴 정리 결과(`memory_curate`: 추가·수정·삭제)를 대화 중간에 도구 호출 같은 카드로 보여 줌. `ctrl+o`로 펼침. 화면 표시만 바뀌고 모델이 받는 내용은 그대로 |
+| `showActivity` | `MEMORY_SHOW_ACTIVITY` | true | 요청에 끌어온 메모리(`memory_recall`)와 턴 정리 결과(`memory_curate`: 추가·수정·삭제)를 대화 중간에 도구 호출 같은 카드로 메모리마다 한 줄씩 보여 줌. `ctrl+o`로 펼치면 제목 전체와 본문 앞부분. 화면 표시만 바뀌고 모델이 받는 내용은 그대로 |
 | `disabled` | `MEMORY_DISABLED=1` | `false` | 확장 끄기(`/memory-config disabled false`로 다시 켬) |
 
 </details>

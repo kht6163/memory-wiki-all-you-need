@@ -88,7 +88,7 @@ export interface BuiltContext {
 }
 
 export interface RecallDebug {
-  hits: { id: number; score: number; keyword?: number; similarity?: number }[];
+  hits: { id: number; score: number; keyword?: number; similarity?: number; z?: number; terms?: string[] }[];
   replaced: { old: number; next: number }[];
   mentioned: number[];
   extras: { id: number; via: string }[];
@@ -187,9 +187,11 @@ export function buildContextWith(project: Project | null, prompt: string, vector
     // Active hits only: history never takes a recall slot (standing ones are all in `used`).
     // A memory found only by meaning (no shared word) must clear the stricter recall floor:
     // it is injected without the agent asking for it.
-    const semantic = { vector, minSimilarity: config.embed.recallMinSimilarity };
+    // Recall's gates (ADR-0046): common words and a cosine that does not stand out are no evidence.
+    const gate = { commonRatio: config.recallCommonRatio, minZ: config.embed.recallMinZ, keywordMinZ: config.embed.recallKeywordMinZ };
+    const semantic = { vector, minSimilarity: config.embed.recallMinSimilarity, gate };
     const hits = searchEntries(prompt, { projectId: pid, limit: config.recallLimit, excludeIds: used, boostEntities: mentioned, ...semantic });
-    if (debug) debug.hits = hits.map((h) => ({ id: h.entry.id, score: h.score, keyword: h.keyword, similarity: h.similarity }));
+    if (debug) debug.hits = hits.map((h) => ({ id: h.entry.id, score: h.score, keyword: h.keyword, similarity: h.similarity, z: h.z, terms: h.terms }));
     if (debug) debug.mentioned = mentioned;
     for (const h of hits) {
       if (h.entry.category === "standing" || seen.has(h.entry.id)) continue;

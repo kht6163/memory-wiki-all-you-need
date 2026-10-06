@@ -8,13 +8,16 @@ import { test } from "node:test";
 process.env.CONTEXT_BUDGET_CHARS = "400";
 const { call, entry, llmReply, ok, runQueueOnce, turn } = await import("./helpers.ts");
 
-test("/context: recalledEntries gives id and title for each recalled memory", async () => {
-  const a = await entry({ title: "Deploy uses blue-green pools", body: ".".repeat(500) });
+test("/context: recalledEntries gives id, title and the start of the body for each recalled memory", async () => {
+  const a = await entry({ title: "Deploy uses blue-green pools", body: `two pools\n\n${".".repeat(500)}` });
   await entry({ title: "Unrelated note about lunch", body: "sandwiches" });
-  const r = await ok<{ recalled: number[]; recalledEntries: { id: number; title: string }[] }>("POST", "/context", { project: null, prompt: "how does deploy blue-green work?" });
+  const r = await ok<{ recalled: number[]; recalledEntries: { id: number; title: string; snippet: string }[] }>("POST", "/context", { project: null, prompt: "how does deploy blue-green work?" });
   assert.ok(r.recalled.includes(a.id));
   assert.deepEqual(r.recalledEntries.map((e) => e.id), r.recalled);
-  assert.equal(r.recalledEntries.find((e) => e.id === a.id)?.title, "Deploy uses blue-green pools");
+  const hit = r.recalledEntries.find((e) => e.id === a.id)!;
+  assert.equal(hit.title, "Deploy uses blue-green pools");
+  // Whitespace folded, cut to 240 characters plus "…".
+  assert.equal(hit.snippet, `two pools ${".".repeat(230)}…`);
   // An empty prompt recalls nothing.
   const none = await ok<{ recalledEntries: unknown[] }>("POST", "/context", { project: null, prompt: "" });
   assert.deepEqual(none.recalledEntries, []);

@@ -1,5 +1,6 @@
 import "./graph.css";
-import cytoscape, { type Core, type ElementDefinition } from "cytoscape";
+import cytoscape, { type Core, type EdgeSingular, type ElementDefinition } from "cytoscape";
+import fcose from "cytoscape-fcose";
 import { useEffect, useMemo, useRef, useState } from "react";
 import { api, type GraphData, type GraphJob, type GraphNode } from "../api.ts";
 import { CATEGORY_LABEL, CATEGORY_ORDER, CategoryBadge, Empty, ErrorBox, JOB_STATUS_LABEL, Markdown, SCOPE_LABEL, StateBadge, act, go, isHistory, usePoll, useData } from "../lib.tsx";
@@ -16,7 +17,28 @@ const cssVar = (name: string, fallback: string) => getComputedStyle(document.doc
 const LEGEND_CATS = CATEGORY_ORDER.filter((c) => c !== "standing");
 const isRunning = (j: GraphJob) => j.status === "pending" || j.status === "processing";
 
-const COSE = { name: "cose", animate: false, nodeRepulsion: () => 9000, idealEdgeLength: () => 70, nodeOverlap: 20, componentSpacing: 120, padding: 40 };
+cytoscape.use(fcose);
+
+/**
+ * fcose (force-directed with spectral start): spreads clusters apart where cose pulled every
+ * memory into one ball. A memory → entity "mentions" edge pulls less and longer the more
+ * memories mention that entity (data "hub"): the project's own name, mentioned by a third of
+ * its memories, no longer ties everything to the middle.
+ */
+const hubOf = (e: EdgeSingular) => (e.data("type") === "mentions" ? Math.max(1, Number(e.data("hub")) || 1) : 1);
+const LAYOUT = {
+  name: "fcose",
+  quality: "default",
+  animate: false,
+  padding: 40,
+  nodeSeparation: 110,
+  nodeRepulsion: () => 16000,
+  idealEdgeLength: (e: EdgeSingular) => 80 + 16 * Math.sqrt(hubOf(e)),
+  edgeElasticity: (e: EdgeSingular) => 0.45 / Math.sqrt(hubOf(e)),
+  gravity: 0.2,
+  numIter: 2500,
+  packComponents: true,
+};
 
 /** How far the floating toolbar/notices (top) and legend/hint (bottom) reach into the canvas. */
 function overlayInsets(c: Core): Insets {
@@ -57,7 +79,7 @@ function runLayout(c: Core, randomize: boolean) {
   );
   const isolated = c.nodes().filter((n) => lone.has(n.id()));
   if (!isolated.length) {
-    const all = c.layout({ ...COSE, randomize, fit: false } as cytoscape.LayoutOptions);
+    const all = c.layout({ ...LAYOUT, randomize, fit: false } as cytoscape.LayoutOptions);
     all.one("layoutstop", () => fitClear(c));
     all.run();
     return;
@@ -71,7 +93,7 @@ function runLayout(c: Core, randomize: boolean) {
     fitClear(c);
   };
   if (!connected.nodes().length) return place();
-  const layout = connected.layout({ ...COSE, randomize, fit: false } as cytoscape.LayoutOptions);
+  const layout = connected.layout({ ...LAYOUT, randomize, fit: false } as cytoscape.LayoutOptions);
   layout.one("layoutstop", place);
   layout.run();
 }
@@ -416,10 +438,11 @@ function buildElements(data: GraphData | undefined, f: { showEntities: boolean; 
     ids = keep;
     edges = edges.filter((e) => keep.has(e.source) && keep.has(e.target));
   }
+  // How many visible memories mention each entity (its hub size, for the layout and the style).
+  const deg = new Map<string, number>();
+  for (const e of edges) if (e.type === "mentions") deg.set(e.target, (deg.get(e.target) ?? 0) + 1);
   // Entities mentioned by a single visible memory add clutter without connecting anything.
   if (!f.focus) {
-    const deg = new Map<string, number>();
-    for (const e of edges) if (e.type === "mentions") deg.set(e.target, (deg.get(e.target) ?? 0) + 1);
     const lonely = new Set(nodes.filter((n) => n.type === "entity" && (deg.get(n.id) ?? 0) < 2).map((n) => n.id));
     nodes = nodes.filter((n) => !lonely.has(n.id));
     edges = edges.filter((e) => !lonely.has(e.target));
@@ -432,11 +455,12 @@ function buildElements(data: GraphData | undefined, f: { showEntities: boolean; 
         kind: n.type,
         category: n.type === "memory" ? n.category : n.kind,
         size: n.type === "entity" ? Math.min(60, 22 + n.count * 4) : 16,
+        deg: deg.get(n.id) ?? 0,
         raw: n,
       },
       classes: n.id === f.focus ? "focus" : undefined,
     })),
-    ...edges.map((e) => ({ data: { id: e.id, source: e.source, target: e.target, type: e.type } })),
+    ...edges.map((e) => ({ data: { id: e.id, source: e.source, target: e.target, type: e.type, hub: e.type === "mentions" ? (deg.get(e.target) ?? 1) : 1 } })),
   ];
 }
 
@@ -463,7 +487,9 @@ function graphStyle(): cytoscape.StylesheetJson {
         color: text,
         "text-valign": "bottom",
         "text-margin-y": 4,
-        "min-zoomed-font-size": 8,
+        // A memory's title only once zoomed in past 1:1 (cytoscape rounds the zoom up to a power
+        // of two here): hundreds of titles at the overview are a smear.
+        "min-zoomed-font-size": 12,
         "text-wrap": "ellipsis",
         "text-max-width": "140px",
         width: "data(size)",
@@ -476,30 +502,38 @@ function graphStyle(): cytoscape.StylesheetJson {
     {
       selector: 'node[kind = "entity"]',
       style: {
+        // A square sized by how many memories mention it; the name sits under it and, for a
+        // minor entity, shows once zoomed in (a box sized to a hidden label would stay empty).
         shape: "round-rectangle",
         "background-color": surface,
         "border-color": accent,
         "border-width": 2,
-        "font-size": 12,
+        width: "mapData(deg, 2, 40, 14, 40)",
+        height: "mapData(deg, 2, 40, 14, 40)",
+        "font-size": "mapData(deg, 2, 40, 11, 20)",
         "font-weight": "bold",
-        "text-valign": "center",
-        "text-margin-y": 0,
-        width: "label",
-        height: 22,
-        padding: "6px",
-        "min-zoomed-font-size": 0,
+        "text-valign": "bottom",
+        "text-margin-y": 3,
+        "text-background-color": surface,
+        "text-background-opacity": 0.8,
+        "text-background-padding": "1px",
+        // Hubs keep their name at the overview, minor entities show it once zoomed in.
+        "min-zoomed-font-size": "mapData(deg, 4, 24, 12, 0)",
       },
     },
     { selector: "edge", style: { width: 1, "line-color": border, "curve-style": "bezier", opacity: 0.7 } },
+    // Mentions are most of the edges: thin, and fainter the bigger the hub, so links stand out.
+    { selector: 'edge[type = "mentions"]', style: { width: 0.7, "curve-style": "haystack", opacity: "mapData(hub, 2, 40, 0.5, 0.12)" } },
     ...LINK_TYPES.map((t) => ({
       selector: `edge[type = "${t}"]`,
       style: {
-        width: 2,
+        // "related" is the most common link and says the least: thinner and lighter than the typed ones.
+        width: t === "related" ? 1.2 : 2,
         "line-color": linkColor[t],
         "target-arrow-color": linkColor[t],
         "target-arrow-shape": t === "related" ? "none" : "triangle",
         "line-style": t === "supersedes" ? "dashed" : "solid",
-        opacity: 0.9,
+        opacity: t === "related" ? 0.55 : 0.9,
       },
     })),
     { selector: "node:selected, node.focus", style: { "border-width": 3, "border-color": accent } },

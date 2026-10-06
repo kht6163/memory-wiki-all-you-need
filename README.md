@@ -222,11 +222,13 @@ Set **Memory server URL** (memory-wiki) in `/config` to `http://<server>:8765`, 
 | `EMBED_API_KEY` / `EMBED_MODEL` | – / `BAAI/bge-m3` | Changing the model re-embeds everything |
 | `EMBED_QUERY_TIMEOUT_MS` | 700 | Per-request query embedding; slower → keyword-only for that request |
 | `EMBED_RECALL_MIN_SIMILARITY` / `EMBED_SEARCH_MIN_SIMILARITY` | 0.55 / 0.45 | Cosine floor for meaning-only matches in recall / search (tuned for bge-m3) |
+| `EMBED_RECALL_MIN_Z` / `EMBED_RECALL_KEYWORD_MIN_Z` | 3.5 / 2 | Recall only: how far above the prompt's mean cosine (in standard deviations) a memory must be — found by meaning / found by words (`0` = off) |
 | `EMBED_QUERY_PREFIX` / `EMBED_DOC_PREFIX` | – | For models that need prefixes (e5: `query: ` / `passage: `) |
 | `DEBUG_MODE` | off | `1` keeps debug mode on (otherwise the switch on the web page `#/debug`) |
 | `DEBUG_LOG_KEEP_DAYS` / `DEBUG_LOG_MAX_MB` | 14 / 200 | Debug log retention and per-day size cap |
 | `CONTEXT_BUDGET_CHARS` | 8000 | System-prompt memory block budget |
 | `RECALL_BUDGET_CHARS` / `RECALL_LIMIT` | 3000 / 6 | Per-prompt recall |
+| `RECALL_COMMON_RATIO` | 0.06 | Recall only: a word in more than this share of memories (and in more than 20) cannot recall a memory by itself (`1` = off) |
 | `WIKI_COMPOSE` | (web switch, on) | `1` / `0` fixes compose-from-turns on or off (otherwise the switch on `#/settings`) |
 | `WIKI_COMPOSE_CHUNK_CHARS` | 40000 | Turn-record chars per compose LLM call |
 | `WIKI_COMPOSE_MAX_TURNS` | 200 | Max turns per compose job |
@@ -252,7 +254,7 @@ Set **Memory server URL** (memory-wiki) in `/config` to `http://<server>:8765`, 
 | `timeoutMs` | `MEMORY_TIMEOUT_MS` | 1500 | Timeout for fetching the injected memory |
 | `project` | `MEMORY_PROJECT` | (auto) | Override the project key |
 | `skillNudge` | `MEMORY_SKILL_NUDGE` | 8 | After a run with this many tool calls (2+ different tools) and no `skill_manage` call, hint the agent to save the procedure as a skill; `0` = off |
-| `showActivity` | `MEMORY_SHOW_ACTIVITY` | true | Show recalled memories (`memory_recall`) and curation results (`memory_curate`: added / updated / deleted) as tool-like cards in the conversation; `ctrl+o` expands them. Display only: what the model receives does not change |
+| `showActivity` | `MEMORY_SHOW_ACTIVITY` | true | Show recalled memories (`memory_recall`) and curation results (`memory_curate`: added / updated / deleted) as tool-like cards in the conversation, one line per memory; `ctrl+o` expands them (full title and the start of each memory). Display only: what the model receives does not change |
 | `disabled` | `MEMORY_DISABLED=1` | `false` | Disable the extension (`/memory-config disabled false` turns it back on) |
 
 </details>

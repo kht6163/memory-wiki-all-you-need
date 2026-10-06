@@ -5,7 +5,7 @@
 // server (no status route) stops after three failed polls; session.end stops watching.
 import assert from "node:assert/strict";
 import { after, before, test } from "node:test";
-import { curationLine, recallLine } from "../../claude-code-plugin/hooks/lib.ts";
+import { ACTIVITY_ITEM_CHARS, curationLine, recallLine } from "../../claude-code-plugin/hooks/lib.ts";
 import { assistant, callTool, complete, prompt, sessionStart, startSession, type FakeSession } from "./CC-harness.ts";
 import { startMockServer, waitFor, type MockServer } from "./X-ext-harness.ts";
 
@@ -15,7 +15,8 @@ let statusReplies: unknown[] = [];
 let turnId = 41;
 const flushNow = () => s.emit("command.run", { command: "memory-flush", args: "" });
 const statusPolls = () => srv.requests.filter((r) => r.method === "GET" && /^\/api\/turns\/\d+\/status$/.test(r.path));
-const activity = () => s.ui.logs.filter((l) => l.startsWith("🧠"));
+// The activity lines: a "🧠" header, then one indented line per memory (one $.ui.log call each).
+const activity = () => s.ui.logs.filter((l) => l.startsWith("🧠") || l.startsWith("  "));
 
 before(async () => {
   srv = await startMockServer();
@@ -35,12 +36,16 @@ after(async () => {
   await srv.close();
 });
 
-test("lines: recall lists the memories; curation counts add/update/delete and leaves confirm out", () => {
-  assert.equal(recallLine({ recall: "- [#3] A", recalledEntries: [{ id: 3, title: "A" }, { id: 5, title: "B" }] }), "🧠 memory_recall · 2 memories · #3 A, #5 B");
-  assert.equal(recallLine({ recall: "- [#7] Old server title (decision): body" }), "🧠 memory_recall · 1 memory · #7 Old server title (decision)");
+test("lines: recall lists the memories one per line; curation counts add/update/delete and leaves confirm out", () => {
+  assert.equal(recallLine({ recall: "- [#3] A", recalledEntries: [{ id: 3, title: "A" }, { id: 5, title: "B" }] }), "🧠 memory_recall · 2 memories\n  #3 A\n  #5 B");
+  assert.equal(recallLine({ recall: "- [#7] Old server title (decision): body" }), "🧠 memory_recall · 1 memory\n  #7 Old server title (decision)");
+  // A long title stays on its line: cut to ACTIVITY_ITEM_CHARS, whitespace folded.
+  const long = recallLine({ recall: "x", recalledEntries: [{ id: 9, title: `가나다\n${"라".repeat(200)}` }] })!.split("\n")[1];
+  assert.equal([...long].length, 2 + ACTIVITY_ITEM_CHARS);
+  assert.ok(long.startsWith("  #9 가나다 라") && long.endsWith("…"));
   assert.equal(recallLine({ recall: "" }), null);
   const done = { applied: [{ op: "add", entryId: 12, title: "VPN" }, { op: "confirm", entryId: 3, title: "x" }, { op: "update", entryId: 5, title: "CI" }] };
-  assert.equal(curationLine("done", done), "🧠 memory_curate · 1 added · 1 updated — + #12 VPN, ~ #5 CI");
+  assert.equal(curationLine("done", done), "🧠 memory_curate · 1 added · 1 updated\n  + #12 VPN\n  ~ #5 CI");
   assert.equal(curationLine("done", { applied: [{ op: "confirm", entryId: 3, title: "x" }] }), null);
   assert.equal(curationLine("error", done), null);
   assert.equal(curationLine("done", null), null);
@@ -49,13 +54,13 @@ test("lines: recall lists the memories; curation counts add/update/delete and le
 test("a recalled prompt logs its line when the turn starts; the turn's curation result is logged once done", { timeout: 15_000 }, async () => {
   const entered = await prompt(s, "how do we deploy?");
   assert.match(entered.context.join("\n"), /Deploy is blue-green/, "Claude still gets the recall as context");
-  assert.deepEqual(activity(), ["🧠 memory_recall · 1 memory · #3 Deploy is blue-green"]);
+  assert.deepEqual(activity(), ["🧠 memory_recall · 1 memory", "  #3 Deploy is blue-green"], "a log call per line (a newline inside one shows as �)");
   s.rows.push(assistant("blue-green"));
   statusReplies = [{ status: "processing" }, { status: "done", result: { applied: [{ op: "add", entryId: 12, title: "Deploy needs VPN" }] } }];
   await complete(s);
   await flushNow();
-  assert.ok(await waitFor(() => activity().length === 2, 10_000), `logs: ${JSON.stringify(s.ui.logs)}`);
-  assert.equal(activity()[1], "🧠 memory_curate · 1 added — + #12 Deploy needs VPN");
+  assert.ok(await waitFor(() => activity().length === 4, 10_000), `logs: ${JSON.stringify(s.ui.logs)}`);
+  assert.deepEqual(activity().slice(2), ["🧠 memory_curate · 1 added", "  + #12 Deploy needs VPN"]);
   assert.equal(statusPolls().length, 2);
 });
 

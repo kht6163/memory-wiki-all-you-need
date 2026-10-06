@@ -12,6 +12,7 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { after, before, beforeEach, mock, test } from "node:test";
+import { visibleWidth } from "@earendil-works/pi-tui";
 import {
   beforeAgentStartEvent,
   loadExtension,
@@ -127,10 +128,33 @@ test("recalled memories: the recall message is shown, with the entries only in d
   });
   const render = pi.messageRenderers.get("memory-recall")!;
   const collapsed = renderText(render(r.message, { expanded: false }, plainTheme));
-  assert.match(collapsed, /memory_recall 2 memories · Deploy uses blue-green, CI cache key/);
-  assert.doesNotMatch(collapsed, /#3/);
+  assert.match(collapsed, /^memory_recall 2 memories \(ctrl\+o to expand\)\n#3 Deploy uses blue-green\n#5 CI cache key$/);
   const expanded = renderText(render(r.message, { expanded: true }, plainTheme));
-  assert.match(expanded, /#3 Deploy uses blue-green\n#5 CI cache key/);
+  assert.match(expanded, /^memory_recall 2 memories\n#3 Deploy uses blue-green\n#5 CI cache key$/);
+});
+
+test("recall card: collapsed, one row per memory cut to the width; expanded, the start of the body too", () => {
+  const long = "배포 파이프라인은 blue-green 두 풀을 번갈아 쓰고 롤백은 이전 풀로 트래픽만 돌린다".repeat(3);
+  const data = {
+    entries: [
+      { id: 3, title: long, snippet: "두 풀은 각각 세 노드다" },
+      // An imported memory: the title is the cut-off start of the body, so the body alone is shown.
+      { id: 5, title: "CI 캐시 키는 lockfile 해…", snippet: "CI 캐시 키는 lockfile 해시다. 바뀌면 캐시를 버린다" },
+      { id: 7, title: "No snippet (an older server)" },
+      { id: 8, title: "first line\nsecond line" },
+    ],
+  };
+  const render = pi.messageRenderers.get("memory-recall")!;
+  const rows = (render({ customType: "memory-recall", details: data } as any, { expanded: false }, plainTheme) as any).render(40) as string[];
+  const memoryRows = rows.filter((l) => /#\d/.test(l));
+  assert.equal(memoryRows.length, 4, `one row each: ${JSON.stringify(rows)}`);
+  assert.ok(memoryRows.some((l) => l.includes("#8 first line second line")), "a newline in a title is folded");
+  for (const l of memoryRows) assert.ok(visibleWidth(l) <= 40, l);
+  const expanded = renderText(render({ customType: "memory-recall", details: data } as any, { expanded: true }, plainTheme), 400);
+  assert.match(expanded, /#3 배포 파이프라인.*\n\s*두 풀은 각각 세 노드다/);
+  assert.match(expanded, /#5 CI 캐시 키는 lockfile 해시다\. 바뀌면 캐시를 버린다/);
+  assert.doesNotMatch(expanded, /해…/);
+  assert.match(expanded, /#7 No snippet \(an older server\)/);
 });
 
 test("nothing recalled: no card (a skill hint alone stays a hidden message)", async () => {
@@ -191,7 +215,7 @@ test("curation: the sent turn is polled until done, then one card with add/updat
     skipped: 1,
   });
   const render = pi.entryRenderers.get("memory-curate")!;
-  assert.match(renderText(render({ customType, data }, { expanded: false }, plainTheme)), /memory_curate 1 added · 1 updated/);
+  assert.match(renderText(render({ customType, data }, { expanded: false }, plainTheme)), /^memory_curate 1 added · 1 updated \(ctrl\+o to expand\)\n\+ #12 Deploy needs VPN\n~ #5 CI cache key$/);
   const expanded = renderText(render({ customType, data }, { expanded: true }, plainTheme));
   assert.match(expanded, /\+ #12 Deploy needs VPN\n~ #5 CI cache key\n\(1 skipped as duplicates\)\nturn #7/);
   // Done: no more polls.

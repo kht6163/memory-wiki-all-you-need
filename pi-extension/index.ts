@@ -3,7 +3,7 @@ import os from "node:os";
 import path from "node:path";
 import { Type } from "@earendil-works/pi-ai";
 import { getAgentDir, keyHint, type ExtensionAPI, type ExtensionContext } from "@earendil-works/pi-coding-agent";
-import { Box, Text } from "@earendil-works/pi-tui";
+import { Box, Text, truncateToWidth } from "@earendil-works/pi-tui";
 import { resolveProject, type ProjectRef } from "./project.ts";
 import { applySkills, mirroredVersion, skillPaths, skillsRoot, type SkillsPayload, type SyncResult } from "./skills.ts";
 
@@ -323,7 +323,8 @@ function fmtEntries(entries: EntryLite[]): string {
 
 /** What the "memory_recall" card shows (stored in the hidden-from-model `details`). */
 export interface RecallCard {
-  entries: { id: number; title: string }[];
+  /** snippet: the start of the body (servers from 0.21.0), shown when the card is expanded. */
+  entries: { id: number; title: string; snippet?: string }[];
 }
 /** What the "memory_curate" card shows (an appended session entry). */
 export interface CurationCard {
@@ -347,7 +348,11 @@ export function recallCard(res: { recall?: unknown; recalled?: unknown; recalled
     entries = res.recalledEntries
       .filter(isObj)
       .filter((e) => typeof e.id === "number")
-      .map((e) => ({ id: e.id as number, title: typeof e.title === "string" ? e.title : "" }));
+      .map((e) => ({
+        id: e.id as number,
+        title: typeof e.title === "string" ? e.title : "",
+        ...(typeof e.snippet === "string" && e.snippet ? { snippet: e.snippet } : {}),
+      }));
   }
   if (!entries.length) {
     for (const m of res.recall.matchAll(/^- \[#(\d+)\] (.*)$/gm)) entries.push({ id: Number(m[1]), title: m[2].split(": ")[0] });
@@ -368,11 +373,20 @@ export function curationCard(turnId: number, status: unknown, result: unknown): 
   return { turnId, applied, skipped };
 }
 
-/** One-line summary of a recall card: "2 memories · A, B". */
+/** Summary of a recall card: "2 memories" (the memories follow, one per line). */
 export function recallSummary(card: RecallCard): string {
-  const titles = card.entries.map((e) => e.title || `#${e.id}`);
   const n = card.entries.length;
-  return `${n} ${n === 1 ? "memory" : "memories"} · ${titles.join(", ")}`;
+  return `${n} ${n === 1 ? "memory" : "memories"}`;
+}
+
+/**
+ * A recalled memory when the card is expanded: the title, then the start of the body —
+ * or the body alone when the title is just its cut-off start (imported memories).
+ */
+function recallDetail(e: RecallCard["entries"][number]): string {
+  if (!e.snippet) return `#${e.id} ${e.title}`;
+  const head = e.title.replace(/…$/, "").trim();
+  return head && e.snippet.startsWith(head) ? `#${e.id} ${e.snippet}` : `#${e.id} ${e.title}\n   ${e.snippet}`;
 }
 
 /** One-line summary of a curation card: "1 added · 2 updated · 1 deleted". */
@@ -390,8 +404,11 @@ export function curationSummary(card: CurationCard): string {
 
 const OP_MARK = { add: "+", update: "~", delete: "-" } as const;
 
-/** Card lines (summary first; the rest only when expanded, like a tool result). */
-export function cardLines(kind: "recall" | "curate", data: unknown, expanded: boolean): { title: string; summary: string; detail: string[] } | null {
+/**
+ * Card lines: the summary, then one line per memory — cut to the width while collapsed,
+ * in full (with the start of the body, for recall) when expanded, like a tool result.
+ */
+export function cardLines(kind: "recall" | "curate", data: unknown, expanded: boolean): { title: string; summary: string; lines: string[] } | null {
   if (kind === "recall") {
     if (!isObj(data) || !Array.isArray(data.entries)) return null;
     const card = data as unknown as RecallCard;
@@ -399,7 +416,7 @@ export function cardLines(kind: "recall" | "curate", data: unknown, expanded: bo
     return {
       title: "memory_recall",
       summary: recallSummary(card),
-      detail: expanded ? card.entries.map((e) => `#${e.id} ${e.title}`) : [],
+      lines: card.entries.map((e) => (expanded ? recallDetail(e) : oneLine(`#${e.id} ${e.title}`))),
     };
   }
   if (!isObj(data) || !Array.isArray(data.applied) || !data.applied.length) return null;
@@ -407,14 +424,29 @@ export function cardLines(kind: "recall" | "curate", data: unknown, expanded: bo
   return {
     title: "memory_curate",
     summary: curationSummary(card),
-    detail: expanded
-      ? [
-          ...card.applied.map((a) => `${OP_MARK[a.op] ?? "?"} #${a.entryId} ${a.title}`),
-          ...(card.skipped ? [`(${card.skipped} skipped as duplicates)`] : []),
-          `turn #${card.turnId}`,
-        ]
-      : [],
+    lines: [
+      ...card.applied.map((a) => {
+        const line = `${OP_MARK[a.op] ?? "?"} #${a.entryId} ${a.title}`;
+        return expanded ? line : oneLine(line);
+      }),
+      ...(expanded ? [...(card.skipped ? [`(${card.skipped} skipped as duplicates)`] : []), `turn #${card.turnId}`] : []),
+    ],
   };
+}
+
+/** A title folded onto one line (a newline in it would break a collapsed card's one row per memory). */
+const oneLine = (t: string) => t.replace(/\s+/g, " ").trim();
+
+/** Lines cut to the width, one terminal row each (a collapsed card's memories). */
+class CutLines {
+  lines: string[];
+  constructor(lines: string[]) {
+    this.lines = lines;
+  }
+  render(width: number): string[] {
+    return this.lines.map((l) => truncateToWidth(l, Math.max(1, width)));
+  }
+  invalidate() {}
 }
 
 const expandHint = () => {
@@ -430,10 +462,11 @@ function renderCard(kind: "recall" | "curate", data: unknown, expanded: boolean,
   const lines = cardLines(kind, data, expanded);
   if (!lines) return undefined;
   const box = new Box(1, 1, (t: string) => theme.bg("toolSuccessBg", t));
-  let body = `${theme.fg("toolTitle", theme.bold(lines.title))} ${theme.fg("muted", lines.summary)}`;
-  if (lines.detail.length) body += `\n${lines.detail.map((l) => theme.fg("toolOutput", l)).join("\n")}`;
-  else body += theme.fg("dim", ` (${expandHint()})`);
-  box.addChild(new Text(body, 0, 0));
+  const head = `${theme.fg("toolTitle", theme.bold(lines.title))} ${theme.fg("muted", lines.summary)}`;
+  box.addChild(new Text(expanded ? head : `${head}${theme.fg("dim", ` (${expandHint()})`)}`, 0, 0));
+  const body = lines.lines.map((l) => theme.fg("toolOutput", l));
+  // Collapsed: one row per memory, cut to fit (a recall card stays as tall as its memory count).
+  box.addChild(expanded ? new Text(body.join("\n"), 0, 0) : new CutLines(body));
   return box;
 }
 

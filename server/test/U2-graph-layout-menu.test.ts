@@ -185,3 +185,18 @@ test("web-ui: graph fit keeps nodes clear of the toolbar (top) and legend (botto
   assert.ok(Math.abs(left - (view.w - right)) < 1e-6, "centered horizontally");
   assert.equal(fitViewport({ x1: 0, y1: 0, x2: 1, y2: 1 }, view, insets, 40, { min: 0.1, max: 3 }).zoom, 3, "zoom capped");
 });
+
+test("G-080: the graph is laid out with fcose, hubs pull weakly, titles only once zoomed in", () => {
+  const view = read("pages/GraphView.tsx");
+  assert.match(view, /cytoscape\.use\(fcose\)/);
+  assert.match(view, /name: "fcose"/);
+  assert.doesNotMatch(view, /name: "cose"/, "cose pulled every memory around the project's own entity into one ball");
+  // A mentions edge knows its entity's hub size; the layout lengthens and loosens it by that.
+  assert.match(view, /hub: e\.type === "mentions" \? \(deg\.get\(e\.target\)/);
+  assert.match(view, /idealEdgeLength: \(e: EdgeSingular\) => [^\n]*hubOf\(e\)/);
+  assert.match(view, /edgeElasticity: \(e: EdgeSingular\) => [^\n]*hubOf\(e\)/);
+  // Overview: no memory titles (min 12 px), hub entities named, minor ones once zoomed in.
+  assert.match(view, /"min-zoomed-font-size": 12,/);
+  assert.match(view, /"min-zoomed-font-size": "mapData\(deg, /);
+  assert.match(view, /edge\[type = "mentions"\]/);
+});

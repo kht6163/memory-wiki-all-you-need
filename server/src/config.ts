@@ -72,6 +72,18 @@ export const config = {
     batch: int("EMBED_BATCH", 8),
     /** A memory with no keyword match is recalled into the prompt only at or above this cosine. */
     recallMinSimilarity: float("EMBED_RECALL_MIN_SIMILARITY", 0.55, -1, 1),
+    /**
+     * Recall only: a memory found by meaning must also stand out from this prompt's
+     * cosine to every memory — at least this many standard deviations above the mean
+     * (bge-m3 puts unrelated memories anywhere from 0.33 to 0.47 on average depending
+     * on the prompt, so a fixed cosine cannot tell noise from a match; ADR-0046). 0 = off.
+     */
+    recallMinZ: float("EMBED_RECALL_MIN_Z", 3.5, 0, 100),
+    /**
+     * Recall only: a memory found by words is dropped when its meaning is this far from
+     * the prompt (z below this), unless it has no vector yet. 0 = off.
+     */
+    recallKeywordMinZ: float("EMBED_RECALL_KEYWORD_MIN_Z", 2, 0, 100),
     /** Same for memory_search / wiki search / the web (the caller judges the hits). */
     searchMinSimilarity: float("EMBED_SEARCH_MIN_SIMILARITY", 0.45, -1, 1),
     /** Prepended to queries / documents for models that need it (e5: "query: " / "passage: "). */
@@ -96,6 +108,12 @@ export const config = {
   /** Character budget for per-prompt recall. */
   recallBudget: int("RECALL_BUDGET_CHARS", 3000),
   recallLimit: int("RECALL_LIMIT", 6),
+  /**
+   * Recall only: a word in more than this share of live memories (and in more than 20)
+   * is common ("확인", "실제", "사용") — it still adds to a hit's score but cannot recall a
+   * memory by itself (ADR-0046). 1 = off.
+   */
+  recallCommonRatio: float("RECALL_COMMON_RATIO", 0.06, 0, 1),
   wiki: {
     /** WIKI_COMPOSE=1/0 fixes turn-record compose on or off; unset = the web switch (settings.json, ADR-0038). */
     composeEnv: onOff("WIKI_COMPOSE"),

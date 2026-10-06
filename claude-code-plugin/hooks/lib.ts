@@ -785,7 +785,17 @@ export function recallLine(res: { recall?: unknown; recalledEntries?: unknown })
   }
   if (!entries.length) return null;
   const n = entries.length;
-  return `🧠 memory_recall · ${n} ${n === 1 ? "memory" : "memories"} · ${entries.map((e) => `#${e.id} ${e.title}`.trim()).join(", ")}`;
+  return [`🧠 memory_recall · ${n} ${n === 1 ? "memory" : "memories"}`, ...entries.map((e) => activityItem(`#${e.id} ${e.title}`))].join("\n");
+}
+
+/** Characters of one memory line under an activity line (the transcript width is unknown). */
+export const ACTIVITY_ITEM_CHARS = 100;
+
+/** One memory under an activity line: indented, on one line, cut to ACTIVITY_ITEM_CHARS. */
+export function activityItem(text: string): string {
+  const t = text.replace(/\s+/g, " ").trim();
+  const chars = [...t];
+  return `  ${chars.length > ACTIVITY_ITEM_CHARS ? `${chars.slice(0, ACTIVITY_ITEM_CHARS - 1).join("")}…` : t}`;
 }
 
 /** The transcript line for a curated turn, or null when it changed no memory (confirm only, skipped, error, not done). */
@@ -802,8 +812,8 @@ export function curationLine(status: unknown, result: unknown): string | null {
     .filter(([c]) => (c as number) > 0)
     .map(([c, w]) => `${c} ${w}`)
     .join(" · ");
-  const list = applied.map((a) => `${OP_MARK[a.op as string]} #${a.entryId} ${typeof a.title === "string" ? a.title : ""}`.trim()).join(", ");
-  return `🧠 memory_curate · ${summary} — ${list}`;
+  const items = applied.map((a) => activityItem(`${OP_MARK[a.op as string]} #${a.entryId} ${typeof a.title === "string" ? a.title : ""}`));
+  return [`🧠 memory_curate · ${summary}`, ...items].join("\n");
 }
 
 /** The statuses GET /turns/:id/status answers; anything else (an old server's index.html) is a failed poll. */

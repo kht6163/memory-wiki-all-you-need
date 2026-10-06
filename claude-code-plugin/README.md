@@ -34,7 +34,7 @@ Shown in `/config` (stored under `pluginConfigs` in `~/.claude/settings.json`). 
 | `project` | `MEMORY_PROJECT` | (git origin; outside git the folder: `home/<user>[/<path>]` or `path/<path>`) | Fixed project key |
 | `skill_nudge` | `MEMORY_SKILL_NUDGE` | 8 | After a turn with this many tool calls (2+ different tools) and no `skill_manage` call, hint Claude to save the procedure as a skill; `0` = off |
 | `mirror_skills` | `MEMORY_MIRROR_SKILLS` (`0` = off) | `true` | Install the server's global skills into `~/.claude/skills` |
-| `show_activity` | `MEMORY_SHOW_ACTIVITY` (`0` = off) | `true` | Log a line in the conversation when memories are recalled for a prompt (`🧠 memory_recall`) and when a turn's curation changed memories (`🧠 memory_curate`). Display only: never sent to Claude |
+| `show_activity` | `MEMORY_SHOW_ACTIVITY` (`0` = off) | `true` | Log lines in the conversation when memories are recalled for a prompt (`🧠 memory_recall`) and when a turn's curation changed memories (`🧠 memory_curate`), one line per memory. Display only: never sent to Claude |
 
 ## Commands
 

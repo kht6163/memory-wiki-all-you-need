@@ -54,7 +54,7 @@ An environment variable with the same meaning overrides the file.
 | `timeoutMs` | `MEMORY_TIMEOUT_MS` | `1500` | Timeout for fetching memory to inject |
 | `project` | `MEMORY_PROJECT` | (auto) | Override the project key |
 | `skillNudge` | `MEMORY_SKILL_NUDGE` | `8` | After a run with this many tool calls (2+ tools) and no `skill_manage` call, hint the agent to save a skill; `0` = off |
-| `showActivity` | `MEMORY_SHOW_ACTIVITY` | `true` | Show recalled memories (`memory_recall`) and curation results (`memory_curate`: added / updated / deleted) as tool-like cards in the conversation; `ctrl+o` expands them. Display only: what the model receives does not change |
+| `showActivity` | `MEMORY_SHOW_ACTIVITY` | `true` | Show recalled memories (`memory_recall`) and curation results (`memory_curate`: added / updated / deleted) as tool-like cards in the conversation, one line per memory; `ctrl+o` expands them (full title and the start of each memory). Display only: what the model receives does not change |
 | `disabled` | `MEMORY_DISABLED=1` | `false` | Disable the extension (`/memory-config disabled false` turns it back on) |
 
 ## License

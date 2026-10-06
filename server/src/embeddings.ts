@@ -144,14 +144,44 @@ export function resetVectorCache() {
  * `max`. A row edited since it was embedded is skipped until the indexer
  * re-embeds it: never matched by what it used to say (G-064).
  */
-export function nearest(kind: EmbedKind, query: Float32Array, rows: Iterable<{ id: number; updated_at: string }>, min: number, max: number): { id: number; sim: number }[] {
+/** Cosine spread of one query over every compared row (all of them, not only the returned ones). */
+export interface SimStats {
+  n: number;
+  mean: number;
+  sd: number;
+  /** Cosine of each compared row (vector current), for z-scores of rows below the floor. */
+  sims: Map<number, number>;
+}
+
+export function nearest(
+  kind: EmbedKind,
+  query: Float32Array,
+  rows: Iterable<{ id: number; updated_at: string }>,
+  min: number,
+  max: number,
+  stats?: SimStats,
+): { id: number; sim: number }[] {
   const vs = vectors(kind);
   const out: { id: number; sim: number }[] = [];
+  let sum = 0;
+  let sq = 0;
+  let n = 0;
   for (const { id, updated_at } of rows) {
     const v = vs.get(id);
     if (!v || v.hash !== currentHash(kind, id, updated_at)) continue;
     const sim = dot(query, v.vector);
+    if (stats) {
+      stats.sims.set(id, sim);
+      sum += sim;
+      sq += sim * sim;
+      n++;
+    }
     if (sim >= min) out.push({ id, sim });
+  }
+  if (stats) {
+    stats.n = n;
+    stats.mean = n ? sum / n : 0;
+    stats.sd = n ? Math.sqrt(Math.max(0, sq / n - stats.mean ** 2)) : 0;
   }
   out.sort((a, b) => b.sim - a.sim || b.id - a.id);
   return out.slice(0, max);

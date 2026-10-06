@@ -125,6 +125,9 @@ import {
 } from "./wiki.ts";
 import { suggestedTree } from "./wiki-tree.ts";
 
+/** Body characters a recall card shows per memory when expanded. */
+const SNIPPET_CHARS = 240;
+
 export const api = new Hono();
 
 // Debug mode: one "http" line per request (polling and the debug endpoints themselves excluded).
@@ -266,8 +269,13 @@ api.post("/context", async (c) => {
   recordShown(ctx.included);
   if (debug) logContext("context", project, prompt, ctx, debug);
   // The extension compares this with the skills it mirrored and says so when they differ.
-  // recalledEntries: titles for the extension's "memory recall" card (what was injected for this prompt).
-  const recalledEntries = ctx.recalled.map((id) => ({ id, title: getEntry(id)?.title ?? "" }));
+  // recalledEntries: the extension's "memory recall" card (what was injected for this prompt) —
+  // the title per line, the start of the body when the card is expanded.
+  const recalledEntries = ctx.recalled.map((id) => {
+    const e = getEntry(id);
+    const body = (e?.body ?? "").replace(/\s+/g, " ").trim();
+    return { id, title: e?.title ?? "", snippet: body.length > SNIPPET_CHARS ? `${body.slice(0, SNIPPET_CHARS)}…` : body };
+  });
   return c.json({ project, ...ctx, recalledEntries, skillsVersion: skillsVersion(project) });
 });
 

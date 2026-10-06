@@ -424,7 +424,8 @@ function watchTurn($: Api, id: number) {
     if (gen !== watchGen || server !== settings.server || !settings.showActivity) return;
     if (t && (t.status === "done" || t.status === "skipped" || t.status === "error")) {
       const line = curationLine(t.status, t.result);
-      if (line) $.ui.log(line);
+      // One log call per line: the transcript shows a newline inside one as "�".
+      if (line) for (const l of line.split("\n")) $.ui.log(l);
       return;
     }
     schedule((await $.clock.now()) - started);
@@ -795,7 +796,7 @@ export function register(on: any, options?: PluginOptions) {
   // Every main-loop turn starts here (a queued prompt, a continuation too); subagents raise none.
   on("turn.start", async ($: Api, e: any, next: Next) => {
     if (recallNote) {
-      $.ui.log(recallNote); // under the prompt that recalled it
+      for (const l of recallNote.split("\n")) $.ui.log(l); // under the prompt that recalled it, a line per call
       recallNote = null;
     }
     if (turns.size > 20) turns.clear(); // marks whose turn.complete never came (a crash in the engine): start over

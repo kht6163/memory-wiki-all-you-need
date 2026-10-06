@@ -1,6 +1,6 @@
 import { config } from "./config.ts";
 import { db, rowToEntry, type Entry, type Scope } from "./db.ts";
-import { nearest } from "./embeddings.ts";
+import { nearest, type SimStats } from "./embeddings.ts";
 import { ACTIVE_SQL, NOT_SUPERSEDED_SQL } from "./store.ts";
 import { splitWords, STOPWORDS } from "./words.ts";
 
@@ -8,8 +8,125 @@ import { splitWords, STOPWORDS } from "./words.ts";
 // three characters, which is common in Korean ("포트", "설정"), so short terms
 // fall back to LIKE. Korean words also carry trailing particles ("포트를"), so
 // each Hangul term is also tried with its last one or two syllables dropped.
+// FTS/LIKE only gather candidates; scoring then matches short Latin/digit words (1–3
+// characters) as whole words only (G-078): "pr" must not score inside "HAProxy", nor "do"
+// inside "docker". Longer ones still match inside words ("gres" → PostgreSQL).
 
 const HANGUL = /[가-힣]/;
+/** Latin/digit-only query words; shorter than TOKEN_SUBSTRING_MIN they match whole words only (a dotted "0.9" still matches inside "0.9.9"). */
+const TOKEN_TERM = /^[\p{Script=Latin}\p{N}]+$/u;
+const TOKEN_SUBSTRING_MIN = 4;
+const SCRIPT_BOUNDARY = /(?<=[가-힣])(?=[^가-힣])|(?<=[^가-힣])(?=[가-힣])/u;
+
+/**
+ * Each word of a text with the forms a short query word may match whole: the word, its
+ * parts around . _ - / ("api/context" → "api", "context"), the runs on either side of a
+ * Hangul boundary ("테스트db는" → "db", "pm2를" → "pm2") and a Latin plural without its s
+ * ("apis" → "api").
+ */
+export function wordForms(text: string): string[][] {
+  return splitWords(text).map((w) => {
+    const forms = new Set<string>();
+    const add = (t: string) => {
+      if (!t) return;
+      forms.add(t);
+      if (/^[a-z]{2,}[a-rt-z]s$/.test(t)) forms.add(t.slice(0, -1));
+    };
+    for (const part of new Set([w, ...w.split(/[._\-/]+/)])) {
+      add(part);
+      const runs = part.split(SCRIPT_BOUNDARY);
+      if (runs.length > 1) runs.forEach(add);
+    }
+    return [...forms];
+  });
+}
+
+/** A field as scoring reads it: lower-cased text, word forms built on first use. */
+class Field {
+  lower: string;
+  words: string[][] | null = null;
+  constructor(text: string) {
+    this.lower = text.toLowerCase();
+  }
+}
+
+/** How often query word `v` occurs in a field: as a whole word for a short Latin/digit word, inside words otherwise. */
+function occurrences(f: Field, v: string): number {
+  if (v.length >= TOKEN_SUBSTRING_MIN || !TOKEN_TERM.test(v)) return f.lower.split(v).length - 1;
+  if (!f.lower.includes(v)) return 0;
+  f.words ??= wordForms(f.lower);
+  return f.words.filter((forms) => forms.includes(v)).length;
+}
+
+/**
+ * Live, current memories, for recall's common-word gate. Rebuilt when memories, retiring
+ * links or the date (expiry) change; per scope, which docs a search sees and each word's count.
+ */
+let corpus: {
+  key: string;
+  docs: { field: Field; scope: string; projectId: number | null }[];
+  visible: Map<string, Field[]>;
+  df: Map<string, number>;
+} | null = null;
+
+function currentCorpus(): NonNullable<typeof corpus> {
+  const r = db
+    .prepare(
+      `SELECT (SELECT COUNT(*) FROM entries) AS n, (SELECT MAX(updated_at) FROM entries) AS u, (SELECT MAX(id) FROM entries) AS m,
+              (SELECT COUNT(*) || ':' || IFNULL(MAX(rowid), 0) FROM entry_links WHERE type = 'supersedes') AS l, date('now') AS d`,
+    )
+    .get() as Record<string, unknown>;
+  const key = `${r.n}|${r.u}|${r.m}|${r.l}|${r.d}`;
+  if (corpus?.key !== key) {
+    const docs = db
+      .prepare(`SELECT e.* FROM entries e WHERE e.deleted_at IS NULL AND ${ACTIVE_SQL("e")}`)
+      .all()
+      .map((row) => {
+        const e = rowToEntry(row);
+        return { field: new Field(`${e.title}\n${e.body}\n${e.tags.join(" ")}\n${e.keywords.join(" ")}`), scope: e.scope, projectId: e.project_id };
+      });
+    corpus = { key, docs, visible: new Map(), df: new Map() };
+  }
+  return corpus;
+}
+
+/**
+ * The common-word test for one search (recall's gate): a word in more than
+ * max(COMMON_MIN_DF, ratio × N) of the live, current memories the search can see (global,
+ * user and this project, or every project). Reads the corpus key once; each word is
+ * counted once per corpus and scope.
+ */
+export function commonWords(ratio: number, projectId: number | null, allProjects = false): (v: string) => boolean {
+  if (ratio >= 1) return () => false;
+  const c = currentCorpus();
+  const scopeKey = allProjects ? "*" : String(projectId ?? -1);
+  let docs = c.visible.get(scopeKey);
+  if (!docs) {
+    docs = (allProjects ? c.docs : c.docs.filter((d) => d.scope !== "project" || d.projectId === projectId)).map((d) => d.field);
+    c.visible.set(scopeKey, docs);
+  }
+  const limit = Math.max(COMMON_MIN_DF, ratio * docs.length);
+  const memo = new Map<string, boolean>();
+  return (v) => {
+    let is = memo.get(v);
+    if (is === undefined) {
+      const k = `${scopeKey}|${v}`;
+      let df = c.df.get(k);
+      if (df === undefined) {
+        df = docs.filter((d) => occurrences(d, v) > 0).length;
+        c.df.set(k, df);
+      }
+      is = df > limit;
+      memo.set(v, is);
+    }
+    return is;
+  };
+}
+
+/** Fewer compared memories than this: z-scores of cosine say little, recall's gates on meaning stay off. */
+const Z_MIN_CORPUS = 30;
+/** A word must be in more memories than this to count as common, however small the store. */
+const COMMON_MIN_DF = 20;
 
 interface Term {
   variants: string[];
@@ -63,6 +180,18 @@ export interface SearchOptions {
   vector?: Float32Array | null;
   /** Cosine floor for vector candidates (default EMBED_SEARCH_MIN_SIMILARITY). */
   minSimilarity?: number;
+  /**
+   * Recall's gates (ADR-0046). Recall injects memories nobody asked for, so a hit must be
+   * evidence, not a filler for the last slots:
+   *  - commonRatio: a keyword hit needs a matched word that is in at most this share of
+   *    live memories (or in at most COMMON_MIN_DF); common words only add to the score.
+   *  - minZ: a vector candidate's cosine must be this many standard deviations above the
+   *    query's mean cosine over every visible memory.
+   *  - keywordMinZ: a keyword hit whose memory is further than this from the query in
+   *    meaning is dropped (a memory without a current vector is kept).
+   * The z gates need a vector and at least Z_MIN_CORPUS compared memories. 1 / 0 = off.
+   */
+  gate?: { commonRatio: number; minZ: number; keywordMinZ: number };
 }
 
 export interface SearchHit {
@@ -72,6 +201,9 @@ export interface SearchHit {
   keyword?: number;
   /** Cosine to the query vector (absent = not a vector candidate). For the debug log. */
   similarity?: number;
+  /** With a gate: the matched query words ("*" = common) and the cosine's z-score. For the debug log. */
+  terms?: string[];
+  z?: number;
 }
 
 /** Reciprocal rank fusion constant: smaller = the top of each list counts more. */
@@ -100,7 +232,8 @@ export function searchEntries(query: string, opts: SearchOptions = {}): SearchHi
   if (opts.supersededOnly) where.push(`NOT ${NOT_SUPERSEDED_SQL("e")}`);
   else if (!opts.inactive) where.push(ACTIVE_SQL("e"));
 
-  // Candidate set: FTS for long variants, LIKE for short ones.
+  // Candidate set: FTS for long variants, LIKE for short ones. Best FTS matches first
+  // (bm25): a word in hundreds of memories must not crowd rarer ones out of the 300.
   const candidates = new Map<number, Entry>();
   const long = terms.flatMap((t) => t.variants.filter((v) => v.length >= 3));
   const short = terms.flatMap((t) => t.variants.filter((v) => v.length < 3));
@@ -108,7 +241,7 @@ export function searchEntries(query: string, opts: SearchOptions = {}): SearchHi
     const rows = db
       .prepare(
         `SELECT e.* FROM entries_fts f JOIN entries e ON e.id = f.rowid
-         WHERE entries_fts MATCH ? AND ${where.join(" AND ")} LIMIT 300`,
+         WHERE entries_fts MATCH ? AND ${where.join(" AND ")} ORDER BY f.rank LIMIT 300`,
       )
       .all(long.map(ftsQuote).join(" OR "), ...args);
     for (const r of rows) candidates.set(Number(r.id), rowToEntry(r));
@@ -125,37 +258,9 @@ export function searchEntries(query: string, opts: SearchOptions = {}): SearchHi
     for (const r of rows) candidates.set(Number(r.id), rowToEntry(r));
   }
 
-  // Keyword score: what every memory matching a query word gets.
-  const keyword = new Map<number, number>();
-  for (const entry of candidates.values()) {
-    if (opts.excludeIds?.has(entry.id)) continue;
-    const title = entry.title.toLowerCase();
-    const body = entry.body.toLowerCase();
-    const tags = entry.tags.join(" ").toLowerCase();
-    const keywords = entry.keywords.join(" ").toLowerCase();
-    let score = 0;
-    let matched = 0;
-    for (const t of terms) {
-      let best = 0;
-      for (const v of t.variants) {
-        const weight = v.length / t.variants[0].length; // full word beats a trimmed stem
-        let s = 0;
-        if (title.includes(v)) s += 3;
-        if (tags.includes(v)) s += 2;
-        // Keywords exist to bridge wording (synonyms, translations): as strong as a tag.
-        else if (keywords.includes(v)) s += 2;
-        if (body.includes(v)) s += 1 + Math.min(body.split(v).length - 2, 3) * 0.2;
-        best = Math.max(best, s * weight);
-      }
-      if (best > 0) matched++;
-      score += best;
-    }
-    if (!matched) continue;
-    // Reward covering more of the query.
-    keyword.set(entry.id, score * (0.5 + matched / terms.length));
-  }
-
-  // Vector candidates: every memory the same filters allow, by cosine to the query.
+  // Vector side first: the keyword gate needs every visible memory's cosine.
+  const gate = opts.gate;
+  const stats: SimStats = { n: 0, mean: 0, sd: 0, sims: new Map() };
   const similar = new Map<number, number>();
   if (vector) {
     const rows = db
@@ -163,11 +268,64 @@ export function searchEntries(query: string, opts: SearchOptions = {}): SearchHi
       .all(...args)
       .map((r) => ({ id: Number(r.id), updated_at: String(r.updated_at) }))
       .filter((r) => !opts.excludeIds?.has(r.id));
-    for (const n of nearest("entry", vector, rows, opts.minSimilarity ?? config.embed.searchMinSimilarity, Math.max(limit * 3, 50))) similar.set(n.id, n.sim);
-    const missing = [...similar.keys()].filter((id) => !candidates.has(id));
-    if (missing.length)
-      for (const r of db.prepare(`SELECT * FROM entries WHERE id IN (${missing.map(() => "?").join(",")})`).all(...missing))
-        candidates.set(Number(r.id), rowToEntry(r));
+    for (const n of nearest("entry", vector, rows, opts.minSimilarity ?? config.embed.searchMinSimilarity, Math.max(limit * 3, 50), stats))
+      similar.set(n.id, n.sim);
+  }
+  const zOf = (id: number): number | undefined => {
+    const sim = stats.sims.get(id);
+    return sim === undefined || stats.n < Z_MIN_CORPUS || !(stats.sd > 0) ? undefined : (sim - stats.mean) / stats.sd;
+  };
+  if (gate && gate.minZ > 0)
+    for (const id of [...similar.keys()]) if ((zOf(id) ?? Infinity) < gate.minZ) similar.delete(id);
+  const missing = [...similar.keys()].filter((id) => !candidates.has(id));
+  if (missing.length)
+    for (const r of db.prepare(`SELECT * FROM entries WHERE id IN (${missing.map(() => "?").join(",")})`).all(...missing))
+      candidates.set(Number(r.id), rowToEntry(r));
+
+  // Keyword score: what every memory matching a query word gets.
+  const common = gate ? commonWords(gate.commonRatio, opts.projectId ?? null, opts.allProjects) : () => false;
+  const keyword = new Map<number, number>();
+  const matchedWords = new Map<number, string[]>();
+  for (const entry of candidates.values()) {
+    if (opts.excludeIds?.has(entry.id)) continue;
+    const title = new Field(entry.title);
+    const body = new Field(entry.body);
+    const tags = new Field(entry.tags.join(" "));
+    const keywords = new Field(entry.keywords.join(" "));
+    let score = 0;
+    let matched = 0;
+    // Without a gate any matched word counts; with one, a matched word must not be common.
+    let evidence = !gate;
+    const words: string[] = [];
+    for (const t of terms) {
+      let best = 0;
+      let bestWord = "";
+      for (const v of t.variants) {
+        const weight = v.length / t.variants[0].length; // full word beats a trimmed stem
+        let s = 0;
+        if (occurrences(title, v)) s += 3;
+        if (occurrences(tags, v)) s += 2;
+        // Keywords exist to bridge wording (synonyms, translations): as strong as a tag.
+        else if (occurrences(keywords, v)) s += 2;
+        const inBody = occurrences(body, v);
+        if (inBody) s += 1 + Math.min(inBody - 1, 3) * 0.2;
+        if (s > 0 && !evidence && !common(v)) evidence = true;
+        if (s * weight > best) {
+          best = s * weight;
+          bestWord = v;
+        }
+      }
+      if (best > 0) {
+        matched++;
+        if (gate) words.push(common(bestWord) ? `${bestWord}*` : bestWord);
+      }
+      score += best;
+    }
+    if (!matched || !evidence) continue;
+    if (gate && gate.keywordMinZ > 0 && (zOf(entry.id) ?? Infinity) < gate.keywordMinZ) continue;
+    // Reward covering more of the query.
+    keyword.set(entry.id, score * (0.5 + matched / terms.length));
+    if (gate) matchedWords.set(entry.id, words);
   }
 
   // Without a query vector the keyword score is the score (unchanged ranking).
@@ -191,7 +349,16 @@ export function searchEntries(query: string, opts: SearchOptions = {}): SearchHi
     if (entry.pinned) score *= 1.1;
     const kw = keyword.get(id);
     const sim = similar.get(id);
-    hits.push({ entry, score, ...(kw === undefined ? {} : { keyword: kw }), ...(sim === undefined ? {} : { similarity: sim }) });
+    const z = gate ? zOf(id) : undefined;
+    const words = matchedWords.get(id);
+    hits.push({
+      entry,
+      score,
+      ...(kw === undefined ? {} : { keyword: kw }),
+      ...(sim === undefined ? {} : { similarity: sim }),
+      ...(words ? { terms: words } : {}),
+      ...(z === undefined ? {} : { z: Math.round(z * 100) / 100 }),
+    });
   }
   if (opts.boostEntities?.length && hits.length)
     applyEntityBoost(hits, opts.boostEntities, opts.allProjects ? undefined : (opts.projectId ?? -1));
