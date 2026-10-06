@@ -483,7 +483,9 @@ api.delete("/entries/:id/links", (c) => {
 // ----------------------------------------------------------------- graph
 
 /** Whole graph for the web view: project (with bridging global/user memories) or everything. */
-api.get("/graph", (c) => c.json(graphData(num(c.req.query("project_id")) ?? null, { limit: num(c.req.query("limit")) })));
+api.get("/graph", (c) =>
+  c.json(graphData(num(c.req.query("project_id")) ?? null, { limit: num(c.req.query("limit")), shared: c.req.query("scope") === "shared" })),
+);
 
 /** memory_graph tool: neighborhood of an entity (entity=) or a memory (id=), as seen from a project. */
 api.get("/graph/neighbors", (c) => {
@@ -521,8 +523,8 @@ api.delete("/entities/:id", (c) => {
 });
 
 api.post("/graph/backfill", async (c) => {
-  const b = await body<{ project_id?: number | null; all?: boolean }>(c);
-  return c.json(enqueueBackfill(b.project_id || null, { all: b.all }), 201);
+  const b = await body<{ project_id?: number | null; all?: boolean; scope?: string }>(c);
+  return c.json(enqueueBackfill(b.project_id || null, { all: b.all, shared: b.scope === "shared" }), 201);
 });
 api.get("/graph/jobs", (c) => c.json(listGraphJobs(num(c.req.query("limit")) ?? 20)));
 api.post("/graph/jobs/:id/retry", (c) => c.json(retryGraphJob(idParam(c))));

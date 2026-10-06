@@ -4,12 +4,12 @@ import fcose from "cytoscape-fcose";
 import layoutUtilities from "cytoscape-layout-utilities";
 import { useEffect, useMemo, useRef, useState } from "react";
 import { api, type GraphData, type GraphJob, type GraphNode } from "../api.ts";
-import { CATEGORY_LABEL, CATEGORY_ORDER, CategoryBadge, Empty, ErrorBox, JOB_STATUS_LABEL, Markdown, SCOPE_LABEL, StateBadge, act, go, isHistory, usePoll, useData } from "../lib.tsx";
+import { CATEGORY_LABEL, CATEGORY_ORDER, CategoryBadge, Empty, ErrorBox, JOB_STATUS_LABEL, Markdown, SCOPE_LABEL, StateBadge, act, go, isHistory, readLocal, usePoll, useData, writeLocal } from "../lib.tsx";
 import { EntityChips, KIND_LABEL, KindIcon, LINK_LABEL, LINK_TYPES, LinkList } from "./GraphPages.tsx";
 import { ScopeTabs } from "./WikiPages.tsx";
 import { Icon } from "../components/Icon.tsx";
 import { SkeletonText } from "../components/Skeleton.tsx";
-import { fitViewport, isolatedIds, isolatedKey, placeIsolated, placeLabels, sortIsolated, type Insets, type LabelCandidate } from "../graph-layout.ts";
+import { fitViewport, graphScopeHref, isolatedIds, isolatedKey, neighbourhood, pickGraphScope, placeIsolated, placeLabels, sortIsolated, type Insets, type LabelCandidate } from "../graph-layout.ts";
 
 // The interactive graph (cytoscape). Loaded lazily so the rest of the UI does not pay for it.
 
@@ -222,9 +222,41 @@ function runLayout(c: Core, randomize: boolean) {
   layout.run();
 }
 
-export function GraphPage({ projectId, initialFocus }: { projectId?: number; initialFocus?: string }) {
+const SCOPE_KEY = "graph:scope";
+const SHARED_NAME = "공용(전역·사용자)";
+
+type GraphPageProps = { projectId?: number; shared?: boolean; initialFocus?: string };
+
+/**
+ * The graph shows one project or the shared (global / user) memories. A bare #/graph picks one
+ * (ADR-0048); every memory at once opens only around a focus (an entity's neighbourhood spans projects).
+ */
+export function GraphPage(props: GraphPageProps) {
+  if (!props.projectId && !props.shared && !props.initialFocus) return <GraphScopeRedirect />;
+  return <GraphCanvasPage {...props} />;
+}
+
+function GraphScopeRedirect() {
   const projects = useData(() => api.projects(), []);
-  const graph = useData(() => api.graph(projectId), [projectId]);
+  useEffect(() => {
+    if (!projects.data && !projects.error) return;
+    window.location.replace(`#${graphScopeHref(pickGraphScope(readLocal(SCOPE_KEY), projects.data ?? []))}`);
+  }, [projects.data, projects.error]);
+  return (
+    <div className="graph-center" aria-busy="true">
+      <span className="graph-loading">
+        <Icon name="loader" className="spin" />
+        그래프를 여는 중…
+      </span>
+    </div>
+  );
+}
+
+function GraphCanvasPage({ projectId, shared = false, initialFocus }: GraphPageProps) {
+  const projects = useData(() => api.projects(), []);
+  const graph = useData(() => api.graph(projectId, shared), [projectId, shared]);
+  // Every memory at once: only reachable around a focus (no project, not shared).
+  const everyProject = !projectId && !shared;
   const jobs = useData(() => api.graphJobs(), []);
   const [showEntities, setShowEntities] = useState(true);
   // History (superseded / expired memories) is hidden unless asked for.
@@ -238,8 +270,16 @@ export function GraphPage({ projectId, initialFocus }: { projectId?: number; ini
   const cy = useRef<Core | null>(null);
   const searchRef = useRef<HTMLInputElement>(null);
 
+  useEffect(() => {
+    if (projectId) writeLocal(SCOPE_KEY, String(projectId));
+    else if (shared) writeLocal(SCOPE_KEY, "shared");
+  }, [projectId, shared]);
+
   // Jobs come newest first; the latest one for this scope decides what the status bar says.
-  const job = jobs.data?.find((j) => (j.payload.projectId ?? undefined) === projectId);
+  // The shared scope also follows a backfill over every memory from before scopes (it has no home now).
+  const job = jobs.data?.find((j) =>
+    shared ? j.payload.shared === true || j.payload.projectId == null : !j.payload.shared && (j.payload.projectId ?? undefined) === projectId,
+  );
   const running = job && isRunning(job) ? job : undefined;
   usePoll(() => jobs.reload(), 3000, Boolean(running));
   // Refresh the graph when the running job advances or finishes (not on every poll: each refresh re-lays out).
@@ -388,11 +428,11 @@ export function GraphPage({ projectId, initialFocus }: { projectId?: number; ini
   };
   const fit = () => cy.current && fitClear(cy.current, cy.current.elements(), true);
   const relayout = () => cy.current && runLayout(cy.current, true);
-  const startBackfill = () => act(() => api.backfill(projectId), { success: "그래프 붙이기를 시작했습니다" }).then((r) => r !== undefined && jobs.reload());
-  const scopeName = projectId ? (project ? `"${project.name}"` : "이 프로젝트") : "전체";
+  const startBackfill = () => act(() => api.backfill(projectId, false, shared), { success: "그래프 붙이기를 시작했습니다" }).then((r) => r !== undefined && jobs.reload());
+  const scopeName = projectId ? (project ? `"${project.name}"` : "이 프로젝트") : shared ? SHARED_NAME : "모든 프로젝트";
 
   // An empty canvas with unlinked memories is the moment to offer the backfill as the main action.
-  const offerEmpty = Boolean(graph.data && !running && unlinked > 0 && entCount === 0 && linkCount === 0);
+  const offerEmpty = Boolean(graph.data && !everyProject && !running && unlinked > 0 && entCount === 0 && linkCount === 0);
   const showJob = job && (running || ((job.status === "error" || job.status === "cancelled") && dismissedJob !== job.id));
 
   return (
@@ -402,6 +442,7 @@ export function GraphPage({ projectId, initialFocus }: { projectId?: number; ini
           <h1>
             메모리 그래프
             {project && <span className="graph-head-scope">{project.name}</span>}
+            {shared && <span className="graph-head-scope">{SHARED_NAME}</span>}
           </h1>
           <span className="graph-stats" aria-live="polite">
             메모리 {memCount} · 엔티티 {entCount} · 관계 {linkCount}
@@ -417,8 +458,17 @@ export function GraphPage({ projectId, initialFocus }: { projectId?: number; ini
 
         <div className="graph-top">
         <div className="graph-float graph-toolbar" role="toolbar" aria-label="그래프 도구">
-          <select value={projectId ?? ""} onChange={(e) => go(e.target.value ? `/graph?project=${e.target.value}` : "/graph")} aria-label="범위">
-            <option value="">전체</option>
+          <select
+            value={projectId ?? (shared ? "shared" : "")}
+            onChange={(e) => go(graphScopeHref(e.target.value === "shared" ? "shared" : Number(e.target.value)))}
+            aria-label="범위"
+          >
+            {everyProject && (
+              <option value="" disabled>
+                모든 프로젝트
+              </option>
+            )}
+            <option value="shared">{SHARED_NAME}</option>
             {projects.data?.map((p) => (
               <option key={p.id} value={p.id}>
                 {p.name}
@@ -454,7 +504,12 @@ export function GraphPage({ projectId, initialFocus }: { projectId?: number; ini
             </button>
           )}
           {focus && (
-            <button className="chip" aria-pressed onClick={() => setFocus(null)} title="주변만 보기를 끄고 전체 그래프 보기">
+            <button
+              className="chip"
+              aria-pressed
+              onClick={() => (everyProject ? go("/graph") : setFocus(null))}
+              title={everyProject ? "주변만 보기를 끄고 범위 그래프로" : "주변만 보기를 끄고 전체 그래프 보기"}
+            >
               <Icon name="crosshair" size={13} />
               주변만 보는 중
               <Icon name="x" size={12} />
@@ -470,7 +525,8 @@ export function GraphPage({ projectId, initialFocus }: { projectId?: number; ini
         </div>
 
         {showJob && job && <JobBar job={job} scopeName={scopeName} onChanged={() => jobs.reload()} onDismiss={() => setDismissedJob(job.id)} />}
-        {!showJob && !offerEmpty && !running && unlinked > 0 && (
+        {/* Around a focus across projects there is no scope to backfill: each scope offers its own. */}
+        {!showJob && !offerEmpty && !running && unlinked > 0 && !everyProject && (
           <div className="graph-float graph-jobbar">
             <span className="graph-jobbar-text">
               엔티티가 없는 메모리 <b className="mono-num">{unlinked}</b>개
@@ -530,10 +586,25 @@ export function GraphPage({ projectId, initialFocus }: { projectId?: number; ini
             </Empty>
           </div>
         )}
+        {graph.data && focus && !graph.data.nodes.some((n) => n.id === focus) && (
+          <div className="graph-center">
+            <Empty
+              icon="crosshair"
+              title="이 노드를 그래프에서 찾지 못했습니다"
+              action={
+                <button className="btn" onClick={() => (everyProject ? go("/graph") : setFocus(null))}>
+                  주변만 보기 끄기
+                </button>
+              }
+            >
+              지워졌거나 언급하는 메모리가 없거나, 불러온 범위(최근 1500개) 밖에 있습니다.
+            </Empty>
+          </div>
+        )}
         {graph.data && !offerEmpty && memCount === 0 && !running && (
           <div className="graph-center">
             <Empty icon="sticky-note" title="표시할 메모리가 없습니다">
-              {projectId ? "이 프로젝트에 메모리가 쌓이면 그래프가 그려집니다." : "메모리가 쌓이면 그래프가 그려집니다."}
+              {projectId ? "이 프로젝트에 메모리가 쌓이면 그래프가 그려집니다." : shared ? "전역·사용자 메모리가 쌓이면 그래프가 그려집니다." : "메모리가 쌓이면 그래프가 그려집니다."}
             </Empty>
           </div>
         )}
@@ -605,20 +676,17 @@ function buildElements(
   f: { showEntities: boolean; showHistory: boolean; hidden: Set<string>; focus: string | null },
 ): ElementDefinition[] {
   if (!data) return [];
-  // The focused node stays even when it is history ("그래프에서 보기" from a replaced memory).
-  let nodes = data.nodes.filter((n) =>
-    n.type === "memory" ? !f.hidden.has(n.category) && (f.showHistory || !isPast(n) || n.id === f.focus) : f.showEntities,
+  // The focused node stays even when it is history or filtered out ("그래프에서 보기" from a replaced memory).
+  let nodes = data.nodes.filter(
+    (n) => n.id === f.focus || (n.type === "memory" ? !f.hidden.has(n.category) && (f.showHistory || !isPast(n)) : f.showEntities),
   );
   let ids = new Set(nodes.map((n) => n.id));
   let edges = data.edges.filter((e) => ids.has(e.source) && ids.has(e.target));
-  if (f.focus && ids.has(f.focus)) {
-    // Two hops around the focused node: memory → entity → other memories.
-    const keep = new Set([f.focus]);
-    for (let hop = 0; hop < 2; hop++)
-      for (const e of edges) {
-        if (keep.has(e.source)) keep.add(e.target);
-        else if (keep.has(e.target)) keep.add(e.source);
-      }
+  // A focus the data does not hold (deleted, or past the node limit) draws nothing, not everything (G-083).
+  if (f.focus && !ids.has(f.focus)) return [];
+  if (f.focus) {
+    // Two hops around the focused node: memory → entity → other memories (G-083).
+    const keep = neighbourhood(f.focus, edges, 2);
     nodes = nodes.filter((n) => keep.has(n.id));
     ids = keep;
     edges = edges.filter((e) => keep.has(e.source) && keep.has(e.target));

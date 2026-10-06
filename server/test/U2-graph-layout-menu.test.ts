@@ -215,7 +215,7 @@ test("G-080: the graph is laid out with fcose, edges pull by kind, names never o
   assert.match(view, /const \[showHistory, setShowHistory\] = useState\(false\)/);
   // Review fixes: a focused history memory stays; closing the drawer unselects (no stuck fade);
   // a search hit beats the fade; a refresh keeps runtime classes; fits ignore screen-sized labels.
-  assert.match(view, /f\.showHistory \|\| !isPast\(n\) \|\| n\.id === f\.focus/);
+  assert.match(view, /\(n\) => n\.id === f\.focus \|\| \(n\.type === "memory" \? !f\.hidden\.has\(n\.category\) && \(f\.showHistory \|\| !isPast\(n\)\)/);
   assert.match(view, /if \(!selected\) cy\.current\?\.nodes\(":selected"\)\.unselect\(\)/);
   assert.match(view, /selector: "node\.match", style: \{ opacity: 1 \}/);
   assert.match(view, /for \(const k of \["focus", "past"\]\) el\.toggleClass/);

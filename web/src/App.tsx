@@ -150,7 +150,14 @@ export function App() {
     else page = <WikiPageView key={`${scope}-${p2}`} scope={scope} slug={p2} />;
   } else if (p0 === "wiki-jobs") page = <WikiJobsPage scope={route.query.has("project") ? num(route.query.get("project")) ?? 0 : undefined} />;
   else if (p0 === "graph")
-    page = <GraphPage key={route.query.toString()} projectId={num(route.query.get("project"))} initialFocus={route.query.get("focus") ?? undefined} />;
+    page = (
+      <GraphPage
+        key={route.query.toString()}
+        projectId={num(route.query.get("project"))}
+        shared={route.query.get("scope") === "shared"}
+        initialFocus={route.query.get("focus") ?? undefined}
+      />
+    );
   else if (p0 === "entities") page = <EntitiesPage />;
   else if (p0 === "review") page = <ReviewPage key={route.query.toString()} projectId={num(route.query.get("project"))} />;
   else if (p0 === "entity" && num(p1)) page = <EntityPage key={p1} id={num(p1)!} />;

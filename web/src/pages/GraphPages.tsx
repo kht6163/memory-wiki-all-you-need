@@ -3,6 +3,7 @@ import { useEffect, useMemo, useRef, useState, type KeyboardEvent, type ReactNod
 import { api, type Entity, type EntryLink, type GraphRevision, type LinkType, type SimilarPair } from "../api.ts";
 import { CategoryBadge, Empty, ErrorBox, SCOPE_LABEL, SourceBadge, StateBadge, Time, act, confirmDialog, go, isHistory, toast, toastError, useData } from "../lib.tsx";
 import { Icon, type IconName } from "../components/Icon.tsx";
+import { graphScopeHref } from "../graph-layout.ts";
 import { revertBlockText } from "../errors.ts";
 import { Dialog } from "../components/Dialog.tsx";
 import { PageHeader } from "../components/PageHeader.tsx";
@@ -154,7 +155,7 @@ export function EntryGraph({
         <span className="count">
           엔티티 {entities.length} · 관계 {links.length}
         </span>
-        <a className="btn small ghost" href={`#/graph?${projectId ? `project=${projectId}&` : ""}focus=m${entryId}`}>
+        <a className="btn small ghost" href={`#${graphScopeHref(projectId ?? "shared", `m${entryId}`)}`}>
           <Icon name="share-2" size={14} />
           그래프에서 보기
         </a>

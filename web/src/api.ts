@@ -375,7 +375,7 @@ export interface GraphData {
 export interface GraphJob {
   id: number;
   status: JobStatus;
-  payload: { entries: number[]; projectId?: number | null };
+  payload: { entries: number[]; projectId?: number | null; shared?: boolean };
   result: { done?: number[]; chunks?: number; entities?: number; links?: number; ms?: number } | null;
   error: string | null;
   created_at: string;
@@ -601,13 +601,15 @@ export const api = {
   updateEntry: (id: number, patch: Partial<Entry> & { entities?: string[] }) => request<Entry>("PATCH", `/entries/${id}`, patch),
   addLink: (id: number, to: number, type: LinkType) => request<EntryLink[]>("POST", `/entries/${id}/links`, { to, type }),
   removeLink: (id: number, to: number, type: LinkType) => request<EntryLink[]>("DELETE", `/entries/${id}/links${qs({ to, type })}`),
-  graph: (project_id?: number) => request<GraphData>("GET", `/graph${qs({ project_id })}`),
+  /** shared: the global / user memories only (the "공용" scope). Neither: every memory. */
+  graph: (project_id?: number, shared = false) => request<GraphData>("GET", `/graph${qs({ project_id, scope: shared ? "shared" : undefined })}`),
   entities: (q?: string, project_id?: number) => request<Entity[]>("GET", `/entities${qs({ q, project_id })}`),
   entity: (id: number) => request<{ entity: Entity; memories: (Entry & { project_name: string | null })[] }>("GET", `/entities/${id}`),
   updateEntity: (id: number, patch: Partial<Pick<Entity, "name" | "kind" | "description">>) => request<Entity>("PATCH", `/entities/${id}`, patch),
   mergeEntity: (id: number, into: number) => request<Entity>("POST", `/entities/${id}/merge`, { into }),
   deleteEntity: (id: number) => request("DELETE", `/entities/${id}`),
-  backfill: (project_id?: number, all = false) => request<GraphJob>("POST", "/graph/backfill", { project_id, all }),
+  backfill: (project_id?: number, all = false, shared = false) =>
+    request<GraphJob>("POST", "/graph/backfill", { project_id, all, scope: shared ? "shared" : undefined }),
   graphRevisions: (f: { entity_id?: number; entry_id?: number; limit?: number } = {}) => request<GraphRevision[]>("GET", `/graph/revisions${qs(f)}`),
   revertGraphRevision: (id: number) => request<{ revision: GraphRevision; revert: GraphRevision | null }>("POST", `/graph/revisions/${id}/revert`),
   graphJobs: () => request<GraphJob[]>("GET", "/graph/jobs"),

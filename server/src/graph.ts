@@ -694,13 +694,20 @@ export interface GraphData {
 /**
  * Graph for the web view. project: that project's memories plus the global /
  * user memories that share an entity with them (or with each other) — so the
- * cross-project bridges stay visible. No project: every live memory.
+ * cross-project bridges stay visible. shared: the global / user memories only (the web's
+ * "공용" scope, ADR-0048). Neither: every live memory (the web opens it only around a focus).
  */
-export function graphData(projectId: number | null, opts: { limit?: number } = {}): GraphData {
+export function graphData(projectId: number | null, opts: { limit?: number; shared?: boolean } = {}): GraphData {
   const limit = opts.limit ?? 1500;
   let entries: Entry[];
   let own: Entry[];
-  if (projectId) {
+  if (opts.shared) {
+    entries = db
+      .prepare(`SELECT * FROM entries WHERE deleted_at IS NULL AND scope IN ('global','user') AND category != 'standing' ORDER BY updated_at DESC`)
+      .all()
+      .map(rowToEntry);
+    own = entries;
+  } else if (projectId) {
     own = db.prepare(`SELECT * FROM entries WHERE deleted_at IS NULL AND project_id = ? AND category != 'standing'`).all(projectId).map(rowToEntry);
     const shared = db
       .prepare(
@@ -780,7 +787,7 @@ export function graphStats() {
 export interface GraphJob {
   id: number;
   status: "pending" | "processing" | "done" | "skipped" | "error" | "cancelled";
-  payload: { entries: number[]; projectId?: number | null };
+  payload: { entries: number[]; projectId?: number | null; shared?: boolean };
   result: { done?: number[]; chunks?: number; entities?: number; links?: number; ms?: number } | null;
   error: string | null;
   created_at: string;
@@ -801,11 +808,12 @@ export function onGraphJobQueued(fn: () => void) {
   wakeWorker = fn;
 }
 
-/** Queue a backfill over memories that have no entities yet (one project, or all). */
-export function enqueueBackfill(projectId: number | null, opts: { all?: boolean } = {}): GraphJob {
+/** Queue a backfill over memories that have no entities yet (one project, the global / user ones, or all). */
+export function enqueueBackfill(projectId: number | null, opts: { all?: boolean; shared?: boolean } = {}): GraphJob {
   const where = ["deleted_at IS NULL", "category != 'standing'"];
   const args: number[] = [];
-  if (projectId) {
+  if (opts.shared) where.push("scope IN ('global','user')");
+  else if (projectId) {
     where.push("project_id = ?");
     args.push(projectId);
   }
@@ -815,7 +823,8 @@ export function enqueueBackfill(projectId: number | null, opts: { all?: boolean 
     .all(...args, config.graph.backfillMax)
     .map((r) => Number(r.id));
   if (!ids.length) throw new HttpError(400, "no memories to backfill");
-  const res = db.prepare(`INSERT INTO graph_jobs (payload) VALUES (?)`).run(JSON.stringify({ entries: ids, projectId }));
+  const payload = opts.shared ? { entries: ids, projectId: null, shared: true } : { entries: ids, projectId };
+  const res = db.prepare(`INSERT INTO graph_jobs (payload) VALUES (?)`).run(JSON.stringify(payload));
   wakeWorker?.();
   return getGraphJob(Number(res.lastInsertRowid))!;
 }

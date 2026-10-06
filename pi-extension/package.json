@@ -1,6 +1,6 @@
 {
   "name": "pi-memory-wiki-all-you-need",
-  "version": "0.21.1",
+  "version": "0.22.0",
   "description": "Central memory + LLM wiki for pi: always-injected memory, per-turn LLM curation, wiki written from memory.",
   "license": "MIT",
   "author": "kht6163",

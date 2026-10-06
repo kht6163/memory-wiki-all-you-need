@@ -231,3 +231,47 @@ export function placeLabels(items: readonly LabelCandidate[], opts: LabelOptions
   }
   return shown;
 }
+
+// ------------------------------------------------------------------ scope
+
+/** What the graph page shows: one project, or the global / user memories ("공용"). ADR-0048. */
+export type GraphScope = number | "shared";
+
+/**
+ * Where a bare #/graph goes: the scope viewed last if it still exists, else the project with the
+ * most memories, else the shared scope. Every memory at once is not a scope: it was the slowest
+ * and least readable view, and no relation crossed projects (ADR-0048).
+ */
+export function pickGraphScope(last: string | null, projects: readonly { id: number; entry_count?: number }[]): GraphScope {
+  if (last === "shared") return "shared";
+  const lastId = Number(last);
+  if (last && Number.isInteger(lastId) && projects.some((p) => p.id === lastId)) return lastId;
+  let best: { id: number; entry_count?: number } | undefined;
+  for (const p of projects) if ((p.entry_count ?? 0) > (best?.entry_count ?? 0)) best = p;
+  return best ? best.id : "shared";
+}
+
+export function graphScopeHref(scope: GraphScope, focus?: string): string {
+  const q = scope === "shared" ? "scope=shared" : `project=${scope}`;
+  return `/graph?${q}${focus ? `&focus=${encodeURIComponent(focus)}` : ""}`;
+}
+
+/**
+ * Nodes within `hops` edges of `start` (both directions). Each hop grows from the previous hop's
+ * frontier only: growing the set while scanning the edges reached the whole component in one pass,
+ * so "주변만 보기" drew the entire graph (G-083).
+ */
+export function neighbourhood(start: string, edges: readonly { source: string; target: string }[], hops: number): Set<string> {
+  const keep = new Set([start]);
+  let frontier = new Set([start]);
+  for (let hop = 0; hop < hops && frontier.size; hop++) {
+    const next = new Set<string>();
+    for (const e of edges) {
+      if (frontier.has(e.source) && !keep.has(e.target)) next.add(e.target);
+      if (frontier.has(e.target) && !keep.has(e.source)) next.add(e.source);
+    }
+    for (const id of next) keep.add(id);
+    frontier = next;
+  }
+  return keep;
+}
