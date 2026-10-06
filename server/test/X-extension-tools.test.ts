@@ -69,12 +69,12 @@ after(async () => {
   fs.rmSync(cwd, { recursive: true, force: true });
 });
 
-test("G-010: 도구 9개와 명령 6개를 등록한다", () => {
+test("G-010: 도구 10개와 명령 7개를 등록한다", () => {
   assert.deepEqual(
     [...pi.tools.keys()].sort(),
-    ["memory_add", "memory_graph", "memory_remove", "memory_replace", "memory_search", "session_search", "wiki_read", "wiki_search", "wiki_write"].sort(),
+    ["memory_add", "memory_graph", "memory_remove", "memory_replace", "memory_search", "session_search", "skill_manage", "wiki_read", "wiki_search", "wiki_write"].sort(),
   );
-  assert.deepEqual([...pi.commands.keys()].sort(), ["memory", "memory-config", "memory-flush", "memory-pin", "memory-server", "wiki-compose"]);
+  assert.deepEqual([...pi.commands.keys()].sort(), ["memory", "memory-config", "memory-flush", "memory-pin", "memory-server", "skills-sync", "wiki-compose"]);
 });
 
 test("G-010: memory_search는 GET /api/search에 프로젝트·범위·분류를 붙인다", async () => {

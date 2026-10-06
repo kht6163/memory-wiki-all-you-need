@@ -14,8 +14,9 @@ function preview(over: Partial<MergePreview> = {}): MergePreview {
   return {
     source: { id: 1, key: "local/old", name: "old" },
     target: { id: 2, key: "github.com/me/new", name: "new" },
-    counts: { entries: 12, turns: 0, wiki_pages: 3, wiki_jobs: 0, review_jobs: 1, review_proposals_pending: 2 },
+    counts: { entries: 12, turns: 0, wiki_pages: 3, wiki_jobs: 0, review_jobs: 1, review_proposals_pending: 2, skills: 0 },
     wiki_conflicts: [{ slug: "setup", source_page_id: 10, target_page_id: 20, new_slug: "setup-old" }],
+    skill_conflicts: [],
     policy: "target",
     description: "none",
     aliases: ["local/old", "local/older"],
@@ -29,8 +30,8 @@ function project(id: number, name: string, key: string, last_seen_at: string | n
 
 test("G-060: preview counts become Korean lines, zero counts left out", () => {
   assert.deepEqual(mergeCountLines(preview().counts), ["메모리 12개", "위키 페이지 3개", "점검 작업 1개", "대기 중인 점검 제안 2개"]);
-  assert.deepEqual(mergeCountLines({ entries: 1234, turns: 0, wiki_pages: 0, wiki_jobs: 0, review_jobs: 0, review_proposals_pending: 0 }), ["메모리 1,234개"]);
-  assert.deepEqual(mergeCountLines({ entries: 0, turns: 0, wiki_pages: 0, wiki_jobs: 0, review_jobs: 0, review_proposals_pending: 0 }), []);
+  assert.deepEqual(mergeCountLines({ entries: 1234, turns: 0, wiki_pages: 0, wiki_jobs: 0, review_jobs: 0, review_proposals_pending: 0, skills: 0 }), ["메모리 1,234개"]);
+  assert.deepEqual(mergeCountLines({ entries: 0, turns: 0, wiki_pages: 0, wiki_jobs: 0, review_jobs: 0, review_proposals_pending: 0, skills: 0 }), []);
 });
 
 test("G-060: wiki conflicts show old → new slug, aliases are listed as given", () => {

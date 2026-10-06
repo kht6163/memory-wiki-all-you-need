@@ -133,6 +133,9 @@ export interface FakeCtx {
   answers: (string | undefined)[];
   /** What select/input were asked: title and options or placeholder. */
   asked: { kind: "select" | "input"; title: string; options?: string[]; placeholder?: string }[];
+  /** Command context: pi re-reads extensions and skills. Counted in `reloads`. */
+  reload(): Promise<void>;
+  reloads: number;
 }
 
 export function makeCtx(cwd: string, sessionId = "sess-x"): FakeCtx {
@@ -154,6 +157,10 @@ export function makeCtx(cwd: string, sessionId = "sess-x"): FakeCtx {
     status,
     answers,
     asked,
+    reloads: 0,
+    async reload() {
+      this.reloads++;
+    },
   };
 }
 

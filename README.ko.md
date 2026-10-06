@@ -75,6 +75,7 @@ flowchart LR
 - **페이지 트리** — 페이지를 다른 페이지 아래에 둡니다. 접고 펴는 트리, 경로, 페이지 트리 레일을 보여 주고, 평평한 위키에는 묶음 제안(예: ADR들을 목록 페이지 아래로)을 띄웁니다. 적용하기 전에는 아무것도 바뀌지 않습니다.
 - **턴 기록으로 정리** — LLM이 대화와 도구 실행 결과를 읽어 페이지에 반영합니다. `WIKI_COMPOSE_CHUNK_CHARS` 단위로 나눠 처리하며, 자동으로는 돌지 않습니다. 웹 설정(`#/settings`)이나 `WIKI_COMPOSE=0`으로 끌 수 있고, 꺼도 에이전트와 사람은 페이지를 직접 씁니다.
 - **위키 점검** — 고아 페이지, 없는 페이지 링크, 지워진 메모리 인용, 빈 페이지를 찾습니다(LLM 없음).
+- **스킬** — 배포·릴리스·검토 순서 같은 반복 절차를 웹에서 전역 또는 프로젝트별로 씁니다. 각 PC는 pi가 시작할 때와 `/skills-sync` 명령으로 서버에서 한 방향으로 내려받아 `~/.pi/agent/extensions/memory-wiki-all-you-need/skills/`에 둡니다(전역·프로젝트 폴더 분리). pi는 이름과 설명을 보고 작업이 맞을 때 본문을 읽습니다. 같은 이름이면 프로젝트 스킬이 전역 스킬을 대신합니다. PC에서 고친 내용은 다음 동기화 때 덮어쓰고, PC의 파일은 서버로 올리지 않습니다. 에이전트도 `skill_manage`(pi-hermes-memory와 같은 이름)로 직접 스킬을 남깁니다. 시행착오가 있었거나 도구를 많이 쓴 작업을 마치면 서버에 스킬을 만들거나 고치고, 그 결과가 다시 PC로 내려옵니다. 에이전트는 스킬을 지울 수 없고, 고치려면 먼저 현재 내용을 읽어야 합니다. 서버의 스킬이 바뀌면 다음 요청 때 pi가 `/skills-sync`를 하라고 알려 줍니다. 모든 수정은 이력에 남아 되돌릴 수 있고, 지운 스킬은 휴지통으로 가며, 잠근 스킬은 사람만 고칠 수 있습니다. 기본으로 에이전트가 만든 전역 스킬(또는 승인된 전역 스킬의 수정)은 웹에서 승인해야 PC로 내려갑니다. 설정 화면 "에이전트 스킬 승인"에서 안 함 / 전역 스킬만 / 모두를 고릅니다.
 
 **웹 UI**
 - 라이트·다크 테마, `⌘K` / `Ctrl K` 명령 팔레트(초성 검색 포함), 키보드 단축키(`?`), 되돌리기 토스트, 모바일 서랍 메뉴. 글꼴이 포함돼 있어 외부 CDN을 쓰지 않습니다.
@@ -114,7 +115,7 @@ Docker Compose 예시입니다(`LLM_API_KEY`는 `.env`에 둡니다).
 ```yaml
 services:
   memory:
-    image: kht6163/memory-wiki-all-you-need:0.15   # amd64 / arm64
+    image: kht6163/memory-wiki-all-you-need:0.17   # amd64 / arm64
     restart: unless-stopped
     environment:
       LLM_BASE_URL: http://<llm-host>:8317/v1
@@ -136,7 +137,7 @@ mkdir -p data && sudo chown 1000:1000 data
 docker run -d --name memory-wiki --restart unless-stopped \
   -p 127.0.0.1:8765:8765 -v "$PWD/data:/data" \
   -e LLM_BASE_URL=http://<llm-host>:8317/v1 -e LLM_API_KEY=<키> -e TIMEZONE=Asia/Seoul \
-  kht6163/memory-wiki-all-you-need:0.15
+  kht6163/memory-wiki-all-you-need:0.17
 ```
 
 **선택: 의미 검색.** 같은 compose 파일에 임베딩 서비스를 더합니다. bge-m3는 다국어 모델이고 CPU로 돌아갑니다(짧은 질의 하나에 약 55ms, 모델 약 2.3GB는 첫 기동 때 내려받음).
@@ -239,6 +240,7 @@ pi install npm:pi-memory-wiki-all-you-need
 | `settleDelayMs` | `MEMORY_SETTLE_DELAY_MS` | 8000 | 에이전트가 완전히 대기 상태가 된 뒤 턴을 보내기까지 기다리는 시간 |
 | `timeoutMs` | `MEMORY_TIMEOUT_MS` | 1500 | 주입할 메모리를 조회하는 타임아웃 |
 | `project` | `MEMORY_PROJECT` | (자동) | 프로젝트 키 직접 지정 |
+| `skillNudge` | `MEMORY_SKILL_NUDGE` | 8 | 한 번의 응답에서 도구를 이만큼(2종류 이상) 쓰고 `skill_manage`를 부르지 않았으면, 다음 요청 때 에이전트에게 절차를 스킬로 저장할지 살펴보라고 알림. `0`이면 끔 |
 | `disabled` | `MEMORY_DISABLED=1` | `false` | 확장 끄기(`/memory-config disabled false`로 다시 켬) |
 
 </details>
@@ -255,7 +257,7 @@ pi install npm:pi-memory-wiki-all-you-need
 
 ## 에이전트 도구와 명령
 
-**도구:** `memory_search`, `session_search`, `memory_add`, `memory_replace`, `memory_remove`(pi-hermes-memory와 같은 이름·target), `memory_graph`, `wiki_search`, `wiki_read`, `wiki_write`.
+**도구:** `memory_search`, `session_search`, `memory_add`, `memory_replace`, `memory_remove`(pi-hermes-memory와 같은 이름·target이라 두 확장을 함께 설치할 수 없음), `memory_graph`, `wiki_search`, `wiki_read`, `wiki_write`, `skill_manage`(서버 스킬 목록·보기·만들기·고치기).
 
 | 명령 | 하는 일 |
 |---|---|
@@ -265,6 +267,7 @@ pi install npm:pi-memory-wiki-all-you-need
 | `/memory-pin <text> [--project]` | 모든 세션에 주입되는 고정 지시 추가 |
 | `/memory-flush` | 모아 둔 턴을 기다리지 않고 지금 보냄 |
 | `/wiki-compose [정리 방향]` | 현재 세션의 턴을 서버 LLM으로 위키에 정리 |
+| `/skills-sync` | 서버의 스킬(전역 + 이 프로젝트)을 지금 내려받아 다시 불러옴. PC에서 고친 내용은 덮어씀 |
 
 ## 개발
 

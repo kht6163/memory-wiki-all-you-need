@@ -221,6 +221,20 @@ INSERT INTO revisions (entry_id, action, title, body, category, author, turn_id,
     assert.equal(ran, 0);
   });
 
+  test("v17: v16 skills keep their rows, get a 'create' revision, and the name index only covers live skills", () => {
+    const db = fresh();
+    migrate(db, MIGRATIONS.filter((m) => m.version <= 16));
+    db.exec(`INSERT INTO skills (id, name, description, body, author, updated_at) VALUES (1, 'deploy', 'Deploy', '## steps', 'human', '2026-10-06T00:00:00.000Z')`);
+    migrate(db);
+    const s = db.prepare(`SELECT status, locked, deleted_at, draft_at FROM skills WHERE id = 1`).get() as Record<string, unknown>;
+    assert.deepEqual({ ...s }, { status: "active", locked: 0, deleted_at: null, draft_at: null });
+    const revs = db.prepare(`SELECT skill_id, action, name, body, author, created_at FROM skill_revisions`).all().map((r) => ({ ...r }));
+    assert.deepEqual(revs, [{ skill_id: 1, action: "create", name: "deploy", body: "## steps", author: "human", created_at: "2026-10-06T00:00:00.000Z" }]);
+    db.exec(`UPDATE skills SET deleted_at = 'x' WHERE id = 1`);
+    db.exec(`INSERT INTO skills (name, description, body) VALUES ('deploy', 'again', 'b')`); // a trashed name is free
+    assert.throws(() => db.exec(`INSERT INTO skills (name, description, body) VALUES ('deploy', 'twice', 'b')`), /UNIQUE/);
+  });
+
   test("G-024: released steps are numbered 1..N without gaps", () => {
     assert.deepEqual(MIGRATIONS.map((m) => m.version), MIGRATIONS.map((_, i) => i + 1));
   });

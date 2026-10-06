@@ -32,6 +32,7 @@ export const ROUTES: PaletteItem[] = [
   { id: "r:wiki-jobs", label: "위키 작업", icon: "file-cog", href: "/wiki-jobs", keywords: "jobs" },
   { id: "r:preview", label: "주입 미리보기", icon: "eye", href: "/preview", keywords: "preview inject" },
   { id: "r:debug", label: "디버그 모드", icon: "file-text", href: "/debug", keywords: "debug log 로그 기록" },
+  { id: "r:skills", label: "전역 스킬", icon: "lightbulb", href: "/skills/0", keywords: "skills 스킬 절차 skill" },
   { id: "r:settings", label: "설정", icon: "wrench", href: "/settings", keywords: "settings 설정 compose 켜기 끄기" },
   { id: "r:trash", label: "휴지통", icon: "trash-2", href: "/trash", keywords: "trash" },
   { id: "r:search", label: "검색", icon: "search", href: "/search", keywords: "search" },

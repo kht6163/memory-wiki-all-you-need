@@ -21,7 +21,7 @@ app.route("/api", api);
 // copies the extension into ~/.pi/agent/extensions, writes this server as
 // "serverUrl" into its settings file (other keys kept), and serves index.ts
 // with this server as the built-in default (G-008).
-const EXTENSION_FILES = ["index.ts", "project.ts"];
+const EXTENSION_FILES = ["index.ts", "project.ts", "skills.ts"];
 const origin = (url: string) => new URL(url).origin;
 app.get("/pi-extension/:file", (c) => {
   const file = c.req.param("file");

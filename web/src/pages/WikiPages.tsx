@@ -33,13 +33,14 @@ import { SkeletonList, SkeletonPage } from "../components/Skeleton.tsx";
 import { ChildPages, ParentSelect, TreeCrumbs, TreeSuggestCard, WikiTreeList, WikiTreeRail } from "./WikiTree.tsx";
 
 /** Tabs shared by a project's (or the global) wiki, memory and turn views. */
-export function ScopeTabs({ scope, active }: { scope: number; active: "wiki" | "memory" | "user" | "turns" | "jobs" | "graph" }) {
+export function ScopeTabs({ scope, active }: { scope: number; active: "wiki" | "memory" | "user" | "turns" | "jobs" | "graph" | "skills" }) {
   const tabs =
     scope === 0
       ? [
           ["wiki", "위키", "#/w/0"],
           ["memory", "전역 메모리", "#/global"],
           ["user", "사용자 프로필", "#/user"],
+          ["skills", "스킬", "#/skills/0"],
           ["jobs", "위키 작업", "#/wiki-jobs?project=0"],
         ]
       : [
@@ -47,6 +48,7 @@ export function ScopeTabs({ scope, active }: { scope: number; active: "wiki" | "
           ["memory", "메모리", `#/p/${scope}`],
           ["graph", "그래프", `#/graph?project=${scope}`],
           ["turns", "턴 기록", `#/turns?project=${scope}`],
+          ["skills", "스킬", `#/skills/${scope}`],
           ["jobs", "위키 작업", `#/wiki-jobs?project=${scope}`],
         ];
   return (

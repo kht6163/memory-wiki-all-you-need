@@ -104,7 +104,7 @@ const AGENT_ONLY = [/^old_text is required$/, /^action must be add, replace or r
 test("G-048: every 4xx HttpError message in server/src has a Korean rule", () => {
   // Static messages are checked as written; template messages with every ${…} replaced by "7".
   // "could not apply: …" wraps another message and is covered by its own test.
-  const files = ["api.ts", "graph.ts", "graph-revisions.ts", "review.ts", "wiki.ts", "store.ts", "turns.ts", "entity-similar.ts", "project-merge.ts", "project-similar.ts"];
+  const files = ["api.ts", "graph.ts", "graph-revisions.ts", "review.ts", "wiki.ts", "store.ts", "turns.ts", "entity-similar.ts", "project-merge.ts", "project-similar.ts", "skills.ts"];
   const untranslated: string[] = [];
   let templates = 0;
   for (const f of files) {

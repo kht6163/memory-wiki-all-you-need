@@ -660,6 +660,19 @@ export function ProjectMergeDialog({ source, initialTarget, onClose }: { source:
                   </ul>
                 </section>
               )}
+              {summary.skillRenames.length > 0 && (
+                <section aria-labelledby={`${listId}-skill-renames`}>
+                  <h3 id={`${listId}-skill-renames`}>이름이 바뀌는 스킬</h3>
+                  <p className="hint">"{pv.target.name}"에 같은 이름의 스킬이 있어 "{pv.source.name}" 쪽 스킬의 이름을 바꿉니다.</p>
+                  <ul className="pmerge-renames">
+                    {summary.skillRenames.map((r) => (
+                      <li key={r.from}>
+                        <code>{r.from}</code> → <code>{r.to}</code>
+                      </li>
+                    ))}
+                  </ul>
+                </section>
+              )}
               <section aria-labelledby={`${listId}-keeps`}>
                 <h3 id={`${listId}-keeps`}>"{pv.target.name}"에 남는 것</h3>
                 <ul>

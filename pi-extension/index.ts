@@ -4,6 +4,7 @@ import path from "node:path";
 import { Type } from "@earendil-works/pi-ai";
 import { getAgentDir, type ExtensionAPI, type ExtensionContext } from "@earendil-works/pi-coding-agent";
 import { resolveProject, type ProjectRef } from "./project.ts";
+import { applySkills, mirroredVersion, skillPaths, skillsRoot, type SkillsPayload, type SyncResult } from "./skills.ts";
 
 // memory-wiki-all-you-need — central memory + LLM wiki for pi.
 //
@@ -22,11 +23,22 @@ import { resolveProject, type ProjectRef } from "./project.ts";
 // - memory_graph: the memory knowledge graph (entities + typed links).
 // - /wiki-compose: asks the server LLM to organize this session's turn
 //   records into wiki pages.
+// - Skills: on every pi start (resources_discover) and on /skills-sync, the
+//   server's global skills and this project's are mirrored one way into
+//   <agent dir>/extensions/memory-wiki-all-you-need/skills/ and handed to pi
+//   (skills.ts). The mirror never uploads a file; offline, the last sync is used.
+//   /context carries the server's skills version: when it differs from what
+//   this session loaded, the user is told to run /skills-sync.
+// - skill_manage (hermes-compatible name): the agent lists, reads, creates and
+//   updates skills on the server (never deletes); the server stays canonical and
+//   the result is mirrored back. After a run with many tool calls and no
+//   skill_manage call, the next prompt carries a hidden hint to consider saving
+//   the procedure (skillNudge, 0 = off).
 
 // Settings: <agent dir>/extensions/memory-wiki-all-you-need.json (like other pi
 // extensions), e.g. {"serverUrl": "http://<server>:8765"}. Env vars override the
 // file (MEMORY_SERVER_URL, MEMORY_SETTLE_DELAY_MS, MEMORY_TIMEOUT_MS,
-// MEMORY_PROJECT, MEMORY_DISABLED=1). The install script writes serverUrl; the
+// MEMORY_PROJECT, MEMORY_SKILL_NUDGE, MEMORY_DISABLED=1). The install script writes serverUrl; the
 // literal below is only the last fallback and the server swaps it for its own
 // origin when serving this file (G-008) — keep it the only occurrence.
 const DEFAULT_SERVER = "http://127.0.0.1:8765";
@@ -36,6 +48,8 @@ export interface MemoryConfig {
   settleDelayMs?: number;
   timeoutMs?: number;
   project?: string;
+  /** Tool calls in one run (with 2+ different tools) after which the agent is nudged to save a skill; 0 = never. */
+  skillNudge?: number;
   disabled?: boolean;
 }
 
@@ -84,6 +98,7 @@ export function resolveSettings(env: Record<string, string | undefined>, file: M
     settleDelayMs: num(env.MEMORY_SETTLE_DELAY_MS, file.settleDelayMs, 8000),
     timeoutMs: num(env.MEMORY_TIMEOUT_MS, file.timeoutMs, 1500),
     project: env.MEMORY_PROJECT?.trim() || (typeof file.project === "string" ? file.project.trim() : ""),
+    skillNudge: num(env.MEMORY_SKILL_NUDGE, file.skillNudge, 8),
     disabled: env.MEMORY_DISABLED === "1" || file.disabled === true,
   };
 }
@@ -94,6 +109,7 @@ let serverSource = settings.source;
 let SETTLE_DELAY_MS = settings.settleDelayMs;
 let CONTEXT_TIMEOUT_MS = settings.timeoutMs;
 let PROJECT_OVERRIDE = settings.project;
+let SKILL_NUDGE = settings.skillNudge;
 
 /** Re-read env + file after /memory-config or /memory-server changed the file. "disabled" needs /reload. */
 function applySettings() {
@@ -103,6 +119,7 @@ function applySettings() {
   SETTLE_DELAY_MS = next.settleDelayMs;
   CONTEXT_TIMEOUT_MS = next.timeoutMs;
   PROJECT_OVERRIDE = next.project;
+  SKILL_NUDGE = next.skillNudge;
   return next;
 }
 
@@ -127,6 +144,11 @@ export const SETTINGS: Record<SettingKey, { env: string; help: string; parse: (v
       if (!v.trim()) throw new Error("empty project key (use unset to go back to the git origin)");
       return v.trim();
     },
+  },
+  skillNudge: {
+    env: "MEMORY_SKILL_NUDGE",
+    help: "after a run with this many tool calls, hint the agent to save the procedure as a skill (0 = off)",
+    parse: (v) => positiveInt(v, 0),
   },
   disabled: {
     env: "MEMORY_DISABLED",
@@ -161,7 +183,7 @@ function describeSetting(key: SettingKey): string {
   const env = envOverrides(key);
   const eff = resolveSettings(process.env, file);
   const value =
-    key === "serverUrl" ? eff.server : key === "timeoutMs" ? eff.timeoutMs : key === "settleDelayMs" ? eff.settleDelayMs : key === "project" ? eff.project || "(git origin)" : eff.disabled;
+    key === "serverUrl" ? eff.server : key === "timeoutMs" ? eff.timeoutMs : key === "settleDelayMs" ? eff.settleDelayMs : key === "project" ? eff.project || "(git origin)" : key === "skillNudge" ? eff.skillNudge : eff.disabled;
   const from = env ? `env ${SETTINGS[key].env}` : file[key] !== undefined ? "settings file" : "default";
   return `${key} = ${value}  (${from})`;
 }
@@ -309,12 +331,22 @@ export default function memoryAllYouNeed(pi: ExtensionAPI) {
   let buffer: TurnMessage[] = [];
   let flushTimer: ReturnType<typeof setTimeout> | null = null;
   let warned = false;
+  // Skills: the server version this session loaded (null = never synced here),
+  // the newer one already reported, and this run's tool calls for the nudge.
+  let loadedSkillsVersion: string | null = null;
+  let skillsStale = false;
+  let notifiedSkillsVersion = "";
+  let runToolCalls = 0;
+  const runTools = new Set<string>();
+  let runUsedSkills = false;
+  let skillHint = "";
 
   const projectBody = () => (project ? { key: project.key, name: project.name, remote: project.remote } : null);
 
   const setStatus = (ctx: ExtensionContext, msg: string | undefined) => {
     if (ctx.hasUI) ctx.ui.setStatus("memory", msg);
   };
+  const okStatus = () => `${project ? `🧠 ${project.name}` : "🧠 global"}${skillsStale ? " · skills changed: /skills-sync" : ""}`;
 
   const cancelFlush = () => {
     if (flushTimer) clearTimeout(flushTimer);
@@ -343,14 +375,61 @@ export default function memoryAllYouNeed(pi: ExtensionAPI) {
     cwd = ctx.cwd;
     project = resolveProject(cwd, PROJECT_OVERRIDE);
     buffer = [];
-    setStatus(ctx, project ? `🧠 ${project.name}` : "🧠 global");
+    setStatus(ctx, okStatus());
   });
+
+  // ------------------------------------------------------------- skills
+
+  const skillRoot = () => skillsRoot(getAgentDir());
+  /** Fetch the server's skills and mirror them; throws when the server or the disk fails. */
+  async function syncSkills(key: string | null, timeoutMs: number): Promise<SyncResult> {
+    const q = key ? `?${new URLSearchParams({ project: key })}` : "";
+    const payload = await call<SkillsPayload>("GET", `/skills/sync${q}`, undefined, timeoutMs);
+    return applySkills(skillRoot(), payload, key, SERVER);
+  }
+
+  pi.on("resources_discover", async (event) => {
+    // Never throws: a dead server, an old server without /skills/sync (404) or a
+    // read-only disk leave the last synced skills in place.
+    try {
+      const key = resolveProject(event.cwd, PROJECT_OVERRIDE)?.key ?? null;
+      // /skills-sync has just synced and asked pi to reload: do not fetch twice.
+      const g = globalThis as { __memoryWikiSkillsSyncedAt?: number };
+      let synced: SyncResult | null = null;
+      if (Date.now() - (g.__memoryWikiSkillsSyncedAt ?? 0) > 10_000) {
+        try {
+          synced = await syncSkills(key, CONTEXT_TIMEOUT_MS);
+        } catch (err) {
+          console.error(`[memory] skills not synced, using the last copy: ${(err as Error).message}`);
+        }
+      }
+      // What this session now loads; compared with /context's skillsVersion before each request.
+      // From the sync itself when there was one (versions.json is shared with other pi processes).
+      loadedSkillsVersion = synced ? synced.version : mirroredVersion(skillRoot(), key);
+      const paths = skillPaths(skillRoot(), key);
+      return paths.length ? { skillPaths: paths } : undefined;
+    } catch (err) {
+      console.error(`[memory] skills unavailable: ${(err as Error).message}`);
+      return undefined;
+    }
+  });
+
+  /** The server's skills differ from the ones this session loaded: say so once per version, and in the status line. */
+  function checkSkills(ctx: ExtensionContext, version: unknown) {
+    if (typeof version !== "string") return; // a server without skills
+    const stale = version !== (loadedSkillsVersion ?? "");
+    if (stale && version !== notifiedSkillsVersion && ctx.hasUI) {
+      ctx.ui.notify(`the memory server's skills changed — run /skills-sync to load them (${SERVER})`, "info");
+    }
+    if (stale) notifiedSkillsVersion = version;
+    skillsStale = stale;
+  }
 
   pi.on("before_agent_start", async (event, ctx) => {
     cancelFlush();
     let recall = "";
     try {
-      const res = await call<{ system: string; recall: string }>(
+      const res = await call<{ system: string; recall: string; skillsVersion?: string }>(
         "POST",
         "/context",
         { project: projectBody(), prompt: event.prompt },
@@ -358,7 +437,9 @@ export default function memoryAllYouNeed(pi: ExtensionAPI) {
       );
       cachedSystem = res.system;
       recall = res.recall;
-      if (warned) setStatus(ctx, project ? `🧠 ${project.name}` : "🧠 global");
+      const wasStale = skillsStale;
+      checkSkills(ctx, res.skillsVersion);
+      if (warned || wasStale !== skillsStale) setStatus(ctx, okStatus());
       warned = false;
     } catch (err) {
       if (!warned && ctx.hasUI) ctx.ui.notify(`memory server unreachable (${SERVER}): ${(err as Error).message}${unreachableHint()}`, "warning");
@@ -368,17 +449,35 @@ export default function memoryAllYouNeed(pi: ExtensionAPI) {
     if (cachedSystem) {
       event.systemPromptOptions.sections = { ...(event.systemPromptOptions.sections ?? {}), "memory-context": cachedSystem };
     }
-    if (recall) return { message: { customType: "memory-recall", content: recall, display: false } };
+    const hint = skillHint;
+    skillHint = "";
+    const content = [recall, hint].filter(Boolean).join("\n");
+    if (content) return { message: { customType: "memory-recall", content, display: false } };
     return undefined;
   });
 
   pi.on("message_end", async (event) => {
     const m = toTurnMessage(event.message);
     if (m) buffer.push(m);
+    for (const t of m?.toolCalls ?? []) {
+      runToolCalls++;
+      runTools.add(t.name);
+      if (t.name === "skill_manage") runUsedSkills = true;
+    }
     if (buffer.length > MAX_BUFFER) buffer = buffer.slice(-MAX_BUFFER);
   });
 
   pi.on("agent_settled", async () => {
+    // A long, varied run that saved no skill: the next prompt carries a hint (hermes-style nudge).
+    if (SKILL_NUDGE > 0 && runToolCalls >= SKILL_NUDGE && runTools.size >= 2 && !runUsedSkills) {
+      skillHint =
+        `<skill-hint note="From the memory extension, not the user.">Your previous task took ${runToolCalls} tool calls (${[...runTools].slice(0, 8).join(", ")}). ` +
+        "If it was a procedure likely to recur and no skill covers it yet, save it with skill_manage after handling this request; " +
+        "if a skill you followed was wrong or incomplete, update it. Otherwise ignore this note.</skill-hint>";
+    }
+    runToolCalls = 0;
+    runTools.clear();
+    runUsedSkills = false;
     cancelFlush();
     flushTimer = setTimeout(() => void flush(), SETTLE_DELAY_MS);
   });
@@ -562,6 +661,143 @@ export default function memoryAllYouNeed(pi: ExtensionAPI) {
     execute: (_id, p) => memoryCall({ action: "remove", ...p }),
   });
 
+  // skill_manage: same name and structured fields as pi-hermes-memory, but the
+  // skill lives on the memory server; the result is mirrored back to this PC.
+  const list = (items: unknown, ordered: boolean) =>
+    (Array.isArray(items) ? items : [])
+      .filter((x): x is string => typeof x === "string" && x.trim() !== "")
+      .map((x, i) => `${ordered ? `${i + 1}.` : "-"} ${x.trim()}`)
+      .join("\n");
+  /** A SKILL.md body from `body`, or from the structured fields (When to Use / Procedure / Pitfalls / Verification). */
+  function skillBody(p: { body?: string; when_to_use?: string; procedure_steps?: string[]; pitfalls?: string[]; verification_steps?: string[] }): string | undefined {
+    if (p.body?.trim()) return p.body.trim();
+    const steps = list(p.procedure_steps, true);
+    if (!steps) return undefined;
+    return [
+      p.when_to_use?.trim() && `## When to Use\n${p.when_to_use.trim()}`,
+      steps && `## Procedure\n${steps}`,
+      list(p.pitfalls, false) && `## Pitfalls\n${list(p.pitfalls, false)}`,
+      list(p.verification_steps, true) && `## Verification\n${list(p.verification_steps, true)}`,
+    ]
+      .filter(Boolean)
+      .join("\n\n");
+  }
+  type AgentSkill = {
+    scope: "global" | "project";
+    name: string;
+    description: string;
+    body?: string;
+    author: string;
+    updated_at: string;
+    /** candidate = an agent skill waiting for a person's approval (not on any PC yet). */
+    status?: "active" | "candidate";
+    locked?: boolean;
+    /** list: whether an agent edit waits for approval; view: that edit. */
+    pending_edit?: boolean | { description: string; body: string; at: string } | null;
+  };
+  const flags = (k: AgentSkill) =>
+    [k.status === "candidate" && "candidate: waiting for approval", k.locked && "locked", k.pending_edit && "edit waiting for approval"].filter(Boolean).join(", ");
+
+  pi.registerTool({
+    name: "skill_manage",
+    label: "Skill manage",
+    description:
+      "Manage reusable procedures (pi skills) kept on the memory server and synced to every PC: list, view, create, update. Skills capture HOW to do something (deploy, release, debug, migrate), not facts — facts go to memory. Deleting is done by the user on the memory server's web UI.",
+    promptSnippet: "List, read, create and update reusable procedures (skills) on the memory server",
+    promptGuidelines: [
+      "Use skill_manage after finishing a task that took trial and error or many tool calls and is likely to recur, or when the user teaches you a workflow; skip one-off task state.",
+      "create needs scope: 'project' when the procedure depends on this repository's paths, scripts or deploy flow, 'global' when it transfers to other repositories.",
+      "Put the trigger signals a user would actually type (task names, error strings, symptoms) in description: pi picks skills by name and description alone.",
+      "Prefer the structured fields (when_to_use, procedure_steps, pitfalls, verification_steps) over a free-form body.",
+      "To change a skill, view it first, then update with the updated_at you saw (send the full new body or all structured fields).",
+      "A skill can wait for a person's approval (a candidate, or an edit waiting for approval): do not create or send it again. A locked skill can only be changed by people.",
+    ],
+    parameters: Type.Object({
+      action: Type.Union([Type.Literal("list"), Type.Literal("view"), Type.Literal("create"), Type.Literal("update")]),
+      name: Type.Optional(Type.String({ description: "Skill name: lowercase letters, digits, single hyphens, e.g. deploy-release" })),
+      scope: Type.Optional(Type.Union([Type.Literal("global"), Type.Literal("project")], { description: "Required for create. For view/update: which one when both exist (default: this project's)" })),
+      description: Type.Optional(Type.String({ description: "What it does and when to use it, with trigger phrases; one line, max 1024 characters. Required for create" })),
+      when_to_use: Type.Optional(Type.String()),
+      procedure_steps: Type.Optional(Type.Array(Type.String(), { description: "Ordered concrete steps" })),
+      pitfalls: Type.Optional(Type.Array(Type.String())),
+      verification_steps: Type.Optional(Type.Array(Type.String(), { description: "Checks that prove it worked" })),
+      body: Type.Optional(Type.String({ description: "Free-form Markdown body instead of the structured fields" })),
+      updated_at: Type.Optional(Type.String({ description: "Required for update: the updated_at from view" })),
+    }),
+    async execute(_id, p, _signal, _onUpdate, ctx) {
+      const body = p.action === "create" || p.action === "update" ? skillBody(p) : undefined;
+      if (p.action === "create" && !body) return text("create needs procedure_steps (with when_to_use, pitfalls, verification_steps) or a body.");
+      if (p.action === "update" && !body) {
+        const partial = Boolean(p.when_to_use?.trim() || p.pitfalls?.length || p.verification_steps?.length);
+        if (partial) return text("update replaces the whole body: send procedure_steps together with when_to_use, pitfalls and verification_steps (view the skill first), or a full body. Nothing was changed.");
+        if (p.description === undefined) return text("update needs a new body (or procedure_steps) and/or description. Nothing was changed.");
+      }
+      const res = await call<{
+        action: string;
+        skills?: AgentSkill[];
+        skill?: AgentSkill;
+        version?: string;
+        previous_version?: string;
+        changed?: boolean;
+        proposed?: boolean;
+      }>("POST", "/agent/skill", {
+        action: p.action,
+        name: p.name,
+        scope: p.scope,
+        description: p.description,
+        body,
+        updated_at: p.updated_at,
+        project: projectBody(),
+      });
+      if (res.skills) {
+        if (!res.skills.length) return text("No skills yet.");
+        return text(res.skills.map((k) => `${k.scope}:${k.name} — ${k.description} (by ${k.author}, updated_at ${k.updated_at}${flags(k) ? `; ${flags(k)}` : ""})`).join("\n"));
+      }
+      const k = res.skill!;
+      if (res.action === "view") {
+        const pending = typeof k.pending_edit === "object" && k.pending_edit ? `\n\n--- edit waiting for approval ---\n${k.pending_edit.description}\n\n${k.pending_edit.body}` : "";
+        return text(`${k.scope}:${k.name} (by ${k.author}, updated_at ${k.updated_at}${flags(k) ? `; ${flags(k)}` : ""})\n${k.description}\n\n${k.body ?? ""}${pending}`);
+      }
+      if (res.changed === false) return text(`no change: ${k.scope}:${k.name} already matches what you sent (updated_at ${k.updated_at}).`);
+      // Waiting for a person (settings "skillApproval" on the server): nothing reaches a PC yet, so nothing to mirror.
+      const waiting = k.status === "candidate" ? "candidate" : res.proposed ? "proposed" : null;
+      if (waiting) {
+        if (ctx?.hasUI) ctx.ui.notify(`skill ${waiting === "candidate" ? "waiting for approval" : "edit waiting for approval"}: ${k.scope}:${k.name} — approve it in the memory server's web UI (${SERVER})`, "info");
+        return text(
+          waiting === "candidate"
+            ? `${res.action === "create" ? "created" : "updated"} ${k.scope}:${k.name} as a candidate: it waits for a person to approve it on the memory server's web UI, and no PC gets it until then. Do not create it again.`
+            : `proposed an edit to ${k.scope}:${k.name}: it waits for a person to approve it on the memory server's web UI; the current version stays in use until then.`,
+        );
+      }
+      // Mirror the change back (server → PC). A body change is live at once (pi reads SKILL.md
+      // when it uses a skill); a new name is listed after /skills-sync or in the next session.
+      let mirrored = true;
+      try {
+        await syncSkills(project?.key ?? null, 10_000);
+        // Only this write happened since the session loaded its skills: not an outside change. A body
+        // edit is live at once (pi reads SKILL.md on use); a new skill or description needs /skills-sync,
+        // which the status line keeps showing, without a second notice.
+        // (A write right after its own earlier write starts from the version already reported.)
+        if (res.version !== undefined) {
+          if (res.previous_version === (loadedSkillsVersion ?? "") && res.action === "update" && p.description === undefined) loadedSkillsVersion = res.version;
+          else if (res.previous_version === (loadedSkillsVersion ?? "") || res.previous_version === notifiedSkillsVersion) notifiedSkillsVersion = res.version;
+        }
+      } catch (err) {
+        mirrored = false;
+        console.error(`[memory] skill saved but not mirrored: ${(err as Error).message}`);
+      }
+      const created = res.action === "create";
+      if (ctx?.hasUI) {
+        const reload = created ? " — run /skills-sync to load it in this session" : p.description !== undefined ? " — run /skills-sync to refresh its description" : "";
+        ctx.ui.notify(`skill ${created ? "saved" : "updated"}: ${k.scope}:${k.name}${reload}`, "info");
+      }
+      return text(
+        `${created ? "created" : "updated"} ${k.scope}:${k.name} (updated_at ${k.updated_at}) on the memory server.` +
+          (created ? " pi lists it after /skills-sync or in the next session." : mirrored ? " The synced file is current." : " The local copy refreshes on the next sync."),
+      );
+    },
+  });
+
   // -------------------------------------------------------------- commands
 
   pi.registerCommand("memory", {
@@ -601,7 +837,7 @@ export default function memoryAllYouNeed(pi: ExtensionAPI) {
     }
     if (key === "project") {
       project = resolveProject(cwd, PROJECT_OVERRIDE);
-      setStatus(ctx, project ? `🧠 ${project.name}` : "🧠 global");
+      setStatus(ctx, okStatus());
     }
     if (key === "disabled") {
       ctx.ui.notify(`${what} — run /reload to apply`, "info");
@@ -720,6 +956,39 @@ export default function memoryAllYouNeed(pi: ExtensionAPI) {
         ctx.ui.notify(`Wiki compose job #${job.id} queued (${job.payload.turns.length} turns). Progress: ${SERVER}/#/wiki-jobs`, "info");
       } catch (err) {
         ctx.ui.notify(`wiki-compose failed: ${(err as Error).message}`, "error");
+      }
+    },
+  });
+
+  pi.registerCommand("skills-sync", {
+    description: "Download the memory server's skills (global + this project) to this PC and reload them. One way: local edits are overwritten",
+    handler: async (_args, ctx) => {
+      // pi refuses to reload mid-response (it only warns), and the loaded skills would then stay stale.
+      if (typeof ctx.isIdle === "function" && !ctx.isIdle()) {
+        ctx.ui.notify("skills-sync: wait for the current response to finish, then run it again", "warning");
+        return;
+      }
+      const key = project?.key ?? null;
+      let r: SyncResult;
+      try {
+        r = await syncSkills(key, 10_000);
+      } catch (err) {
+        ctx.ui.notify(`skills-sync failed (${SERVER}): ${(err as Error).message} — the last synced skills stay in use`, "error");
+        return;
+      }
+      const removed = r.removed.length ? ` · removed ${r.removed.join(", ")}` : "";
+      ctx.ui.notify(
+        `skills synced from ${SERVER}: ${r.global} global · ${key ? `${r.project} for ${key}` : "no project"}${removed}${r.changed ? "" : " (no change)"}
+${skillRoot()}`,
+        "info",
+      );
+      // Reload even when the disk already matched: this session may have loaded an older set
+      // (another pi process synced the folder, or the project changed with /memory-config).
+      (globalThis as { __memoryWikiSkillsSyncedAt?: number }).__memoryWikiSkillsSyncedAt = Date.now();
+      try {
+        await ctx.reload(); // pi re-reads skills (resources_discover runs again, without a second fetch)
+      } catch (err) {
+        ctx.ui.notify(`skills are on disk; run /reload to load them (${(err as Error).message})`, "warning");
       }
     },
   });

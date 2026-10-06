@@ -28,6 +28,14 @@ export interface MergeCounts {
   wiki_jobs: number;
   review_jobs: number;
   review_proposals_pending: number;
+  skills: number;
+}
+
+/** Same skill name in both projects: the source skill is renamed to new_name. */
+export interface SkillMergeConflict {
+  name: string;
+  source_skill_id: number;
+  new_name: string;
 }
 
 /** Same slug in both wikis: the source page is renamed to new_slug. */
@@ -45,6 +53,7 @@ export interface MergePreview {
   target: ProjectRef;
   counts: MergeCounts;
   wiki_conflicts: MergeConflict[];
+  skill_conflicts: SkillMergeConflict[];
   /** Which curation policy the target keeps ("both": target's, with the source's appended). */
   policy: "target" | "source" | "both" | "none";
   description: "target" | "source" | "none";
@@ -56,6 +65,7 @@ export interface MergeResult {
   target: Project;
   moved: MergeCounts;
   wiki_conflicts: MergeConflict[];
+  skill_conflicts: SkillMergeConflict[];
   aliases: string[];
 }
 
@@ -168,6 +178,44 @@ export interface DebugInfo {
   files: { date: string; bytes: number }[];
 }
 
+/** An agent skill (ADR-0039): mirrored one way to each PC by the pi extension. project_id null = global. */
+export interface Skill {
+  id: number;
+  project_id: number | null;
+  name: string;
+  description: string;
+  body: string;
+  /** Who wrote the current version: human | agent. */
+  author: string;
+  /** candidate = an agent skill waiting for approval; PCs do not get it (ADR-0040). */
+  status: "active" | "candidate";
+  /** Only people may change it. */
+  locked: boolean;
+  /** In the trash. */
+  deleted_at: string | null;
+  /** An agent edit waiting for approval; the approved content stays in use meanwhile. */
+  draft: { description: string; body: string; at: string } | null;
+  created_at: string;
+  updated_at: string;
+}
+
+/** A skill's content after one write (ADR-0040). */
+export interface SkillRevision {
+  id: number;
+  skill_id: number;
+  /** create | update | delete | restore | revert | lock | unlock | propose | approve | reject */
+  action: string;
+  name: string;
+  description: string;
+  body: string;
+  author: string;
+  reason: string | null;
+  created_at: string;
+}
+
+/** Which agent skill writes wait for a person (ADR-0040). */
+export type SkillApproval = "off" | "global" | "all";
+
 /** Feature switches (ADR-0038): env-fixed ones cannot be changed from the web. */
 export interface SwitchState {
   enabled: boolean;
@@ -176,6 +224,8 @@ export interface SwitchState {
 export interface Settings {
   /** The server LLM organizing turn records into wiki pages. */
   wikiCompose: SwitchState;
+  /** Agent skill writes that wait for approval; set on the web only (default "global"). */
+  skillApproval: { value: SkillApproval; source: "file" | "default" };
 }
 
 export interface Stats {
@@ -183,6 +233,12 @@ export interface Stats {
   debug: boolean;
   /** Turn-record compose is on (off: compose entry points hidden, queued jobs wait). */
   wikiCompose: boolean;
+  /** Skills on the server (all scopes). */
+  skills: number;
+  /** Global skills only. */
+  globalSkills: number;
+  /** Agent skills and edits waiting for approval (all scopes). */
+  skillsPending: number;
   reviewProposals: number;
   reviewRunning: number;
   entities: number;
@@ -497,7 +553,22 @@ export const api = {
   debug: () => request<DebugInfo>("GET", "/debug"),
   setDebug: (enabled: boolean) => request<DebugInfo>("PUT", "/debug", { enabled }),
   settings: () => request<Settings>("GET", "/settings"),
-  setSettings: (patch: { wikiCompose: boolean }) => request<Settings>("PUT", "/settings", patch),
+  skills: (project_id: number | null, opts: { deleted?: boolean } = {}) =>
+    request<Skill[]>("GET", `/skills${qs({ project_id: project_id ?? 0, deleted: opts.deleted ? 1 : undefined })}`),
+  /** Live skills of every scope. */
+  allSkills: () => request<Skill[]>("GET", "/skills"),
+  skill: (id: number) => request<Skill>("GET", `/skills/${id}`),
+  createSkill: (s: { project_id: number | null; name: string; description: string; body: string }) => request<Skill>("POST", "/skills", s),
+  updateSkill: (id: number, patch: { name?: string; description?: string; body?: string; locked?: boolean }) => request<Skill>("PATCH", `/skills/${id}`, patch),
+  deleteSkill: (id: number) => request<Skill>("DELETE", `/skills/${id}`),
+  skillRevisions: (id: number) => request<SkillRevision[]>("GET", `/skills/${id}/revisions`),
+  revertSkill: (id: number, revision_id: number) => request<Skill>("POST", `/skills/${id}/revert`, { revision_id }),
+  restoreSkill: (id: number) => request<Skill>("POST", `/skills/${id}/restore`),
+  purgeSkill: (id: number) => request<Skill>("DELETE", `/skills/${id}/purge`),
+  /** `seen`: the versions on screen; anything newer is 409 (never approved unseen). */
+  approveSkill: (id: number, seen: { updated_at: string; draft_at?: string }) => request<Skill>("POST", `/skills/${id}/approve`, seen),
+  rejectSkill: (id: number, seen: { updated_at: string; draft_at?: string }) => request<Skill>("POST", `/skills/${id}/reject`, seen),
+  setSettings: (patch: { wikiCompose?: boolean; skillApproval?: SkillApproval }) => request<Settings>("PUT", "/settings", patch),
   projects: () => request<Project[]>("GET", "/projects"),
   project: (id: number) => request<Project>("GET", `/projects/${id}`),
   updateProject: (id: number, patch: Partial<Pick<Project, "name" | "description">>) => request<Project>("PATCH", `/projects/${id}`, patch),

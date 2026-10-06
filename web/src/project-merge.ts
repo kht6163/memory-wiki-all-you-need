@@ -10,6 +10,7 @@ export const MERGE_COUNT_LABEL: [keyof MergeCounts, string][] = [
   ["wiki_jobs", "위키 정리 작업"],
   ["review_jobs", "점검 작업"],
   ["review_proposals_pending", "대기 중인 점검 제안"],
+  ["skills", "스킬"],
 ];
 
 export interface MergeSummary {
@@ -17,6 +18,8 @@ export interface MergeSummary {
   moves: string[];
   /** Source wiki pages renamed because the target has the same slug. */
   renames: { from: string; to: string }[];
+  /** Source skills renamed because the target has a skill with the same name. */
+  skillRenames: { from: string; to: string }[];
   policy: string;
   description: string;
   /** Keys that point to the target afterwards. */
@@ -49,6 +52,7 @@ export function mergeSummary(p: MergePreview): MergeSummary {
   return {
     moves: mergeCountLines(p.counts),
     renames: p.wiki_conflicts.map((c) => ({ from: c.slug, to: c.new_slug })),
+    skillRenames: (p.skill_conflicts ?? []).map((c) => ({ from: c.name, to: c.new_name })),
     policy,
     description,
     aliases: [...p.aliases],

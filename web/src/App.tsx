@@ -20,6 +20,7 @@ import {
 } from "./pages/OtherPages.tsx";
 import { DebugPage } from "./pages/DebugPage.tsx";
 import { SettingsPage } from "./pages/SettingsPage.tsx";
+import { SkillEdit, SkillsList } from "./pages/SkillsPage.tsx";
 import { EntitiesPage, EntityPage } from "./pages/GraphPages.tsx";
 
 const GraphPage = lazy(() => import("./pages/GraphView.tsx").then((m) => ({ default: m.GraphPage })));
@@ -67,7 +68,7 @@ export function App() {
   }, []);
 
   // Project of the current route (project memory / wiki pages, or ?project=).
-  const routeProject = p0 === "p" || p0 === "w" ? num(p1) || undefined : num(route.query.get("project")) || undefined;
+  const routeProject = p0 === "p" || p0 === "w" || p0 === "skills" ? num(p1) || undefined : num(route.query.get("project")) || undefined;
   const newMemoryHref = routeProject
     ? `/new?scope=project&project=${routeProject}`
     : p0 === "user"
@@ -161,6 +162,12 @@ export function App() {
   else if (p0 === "preview") page = <PreviewPage projectId={num(route.query.get("project"))} />;
   else if (p0 === "debug") page = <DebugPage />;
   else if (p0 === "settings") page = <SettingsPage onChange={stats.reload} />;
+  else if (p0 === "skills" && num(p1) !== undefined && (!p2 || p2 === "~new" || num(p2))) {
+    const scope = num(p1)!;
+    if (!p2) page = <SkillsList key={`skills-${scope}`} scope={scope} />;
+    else if (p2 === "~new") page = <SkillEdit key={`skill-new-${scope}`} scope={scope} />;
+    else if (num(p2)) page = <SkillEdit key={`skill-${p2}`} scope={scope} id={num(p2)} />;
+  }
   else
     page = (
       <div className="page">
@@ -221,8 +228,16 @@ export function App() {
 
           <div className="nav-label">위키</div>
           <NavItem href="#/w/0" icon="book-open" label="전역 위키" active={p0 === "w" && p1 === "0"} />
+          <NavItem href="#/skills/0" icon="lightbulb" label="전역 스킬" active={p0 === "skills" && p1 === "0"}>
+            {s && s.skillsPending > 0 && (
+              <span className="pill" title="에이전트가 만들거나 고친 스킬이 승인을 기다립니다(모든 범위)">
+                승인 {s.skillsPending}
+              </span>
+            )}
+            {s && s.globalSkills > 0 && <span className="count">{s.globalSkills}</span>}
+          </NavItem>
 
-          <ProjectsNav projects={projects.data} activeId={(p0 === "p" || p0 === "w") && num(p1) ? num(p1) : undefined} projectsActive={p0 === "projects"} />
+          <ProjectsNav projects={projects.data} activeId={(p0 === "p" || p0 === "w" || p0 === "skills") && num(p1) ? num(p1) : undefined} projectsActive={p0 === "projects"} />
 
           <div className="nav-label">관리</div>
           <NavItem href="#/review" icon="check-check" label="메모리 점검" active={p0 === "review"}>

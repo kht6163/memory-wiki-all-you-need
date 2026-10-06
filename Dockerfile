@@ -29,7 +29,7 @@ COPY --from=deps /app/node_modules /app/node_modules
 COPY server/package.json ./
 COPY server/src ./src
 COPY --from=web /app/web/dist /app/web/dist
-COPY pi-extension/index.ts pi-extension/project.ts /app/pi-extension/
+COPY pi-extension/index.ts pi-extension/project.ts pi-extension/skills.ts /app/pi-extension/
 USER node
 EXPOSE 8765
 HEALTHCHECK --interval=30s --timeout=3s CMD node -e "fetch('http://127.0.0.1:8765/api/health').then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))"

@@ -39,7 +39,7 @@ test("G-060: preview counts and wiki conflicts, then merge moves everything and 
   const pv = await ok<Any>("GET", `/projects/${src.id}/merge-preview?into=${dst.id}`);
   assert.deepEqual(pv.source, { id: src.id, key: src.key, name: "old-name" });
   assert.deepEqual(pv.target, { id: dst.id, key: dst.key, name: "new-name" });
-  assert.deepEqual(pv.counts, { entries: 2, turns: 1, wiki_pages: 2, wiki_jobs: 0, review_jobs: 0, review_proposals_pending: 0 });
+  assert.deepEqual(pv.counts, { entries: 2, turns: 1, wiki_pages: 2, wiki_jobs: 0, review_jobs: 0, review_proposals_pending: 0, skills: 0 });
   assert.deepEqual(pv.wiki_conflicts, [{ slug: "overview", source_page_id: sOverview.id, target_page_id: tOverview.id, new_slug: "overview-old-name-2" }]);
   assert.equal(pv.policy, "none");
   assert.equal(pv.description, "none");

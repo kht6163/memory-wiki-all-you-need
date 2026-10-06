@@ -75,6 +75,7 @@ flowchart LR
 - **Page tree** — put pages under other pages; collapsible tree, breadcrumbs and a page-tree rail. A flat wiki gets grouping suggestions (e.g. ADRs under their index page) that change nothing until you apply them.
 - **Compose from turns** — the LLM turns conversations and tool output into pages, chunked by `WIKI_COMPOSE_CHUNK_CHARS`; never automatic. Can be switched off on the web Settings page (`#/settings`) or with `WIKI_COMPOSE=0`; agents and people can still write pages directly.
 - **Wiki lint** — orphan pages, missing links, citations of deleted memories, empty pages (no LLM).
+- **Skills** — reusable procedures (deploy, release, review steps) written in the web UI, global or per project. Each PC downloads them one way — on every pi start and with `/skills-sync` — into `~/.pi/agent/extensions/memory-wiki-all-you-need/skills/` (global and per-project folders apart). pi lists each skill by name and description and reads it when a task matches; a project skill replaces a global one with the same name. Local edits are overwritten on the next sync, and no file on the PC is uploaded. The agent can also save procedures itself with `skill_manage` (same name as pi-hermes-memory): after a task that took trial and error or many tool calls it creates or improves a skill on the server, and the result is synced back. It cannot delete skills, and it must have read the current version before changing one. When the server's skills change, pi tells you on the next prompt to run `/skills-sync`. Every skill write is kept in a history you can revert to, deleted skills go to a trash, and a locked skill can only be changed by people. By default an agent's global skill (or its edit of an approved global skill) waits for your approval in the web UI before any PC gets it; Settings → "에이전트 스킬 승인" switches this to off / global only / all.
 
 **Web UI**
 - Light / dark themes, `⌘K` / `Ctrl K` command palette (with Korean initial-consonant search), keyboard shortcuts (`?`), undo toasts, mobile drawer. Fonts are bundled — no external CDN.
@@ -114,7 +115,7 @@ Docker Compose example (put `LLM_API_KEY` in `.env`):
 ```yaml
 services:
   memory:
-    image: kht6163/memory-wiki-all-you-need:0.15   # amd64 / arm64
+    image: kht6163/memory-wiki-all-you-need:0.17   # amd64 / arm64
     restart: unless-stopped
     environment:
       LLM_BASE_URL: http://<llm-host>:8317/v1
@@ -136,7 +137,7 @@ mkdir -p data && sudo chown 1000:1000 data
 docker run -d --name memory-wiki --restart unless-stopped \
   -p 127.0.0.1:8765:8765 -v "$PWD/data:/data" \
   -e LLM_BASE_URL=http://<llm-host>:8317/v1 -e LLM_API_KEY=<key> -e TIMEZONE=Asia/Seoul \
-  kht6163/memory-wiki-all-you-need:0.15
+  kht6163/memory-wiki-all-you-need:0.17
 ```
 
 **Optional: semantic search.** Add an embedding service to the same compose file. bge-m3 is multilingual and runs on CPU (about 55 ms per short query; the model, about 2.3 GB, is downloaded on first start):
@@ -239,6 +240,7 @@ Both save the URL to `~/.pi/agent/extensions/memory-wiki-all-you-need.json` (or 
 | `settleDelayMs` | `MEMORY_SETTLE_DELAY_MS` | 8000 | Wait after the agent settles before sending the turn |
 | `timeoutMs` | `MEMORY_TIMEOUT_MS` | 1500 | Timeout for fetching the injected memory |
 | `project` | `MEMORY_PROJECT` | (auto) | Override the project key |
+| `skillNudge` | `MEMORY_SKILL_NUDGE` | 8 | After a run with this many tool calls (2+ different tools) and no `skill_manage` call, hint the agent to save the procedure as a skill; `0` = off |
 | `disabled` | `MEMORY_DISABLED=1` | `false` | Disable the extension (`/memory-config disabled false` turns it back on) |
 
 </details>
@@ -255,7 +257,7 @@ Both save the URL to `~/.pi/agent/extensions/memory-wiki-all-you-need.json` (or 
 
 ## Agent tools & commands
 
-**Tools:** `memory_search`, `session_search`, `memory_add`, `memory_replace`, `memory_remove` (same names and targets as pi-hermes-memory), `memory_graph`, `wiki_search`, `wiki_read`, `wiki_write`.
+**Tools:** `memory_search`, `session_search`, `memory_add`, `memory_replace`, `memory_remove` (same names and targets as pi-hermes-memory, so the two extensions cannot be installed together), `memory_graph`, `wiki_search`, `wiki_read`, `wiki_write`, `skill_manage` (list, view, create, update skills on the server).
 
 | Command | What it does |
 |---|---|
@@ -265,6 +267,7 @@ Both save the URL to `~/.pi/agent/extensions/memory-wiki-all-you-need.json` (or 
 | `/memory-pin <text> [--project]` | Add a standing instruction injected into every session |
 | `/memory-flush` | Send the buffered turn now instead of waiting |
 | `/wiki-compose [focus]` | Organize this session's turns into the wiki with the server LLM |
+| `/skills-sync` | Download the server's skills (global + this project) now and reload them; local edits are overwritten |
 
 ## Development
 

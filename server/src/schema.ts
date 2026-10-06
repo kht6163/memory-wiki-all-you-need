@@ -659,6 +659,66 @@ CREATE INDEX wiki_pages_parent ON wiki_pages(parent_id);
 `);
     },
   },
+  {
+    version: 16,
+    name: "skills",
+    up(db) {
+      // Agent skills kept on the server and mirrored one way to each PC
+      // (skills.ts, ADR-0039). project_id NULL = global. One name per scope;
+      // a project skill may share a global one's name (it wins on that project).
+      db.exec(`
+CREATE TABLE skills (
+  id INTEGER PRIMARY KEY,
+  project_id INTEGER REFERENCES projects(id) ON DELETE CASCADE,
+  name TEXT NOT NULL,
+  description TEXT NOT NULL,
+  body TEXT NOT NULL,
+  author TEXT NOT NULL DEFAULT 'human',
+  created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now')),
+  updated_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now'))
+);
+CREATE UNIQUE INDEX skills_scope_name ON skills(COALESCE(project_id, 0), name);
+`);
+    },
+  },
+  {
+    version: 17,
+    name: "skill_history_and_approval",
+    up(db) {
+      // Skill history, lock, trash and agent approval (ADR-0040):
+      //  - skill_revisions: every write by a person, the agent or a review, as the
+      //    content after it; history goes with the skill (purge removes it).
+      //  - deleted_at: the trash. The name is free again while a skill is there
+      //    (the unique index only covers live skills); restoring needs it free.
+      //  - locked: only people can change it (agent writes 423).
+      //  - status 'candidate': an agent skill waiting for approval, never synced.
+      //  - draft_*: an agent edit of an approved skill waiting for approval.
+      db.exec(`
+ALTER TABLE skills ADD COLUMN status TEXT NOT NULL DEFAULT 'active';
+ALTER TABLE skills ADD COLUMN locked INTEGER NOT NULL DEFAULT 0;
+ALTER TABLE skills ADD COLUMN deleted_at TEXT;
+ALTER TABLE skills ADD COLUMN draft_description TEXT;
+ALTER TABLE skills ADD COLUMN draft_body TEXT;
+ALTER TABLE skills ADD COLUMN draft_at TEXT;
+DROP INDEX skills_scope_name;
+CREATE UNIQUE INDEX skills_scope_name ON skills(COALESCE(project_id, 0), name) WHERE deleted_at IS NULL;
+CREATE TABLE skill_revisions (
+  id INTEGER PRIMARY KEY,
+  skill_id INTEGER NOT NULL REFERENCES skills(id) ON DELETE CASCADE,
+  action TEXT NOT NULL,
+  name TEXT NOT NULL,
+  description TEXT NOT NULL,
+  body TEXT NOT NULL,
+  author TEXT NOT NULL,
+  reason TEXT,
+  created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now'))
+);
+CREATE INDEX skill_revisions_skill ON skill_revisions(skill_id, id);
+INSERT INTO skill_revisions (skill_id, action, name, description, body, author, created_at)
+  SELECT id, 'create', name, description, body, author, updated_at FROM skills;
+`);
+    },
+  },
 ];
 
 /**

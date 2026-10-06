@@ -1,0 +1,85 @@
+/* Skills (SkillsPage.tsx). */
+.skills-sync-note {
+  display: flex;
+  align-items: flex-start;
+  gap: var(--space-1_5);
+  margin: 0 0 var(--space-4);
+}
+.skills-sync-note > .icon {
+  flex: none;
+  margin-top: 2px;
+}
+.skill-row {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-1);
+  color: inherit;
+  text-decoration: none;
+}
+.skill-row-head {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+  min-width: 0;
+}
+.skill-name {
+  font-weight: 600;
+  overflow-wrap: anywhere;
+}
+.skill-row-head > .faint {
+  margin-left: auto;
+  white-space: nowrap;
+}
+.skill-desc {
+  overflow-wrap: anywhere;
+}
+textarea.skill-body {
+  min-height: 360px;
+  resize: vertical;
+  line-height: 1.5;
+}
+.skill-row-head > .pill {
+  margin-left: 0;
+}
+/* Waiting for approval (ADR-0040): agent candidates and edits. */
+.pill.warn {
+  background: var(--color-warn-soft);
+  color: var(--color-warn-text);
+}
+.skill-approval {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-2);
+  margin: 0 0 var(--space-4);
+  border-color: var(--color-warn-text);
+}
+.skill-approval-head {
+  display: flex;
+  align-items: center;
+  gap: var(--space-1_5);
+  color: var(--color-warn-text);
+}
+.skill-approval-head > strong {
+  color: var(--color-text);
+}
+.skill-approval-diff {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-1);
+  max-height: 480px;
+  overflow: auto;
+}
+.skill-approval-actions,
+.skill-trash-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--space-2);
+}
+.skills-trash {
+  margin-top: var(--space-6);
+}
+.skills-trash > summary {
+  cursor: pointer;
+  font-weight: 600;
+  color: var(--color-text-2);
+}

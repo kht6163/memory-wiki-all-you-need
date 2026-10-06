@@ -41,6 +41,7 @@ jobs:
             ls /app/web/dist/assets | grep -q "\.woff2$"
             test -f /app/pi-extension/index.ts
             test -f /app/pi-extension/project.ts
+            test -f /app/pi-extension/skills.ts
           '
       - name: Start container
         run: |
@@ -88,6 +89,7 @@ jobs:
           curl -fsS "http://127.0.0.1:$HOST_PORT/install.sh" | sh
           test -s "$PI_CODING_AGENT_DIR/extensions/memory-wiki-all-you-need/index.ts"
           test -s "$PI_CODING_AGENT_DIR/extensions/memory-wiki-all-you-need/project.ts"
+          test -s "$PI_CODING_AGENT_DIR/extensions/memory-wiki-all-you-need/skills.ts"
           node -e 'const c = require(process.argv[1]); if (c.serverUrl !== process.argv[2] || c.timeoutMs !== 2500) { console.error(c); process.exit(1); }' "$conf" "http://127.0.0.1:$HOST_PORT"
       - name: Web smoke test (headless Chrome)
         run: |

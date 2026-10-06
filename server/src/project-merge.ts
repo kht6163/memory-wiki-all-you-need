@@ -1,5 +1,6 @@
 import { db, now, transaction, type Project } from "./db.ts";
 import { HttpError, getPolicy, getProject, projectAliases } from "./store.ts";
+import { SKILL_NAME_MAX } from "./skills.ts";
 import { slugify } from "./wiki.ts";
 
 // Project merge: a project's key comes from the git origin (G-007), so
@@ -15,6 +16,14 @@ export interface MergeCounts {
   wiki_jobs: number;
   review_jobs: number;
   review_proposals_pending: number;
+  skills: number;
+}
+
+export interface SkillConflict {
+  name: string;
+  source_skill_id: number;
+  /** The source skill is renamed to this (pi needs one name per skill in a project). */
+  new_name: string;
 }
 
 export interface WikiConflict {
@@ -30,6 +39,7 @@ export interface MergePlan {
   target: Pick<Project, "id" | "key" | "name">;
   counts: MergeCounts;
   wiki_conflicts: WikiConflict[];
+  skill_conflicts: SkillConflict[];
   policy: "target" | "source" | "both" | "none";
   description: "target" | "source" | "none";
   aliases: string[];
@@ -92,7 +102,34 @@ function counts(s: number): MergeCounts {
       `SELECT COUNT(*) FROM review_proposals WHERE status = 'pending' AND job_id IN (SELECT id FROM review_jobs WHERE project_id = ?)`,
       s,
     ),
+    skills: one(`SELECT COUNT(*) FROM skills WHERE project_id = ?`, s),
   };
+}
+
+/** Source skills whose name the target already uses: renamed name-2, name-3, … (kept within pi's 64 characters). */
+function skillConflicts(source: Project, target: Project): SkillConflict[] {
+  const rows = db
+    .prepare(
+      // Live skills only: the unique name index leaves the trash out (a trashed one is restored only while its name is free).
+      `SELECT ss.id, ss.name FROM skills ss JOIN skills ts ON ts.project_id = ? AND ts.name = ss.name AND ts.deleted_at IS NULL
+       WHERE ss.project_id = ? AND ss.deleted_at IS NULL ORDER BY ss.name`,
+    )
+    .all(target.id, source.id);
+  if (!rows.length) return [];
+  const taken = new Set(
+    db
+      // Global names too: a project skill with a global skill's name would hide that global skill.
+      .prepare(`SELECT name FROM skills WHERE (project_id IN (?, ?) OR project_id IS NULL) AND deleted_at IS NULL`)
+      .all(source.id, target.id)
+      .map((r) => String(r.name)),
+  );
+  return rows.map((r) => {
+    const name = String(r.name);
+    let next = name;
+    for (let n = 2; taken.has(next); n++) next = `${name.slice(0, SKILL_NAME_MAX - String(n).length - 1).replace(/-+$/, "")}-${n}`;
+    taken.add(next);
+    return { name, source_skill_id: Number(r.id), new_name: next };
+  });
 }
 
 /** Pages (live or in the trash — the slug index holds both) whose slug the target already uses. */
@@ -134,6 +171,7 @@ function plan(sourceId: number, into: unknown): MergePlan & { _s: Project; _t: P
     target: { id: target.id, key: target.key, name: target.name },
     counts: counts(source.id),
     wiki_conflicts: wikiConflicts(source, target),
+    skill_conflicts: skillConflicts(source, target),
     policy: tp && sp ? "both" : tp ? "target" : sp ? "source" : "none",
     description: target.description.trim() ? "target" : source.description.trim() ? "source" : "none",
     aliases: [source.key, ...projectAliases(source.id)],
@@ -208,8 +246,17 @@ export function mergeProject(sourceId: number, into: unknown) {
       ).run(s);
     }
 
+    // Skill name conflicts: rename the source skill before it moves (one name per project).
+    for (const c of p.skill_conflicts) {
+      db.prepare(`UPDATE skills SET name = ?, updated_at = ? WHERE id = ?`).run(c.new_name, at, c.source_skill_id);
+      db.prepare(
+        `INSERT INTO skill_revisions (skill_id, action, name, description, body, author, reason)
+           SELECT id, 'update', name, description, body, 'human', ? FROM skills WHERE id = ?`,
+      ).run(`renamed from "${c.name}" by a project merge`, c.source_skill_id);
+    }
+
     // 2. Everything that names the project.
-    for (const table of ["entries", "turns", "wiki_pages", "wiki_jobs", "review_jobs"]) {
+    for (const table of ["entries", "turns", "wiki_pages", "wiki_jobs", "review_jobs", "skills"]) {
       db.prepare(`UPDATE ${table} SET project_id = ? WHERE project_id = ?`).run(t, s);
     }
     db.prepare(`UPDATE OR IGNORE wiki_composed SET scope = ? WHERE scope = ?`).run(t, s);
@@ -254,7 +301,8 @@ export function mergeProject(sourceId: number, into: unknown) {
 
     console.log(
       `[project] merged #${s} ${source.key} into #${t} ${target.key}: ${before.entries} memories, ${before.turns} turns, ` +
-        `${before.wiki_pages} wiki pages (${p.wiki_conflicts.length} renamed), ${before.wiki_jobs} wiki jobs, ${before.review_jobs} review jobs; ` +
+        `${before.wiki_pages} wiki pages (${p.wiki_conflicts.length} renamed), ${before.wiki_jobs} wiki jobs, ${before.review_jobs} review jobs, ` +
+        `${before.skills} skills (${p.skill_conflicts.length} renamed); ` +
         `policy ${p.policy}, description ${p.description}`,
     );
     const merged = getProject(t)!;
@@ -262,6 +310,7 @@ export function mergeProject(sourceId: number, into: unknown) {
       target: { ...merged, aliases: projectAliases(t) },
       moved: before,
       wiki_conflicts: p.wiki_conflicts,
+      skill_conflicts: p.skill_conflicts,
       aliases: p.aliases,
     };
   });

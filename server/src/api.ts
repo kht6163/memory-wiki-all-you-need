@@ -1,6 +1,24 @@
 import { Hono, type Context } from "hono";
 import { buildContext } from "./context.ts";
-import { SettingForcedError, setWikiCompose, wikiComposeEnabled, wikiComposeState } from "./settings.ts";
+import {
+  agentSkill,
+  approveSkill,
+  createSkill,
+  deleteSkill,
+  getSkill,
+  listSkillRevisions,
+  listSkills,
+  purgeSkill,
+  rejectSkill,
+  restoreSkill,
+  revertSkill,
+  skillScope,
+  skillStats,
+  skillsForSync,
+  skillsVersion,
+  updateSkill,
+} from "./skills.ts";
+import { SKILL_APPROVALS, SettingForcedError, setSkillApproval, setWikiCompose, skillApprovalState, wikiComposeEnabled, wikiComposeState, type SkillApproval } from "./settings.ts";
 import { DebugForcedError, debugEnabled, debugLog, debugLogStream, debugState, listDebugLogs, msSince, setDebug } from "./debug-log.ts";
 import { embedStats, queryVector, type QueryInfo } from "./embeddings.ts";
 import { CATEGORIES, type Entry, type Scope } from "./db.ts";
@@ -150,7 +168,7 @@ function projectFromRef(ref: ProjectRef | null | undefined) {
 const roundScore = (n: number, fused: boolean) => (fused ? Math.round(n * 10000) / 10000 : Math.round(n * 100) / 100);
 
 api.get("/health", (c) =>
-  c.json({ ok: true, llm: llmEnabled() ? config.llm.model : null, debug: debugEnabled(), wikiCompose: wikiComposeEnabled(), ...stats(), ...wikiStats(), ...graphStats(), ...reviewStats(), ...embedStats() }),
+  c.json({ ok: true, llm: llmEnabled() ? config.llm.model : null, debug: debugEnabled(), wikiCompose: wikiComposeEnabled(), ...stats(), ...wikiStats(), ...skillStats(), ...graphStats(), ...reviewStats(), ...embedStats() }),
 );
 
 /** One "context" debug line: the prompt, what was injected and why recall picked what it did. */
@@ -166,16 +184,49 @@ function logContext(type: string, project: { id: number; key: string } | null, p
   });
 }
 
+// ------------------------------------------------------------------ skills
+
+/** What a PC mirrors (pi /skills-sync): global skills + this project's. Read only (G-068). */
+api.get("/skills/sync", (c) => c.json(skillsForSync(c.req.query("project") || undefined)));
+api.get("/skills", (c) => {
+  const pid = c.req.query("project_id");
+  return c.json(listSkills(pid === undefined ? undefined : skillScope(pid), { deleted: c.req.query("deleted") === "1" }));
+});
+/** A JSON object body (null, arrays and numbers are 400 like broken JSON). */
+async function objectBody(c: Context): Promise<Record<string, unknown>> {
+  const b = await body<unknown>(c);
+  if (!b || typeof b !== "object" || Array.isArray(b)) throw new HttpError(400, "invalid JSON body");
+  return b as Record<string, unknown>;
+}
+api.post("/skills", async (c) => c.json(createSkill(await objectBody(c)), 201));
+api.get("/skills/:id", (c) => {
+  const s = getSkill(idParam(c));
+  if (!s) throw new HttpError(404, "skill not found");
+  return c.json(s);
+});
+api.patch("/skills/:id", async (c) => c.json(updateSkill(idParam(c), await objectBody(c))));
+api.delete("/skills/:id", (c) => c.json(deleteSkill(idParam(c))));
+// History, trash and approval (ADR-0040); people only (the agent has skill_manage).
+api.get("/skills/:id/revisions", (c) => c.json(listSkillRevisions(idParam(c))));
+api.post("/skills/:id/revert", async (c) => c.json(revertSkill(idParam(c), (await objectBody(c)).revision_id)));
+api.post("/skills/:id/restore", (c) => c.json(restoreSkill(idParam(c))));
+api.delete("/skills/:id/purge", (c) => c.json(purgeSkill(idParam(c))));
+// The body names what was reviewed ({updated_at, draft_at}): newer content is 409, never approved unseen (G-069).
+api.post("/skills/:id/approve", async (c) => c.json(approveSkill(idParam(c), await objectBody(c))));
+api.post("/skills/:id/reject", async (c) => c.json(rejectSkill(idParam(c), await objectBody(c))));
+
 // ------------------------------------------------------------------ settings
 
 /** Feature switches set from the web (ADR-0038); an env var that fixes one makes PUT answer 409. */
-const settingsView = () => ({ wikiCompose: wikiComposeState() });
+const settingsView = () => ({ wikiCompose: wikiComposeState(), skillApproval: skillApprovalState() });
 api.get("/settings", (c) => c.json(settingsView()));
 api.put("/settings", async (c) => {
-  const b = await body<{ wikiCompose?: unknown }>(c);
-  if (!b || typeof b !== "object" || !("wikiCompose" in b)) throw new HttpError(400, "nothing to change");
-  if (typeof b.wikiCompose !== "boolean") throw new HttpError(400, "wikiCompose must be true or false");
-  setWikiCompose(b.wikiCompose);
+  const b = await body<{ wikiCompose?: unknown; skillApproval?: unknown }>(c);
+  if (!b || typeof b !== "object" || !("wikiCompose" in b || "skillApproval" in b)) throw new HttpError(400, "nothing to change");
+  if ("wikiCompose" in b && typeof b.wikiCompose !== "boolean") throw new HttpError(400, "wikiCompose must be true or false");
+  if ("skillApproval" in b && !SKILL_APPROVALS.includes(b.skillApproval as SkillApproval)) throw new HttpError(400, "skillApproval must be off, global or all");
+  if ("wikiCompose" in b) setWikiCompose(b.wikiCompose as boolean);
+  if ("skillApproval" in b) setSkillApproval(b.skillApproval as SkillApproval);
   return c.json(settingsView());
 });
 
@@ -211,7 +262,8 @@ api.post("/context", async (c) => {
   recordUsage(ctx.recalled, "recall");
   recordShown(ctx.included);
   if (debug) logContext("context", project, prompt, ctx, debug);
-  return c.json({ project, ...ctx });
+  // The extension compares this with the skills it mirrored and says so when they differ.
+  return c.json({ project, ...ctx, skillsVersion: skillsVersion(project) });
 });
 
 api.get("/context/preview", async (c) => {
@@ -336,7 +388,7 @@ api.put("/policy", async (c) => {
 });
 
 api.get("/meta", (c) => c.json({ categories: CATEGORIES, llm: llmEnabled() ? config.llm.model : null }));
-api.get("/stats", (c) => c.json({ debug: debugEnabled(), wikiCompose: wikiComposeEnabled(), ...stats(), ...wikiStats(), ...graphStats(), ...reviewStats(), ...embedStats() }));
+api.get("/stats", (c) => c.json({ debug: debugEnabled(), wikiCompose: wikiComposeEnabled(), ...stats(), ...wikiStats(), ...skillStats(), ...graphStats(), ...reviewStats(), ...embedStats() }));
 
 api.get("/projects", (c) => c.json(listProjects()));
 // Registered before /projects/:id so "similar" is never read as an id.
@@ -651,6 +703,13 @@ api.post("/wiki/compose", async (c) => {
     if (!ids.length) throw new HttpError(400, b.session_id ? "this session has no recorded turns yet" : "every turn is already composed into this wiki");
   }
   return c.json(enqueueCompose(projectId, ids, b.instruction), 201);
+});
+
+/** skill_manage: the agent lists, reads, creates and updates skills (never deletes). */
+api.post("/agent/skill", async (c) => {
+  const b = await objectBody(c);
+  const res = agentSkill(projectFromRef(b.project as ProjectRef | null | undefined), b);
+  return c.json(res, res.action === "create" ? 201 : 200);
 });
 
 // --------------------------------------------------- agent writes (wiki_write)
