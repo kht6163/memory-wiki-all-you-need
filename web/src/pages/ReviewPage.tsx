@@ -137,12 +137,13 @@ export function ReviewPage({ projectId }: { projectId?: number }) {
     // proposals, stale memories and the scope summary all reload.
     const ids = applicable.map((p) => p.id);
     const r = await act(async () => {
-      const all: Awaited<ReturnType<typeof api.applyProposals>> = { applied: [], failed: [], skipped: [] };
+      const all: Awaited<ReturnType<typeof api.applyProposals>> = { applied: [], failed: [], skipped: [], retired: [] };
       for (let i = 0; i < ids.length; i += 500) {
         const part = await api.applyProposals(ids.slice(i, i + 500));
         all.applied.push(...part.applied);
         all.failed.push(...part.failed);
         all.skipped.push(...part.skipped);
+        all.retired.push(...part.retired);
       }
       return all;
     });
@@ -156,7 +157,23 @@ export function ReviewPage({ projectId }: { projectId?: number }) {
         title: `${r.applied.length}개 적용, ${r.failed.length}개는 적용하지 못했습니다`,
         description: `오래됨으로 표시했습니다. 제안 #${first.id}: ${describeError(new Error(first.error)).text}`,
       });
-    } else toast({ kind: "ok", title: `제안 ${r.applied.length}개를 적용했습니다` });
+    } else
+      toast({
+        kind: "ok",
+        title: `제안 ${r.applied.length}개를 적용했습니다`,
+        // Applies often make other proposals impossible (a merged-away memory another relied on).
+        description: r.retired.length ? `이 적용으로 근거가 바뀐 제안 ${r.retired.length}개는 오래됨으로 정리했습니다. 필요하면 점검을 다시 실행하세요.` : undefined,
+      });
+  };
+
+  // Proposals that can never be applied (their memories changed or vanished since): clear them in one go.
+  const blockedCount = list.filter((p) => blockedReason(p)).length;
+  const retireBlocked = async () => {
+    if (busy !== null || bulk) return;
+    setBulk(true);
+    const r = await act(() => api.retireBlockedProposals(projectId));
+    setBulk(false);
+    if (r) toast({ kind: "ok", title: `적용할 수 없는 제안 ${r.retired.length}개를 정리했습니다`, description: "오래됨으로 표시했습니다. 필요하면 점검을 다시 실행하세요." });
   };
 
   // j / k move, a apply, d dismiss — read the latest state through a ref so the listener stays put.
@@ -267,16 +284,30 @@ export function ReviewPage({ projectId }: { projectId?: number }) {
             <kbd>k</kbd> 이동 · <kbd>a</kbd> 적용 · <kbd>d</kbd> 무시
           </span>
         )}
-        {applicable.length > 0 && (
-          <button
-            className="btn small primary"
-            disabled={busy !== null || bulk}
-            aria-busy={bulk || undefined}
-            title={left > 0 ? `모순·적용할 수 없는 제안 ${left}개는 남깁니다` : undefined}
-            onClick={applyAll}
-          >
-            <Icon name="check-check" /> {bulk ? "적용 중…" : `전체 승인 (${applicable.length})`}
-          </button>
+        {(applicable.length > 0 || blockedCount > 0) && (
+          <span className="review-bulk">
+          {applicable.length > 0 && (
+            <button
+              className="btn small primary"
+              disabled={busy !== null || bulk}
+              aria-busy={bulk || undefined}
+              title={left > 0 ? `모순·적용할 수 없는 제안 ${left}개는 남깁니다` : undefined}
+              onClick={applyAll}
+            >
+              <Icon name="check-check" /> {bulk ? "적용 중…" : `전체 승인 (${applicable.length})`}
+            </button>
+          )}
+          {blockedCount > 0 && (
+            <button
+              className="btn small"
+              disabled={busy !== null || bulk}
+              title="제안 뒤 메모리나 근거 메모리가 바뀌어 적용할 수 없는 제안을 오래됨으로 표시합니다"
+              onClick={retireBlocked}
+            >
+              적용할 수 없는 제안 {blockedCount}개 정리
+            </button>
+          )}
+          </span>
         )}
       </div>
       {proposals.loading && !proposals.data && <SkeletonList rows={2} />}

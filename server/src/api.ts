@@ -62,6 +62,7 @@ import { config, llmEnabled } from "./config.ts";
 import {
   applyProposal,
   applyProposals,
+  retireBlockedProposals,
   dismissProposal,
   enqueueReview,
   listProposals,
@@ -552,6 +553,11 @@ api.get("/review/proposals", (c) => {
       projectId: pid === undefined ? undefined : num(pid) || null,
     }),
   );
+});
+api.post("/review/proposals/retire-blocked", async (c) => {
+  // The scope the web shows (0 = global·user), like GET /review/proposals.
+  const pid = num(String((await body<{ project_id?: unknown }>(c)).project_id ?? ""));
+  return c.json({ retired: retireBlockedProposals(pid ?? 0) });
 });
 api.post("/review/proposals/apply", async (c) => c.json(applyProposals((await body<{ ids?: unknown }>(c)).ids)));
 api.post("/review/proposals/:id/apply", (c) => c.json(applyProposal(idParam(c))));

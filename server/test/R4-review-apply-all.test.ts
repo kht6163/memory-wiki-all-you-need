@@ -76,6 +76,54 @@ test("apply all: a delete carrying a warning (it removes a decision's reason) is
   assert.equal((await ok("GET", `/entries/${r1.id}`)).entry.deleted_at, null);
 });
 
+test("an apply retires the pending proposals it made impossible; retire-blocked clears ones a memory edit blocked", async () => {
+  const p = await freshProject();
+  const a = await entry({ project_id: p.id, title: "cache is redis", body: "x", entities: ["cache"] });
+  const b = await entry({ project_id: p.id, title: "cache uses redis", body: "y", entities: ["cache"] });
+  const c = await entry({ project_id: p.id, title: "redis port 6379", body: "z", entities: ["cache"] });
+  const proposals = await runReview(p.id, {
+    proposals: [
+      { kind: "merge", ids: [a.id, b.id], keep: a.id, title: "cache is redis", body: "x y", reason: "dup" },
+      { kind: "delete", ids: [b.id], reason: "covered" },
+      { kind: "update", ids: [c.id], edit: { old: "z", new: "zz" }, reason: "fix" },
+    ],
+  });
+  const merge = proposals.find((x) => x.kind === "merge")!;
+  const delB = proposals.find((x) => x.kind === "delete")!;
+  const upd = proposals.find((x) => x.kind === "update")!;
+  const status = async (id: number) => (await ok<Any[]>("GET", `/review/proposals?project_id=${p.id}&status=`)).find((x) => x.id === id)?.status;
+
+  // One apply (not the bulk one): the delete of the merged-away memory leaves the list.
+  await ok("POST", `/review/proposals/${merge.id}/apply`);
+  assert.equal(await status(delB.id), "stale");
+  assert.equal(await status(upd.id), "pending", "untouched proposals stay");
+
+  // A memory edited by hand blocks the update; retire-blocked clears it.
+  await ok("PATCH", `/entries/${c.id}`, { body: "edited by hand" });
+  assert.deepEqual((await ok("POST", "/review/proposals/retire-blocked", { project_id: p.id + 1000 })).retired, [], "another scope: untouched");
+  const r = await ok("POST", "/review/proposals/retire-blocked", { project_id: p.id });
+  assert.deepEqual(r.retired, [upd.id]);
+  assert.equal(await status(upd.id), "stale");
+  assert.deepEqual((await ok("POST", "/review/proposals/retire-blocked", { project_id: p.id })).retired, []);
+});
+
+test("apply all: reports what its applies retired", async () => {
+  const p = await freshProject();
+  const a = await entry({ project_id: p.id, title: "q is rabbit", body: "x", entities: ["q"] });
+  const b = await entry({ project_id: p.id, title: "q uses rabbit", body: "y", entities: ["q"] });
+  const proposals = await runReview(p.id, {
+    proposals: [
+      { kind: "merge", ids: [a.id, b.id], keep: a.id, title: "q is rabbit", body: "x y", reason: "dup" },
+      { kind: "delete", ids: [b.id], reason: "covered" },
+    ],
+  });
+  const merge = proposals.find((x) => x.kind === "merge")!;
+  const del = proposals.find((x) => x.kind === "delete")!;
+  const r = await ok("POST", "/review/proposals/apply", { ids: [merge.id] });
+  assert.deepEqual(r.applied, [merge.id]);
+  assert.deepEqual(r.retired, [del.id]);
+});
+
 test("apply all: ids must be 1-500 positive integers", async () => {
   for (const body of [{}, { ids: [] }, { ids: "1" }, { ids: [1.5] }, { ids: [0] }, { ids: Array.from({ length: 501 }, (_, i) => i + 1) }]) {
     assert.equal((await call("POST", "/review/proposals/apply", body)).status, 400, JSON.stringify(body).slice(0, 40));

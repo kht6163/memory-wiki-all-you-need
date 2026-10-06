@@ -618,11 +618,14 @@ export const api = {
   applyProposal: (id: number) => request<Proposal>("POST", `/review/proposals/${id}/apply`),
   /** "Approve all": applied in order; a proposal an earlier one made stale is reported in `failed`, conflicts in `skipped`. */
   applyProposals: (ids: number[]) =>
-    request<{ applied: number[]; failed: { id: number; status: number; error: string }[]; skipped: { id: number; reason: string }[] }>(
+    request<{ applied: number[]; failed: { id: number; status: number; error: string }[]; skipped: { id: number; reason: string }[]; retired: number[] }>(
       "POST",
       "/review/proposals/apply",
       { ids },
     ),
+  /** Mark every pending proposal that can no longer be applied (its memories changed) as stale. */
+  retireBlockedProposals: (project_id: number | undefined) =>
+    request<{ retired: number[] }>("POST", "/review/proposals/retire-blocked", { project_id: project_id ?? 0 }),
   dismissProposal: (id: number) => request<Proposal>("POST", `/review/proposals/${id}/dismiss`),
   staleEntries: (project_id?: number, days?: number) => request<(Entry & { last_used_at: string | null })[]>("GET", `/review/stale${qs({ project_id, days })}`),
   retryGraphJob: (id: number) => request<GraphJob>("POST", `/graph/jobs/${id}/retry`),

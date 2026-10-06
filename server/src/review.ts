@@ -865,6 +865,40 @@ function decide(id: number, status: ProposalStatus) {
   db.prepare(`UPDATE review_proposals SET status = ?, decided_at = ? WHERE id = ?`).run(status, now(), id);
 }
 
+/** Whether a proposal's memories (or the memory it relies on) changed since it was proposed: it can never be applied as is. */
+function isBlocked(p: Proposal): boolean {
+  // Becoming superseded counts as a change too: versionOf (memory revisions) does not see a new link.
+  const changed = p.entry_ids.some((eid) => {
+    const e = getEntry(eid);
+    return !e || e.deleted_at || versionOf(eid) !== p.data.snap[String(eid)] || entryState(e).superseded_by != null;
+  });
+  return changed || coveredByChanged(p);
+}
+
+/**
+ * Mark every pending proposal that can no longer be applied as stale, so it leaves the list
+ * instead of waiting there forever with a disabled button. Applying one proposal often blocks
+ * others (a global merge deletes the memory a project proposal relied on). Returns their ids.
+ */
+export function retireBlockedProposals(projectId?: number | null): number[] {
+  const out: number[] = [];
+  // projectId: one review scope (null/0 = global·user), as listProposals; undefined = every scope.
+  const rows =
+    projectId === undefined
+      ? db.prepare(`SELECT id FROM review_proposals WHERE status = 'pending' ORDER BY id`).all()
+      : db
+          .prepare(`SELECT p.id FROM review_proposals p JOIN review_jobs j ON j.id = p.job_id WHERE p.status = 'pending' AND IFNULL(j.project_id, 0) = ? ORDER BY p.id`)
+          .all(projectId ?? 0);
+  for (const r of rows) {
+    const p = getProposal(Number(r.id));
+    if (p && isBlocked(p)) {
+      decide(p.id, "stale");
+      out.push(p.id);
+    }
+  }
+  return out;
+}
+
 export function dismissProposal(id: number): Proposal {
   const p = getProposal(id);
   if (!p) throw new HttpError(404, "proposal not found");
@@ -877,15 +911,14 @@ export function dismissProposal(id: number): Proposal {
  * Apply a pending proposal. If any memory changed or vanished since it was
  * proposed, the proposal is marked stale instead (409) — never applied blind.
  */
-export function applyProposal(id: number): Proposal {
+export function applyProposal(id: number, opts: { retire?: boolean } = {}): Proposal {
   const p = getProposal(id);
   if (!p) throw new HttpError(404, "proposal not found");
   if (p.status !== "pending") throw new HttpError(409, `proposal is already ${p.status}`);
-  const entries = p.entry_ids.map((eid) => getEntry(eid));
-  // Becoming superseded counts as a change too: versionOf (memory revisions) does not see a new link.
-  const changed = entries.some(
-    (e, i) => !e || e.deleted_at || versionOf(p.entry_ids[i]) !== p.data.snap[String(p.entry_ids[i])] || entryState(e).superseded_by != null,
-  );
+  const changed = p.entry_ids.some((eid) => {
+    const e = getEntry(eid);
+    return !e || e.deleted_at || versionOf(eid) !== p.data.snap[String(eid)] || entryState(e).superseded_by != null;
+  });
   if (changed) {
     decide(id, "stale");
     throw new HttpError(409, "the memories changed since this was proposed; run the review again");
@@ -903,6 +936,8 @@ export function applyProposal(id: number): Proposal {
     decide(id, "stale");
     throw new HttpError(422, `could not apply: ${(err as Error).message}`);
   }
+  // What this one changed may block others (G-075): retire those now.
+  if (opts.retire !== false) retireBlockedProposals();
   return getProposal(id)!;
 }
 
@@ -916,11 +951,13 @@ export function applyProposals(ids: unknown): {
   applied: number[];
   failed: { id: number; status: number; error: string }[];
   skipped: { id: number; reason: "conflict" | "warning" | "not_pending" | "not_found" }[];
+  /** Pending proposals (any scope) the applies made impossible, marked stale. */
+  retired: number[];
 } {
   if (!Array.isArray(ids) || !ids.length || ids.length > 500 || !ids.every((x) => Number.isInteger(x) && x > 0)) {
     throw new HttpError(400, "ids must be 1-500 proposal ids");
   }
-  const out: ReturnType<typeof applyProposals> = { applied: [], failed: [], skipped: [] };
+  const out: ReturnType<typeof applyProposals> = { applied: [], failed: [], skipped: [], retired: [] };
   for (const id of new Set(ids as number[])) {
     const p = getProposal(id);
     if (!p) out.skipped.push({ id, reason: "not_found" });
@@ -929,7 +966,7 @@ export function applyProposals(ids: unknown): {
     else if (p.data.warning) out.skipped.push({ id, reason: "warning" });
     else {
       try {
-        applyProposal(id);
+        applyProposal(id, { retire: false });
         out.applied.push(id);
       } catch (err) {
         if (!(err instanceof HttpError)) throw err;
@@ -937,6 +974,7 @@ export function applyProposals(ids: unknown): {
       }
     }
   }
+  out.retired = retireBlockedProposals();
   return out;
 }
 

@@ -294,3 +294,10 @@
   border-style: dashed;
   background: transparent;
 }
+
+/* "Approve all" and "clear blocked" sit together at the right of the proposals heading. */
+.review-bulk {
+  display: inline-flex;
+  flex-wrap: wrap;
+  gap: var(--space-2);
+}
