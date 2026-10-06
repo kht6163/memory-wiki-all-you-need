@@ -906,6 +906,40 @@ export function applyProposal(id: number): Proposal {
   return getProposal(id)!;
 }
 
+/**
+ * "Approve all" (web): apply the listed proposals one by one, in order, each with the same
+ * checks as applyProposal — one that a previous apply made stale is marked stale, never
+ * applied blind. Conflicts and warned deletes (data.warning: deleting a decision's reason)
+ * are left pending: each is a human decision (ADR-0013).
+ */
+export function applyProposals(ids: unknown): {
+  applied: number[];
+  failed: { id: number; status: number; error: string }[];
+  skipped: { id: number; reason: "conflict" | "warning" | "not_pending" | "not_found" }[];
+} {
+  if (!Array.isArray(ids) || !ids.length || ids.length > 500 || !ids.every((x) => Number.isInteger(x) && x > 0)) {
+    throw new HttpError(400, "ids must be 1-500 proposal ids");
+  }
+  const out: ReturnType<typeof applyProposals> = { applied: [], failed: [], skipped: [] };
+  for (const id of new Set(ids as number[])) {
+    const p = getProposal(id);
+    if (!p) out.skipped.push({ id, reason: "not_found" });
+    else if (p.status !== "pending") out.skipped.push({ id, reason: "not_pending" });
+    else if (p.kind === "conflict") out.skipped.push({ id, reason: "conflict" });
+    else if (p.data.warning) out.skipped.push({ id, reason: "warning" });
+    else {
+      try {
+        applyProposal(id);
+        out.applied.push(id);
+      } catch (err) {
+        if (!(err instanceof HttpError)) throw err;
+        out.failed.push({ id, status: err.status, error: err.message });
+      }
+    }
+  }
+  return out;
+}
+
 function applyInTransaction(p: Proposal, meta: { author: "llm"; reason: string }) {
   const id = p.id;
   transaction(() => {

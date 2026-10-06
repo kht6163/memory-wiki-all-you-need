@@ -1,13 +1,20 @@
 {
   "name": "memory-wiki",
   "displayName": "memory-wiki-all-you-need",
-  "version": "0.18.0",
+  "version": "0.19.0",
   "description": "Central memory + LLM wiki for Claude Code: memory in every request, each turn curated by the server, global skills synced from the server.",
-  "author": { "name": "kht6163" },
+  "author": {
+    "name": "kht6163"
+  },
   "homepage": "https://github.com/kht6163/memory-wiki-all-you-need#readme",
   "repository": "https://github.com/kht6163/memory-wiki-all-you-need",
   "license": "MIT",
-  "keywords": ["memory", "wiki", "skills", "mod"],
+  "keywords": [
+    "memory",
+    "wiki",
+    "skills",
+    "mod"
+  ],
   "userConfig": {
     "server_url": {
       "type": "string",
@@ -46,6 +53,12 @@
       "type": "boolean",
       "title": "Install global skills",
       "description": "Mirror the server's global skills into the Claude Code skills folder (project skills are always read with skill_manage)",
+      "default": true
+    },
+    "show_activity": {
+      "type": "boolean",
+      "title": "Show memory activity",
+      "description": "Log a line in the conversation when memories are recalled for a prompt and when a turn's curation changed memories (never sent to Claude)",
       "default": true
     }
   }

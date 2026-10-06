@@ -1,6 +1,7 @@
 import "./review.css";
 import { useEffect, useRef, useState, type ReactNode } from "react";
 import { api, type Proposal, type ReviewJob } from "../api.ts";
+import { describeError } from "../errors.ts";
 import { editProblems, entityChange, proposalEdits, type EditProblem } from "../proposal.ts";
 import {
   CATEGORY_LABEL,
@@ -13,10 +14,12 @@ import {
   StateBadge,
   Time,
   act,
+  confirmDialog,
   go,
   isHistory,
   isTypingTarget,
   softDelete,
+  toast,
   useData,
   usePoll,
 } from "../lib.tsx";
@@ -65,6 +68,7 @@ export function ReviewPage({ projectId }: { projectId?: number }) {
   const summary = useData(() => api.reviewScope(projectId), [projectId]);
   const [selected, setSelected] = useState(0);
   const [busy, setBusy] = useState<number | null>(null);
+  const [bulk, setBulk] = useState(false); // "approve all" running
 
   const scopeJobs = jobs.data ?? [];
   const running = scopeJobs.find(isActive);
@@ -98,13 +102,61 @@ export function ReviewPage({ projectId }: { projectId?: number }) {
   const startReview = () => act(() => api.startReview(projectId), { success: "점검을 시작했습니다" }).then(() => jobs.reload());
 
   const decide = async (p: Proposal, how: "apply" | "dismiss") => {
-    if (busy !== null) return;
+    if (busy !== null || bulk) return;
     if (how === "apply" && blockedReason(p)) return;
     setBusy(p.id);
     await act(() => (how === "apply" ? api.applyProposal(p.id) : api.dismissProposal(p.id)), {
       success: how === "apply" ? `제안 #${p.id}을(를) 적용했습니다` : `제안 #${p.id}을(를) 무시했습니다`,
     });
     setBusy(null);
+  };
+
+  // "Approve all": every proposal that can be applied now. Conflicts and warned deletes stay
+  // (each is a human decision), and so do blocked ones (their memories changed or vanished).
+  const applicable = list.filter((p) => p.kind !== "conflict" && !p.data.warning && !blockedReason(p));
+  const left = list.length - applicable.length;
+  const applyAll = async () => {
+    if (busy !== null || bulk || !applicable.length) return;
+    const count = (k: Proposal["kind"]) => applicable.filter((p) => p.kind === k).length;
+    const parts = (["merge", "update", "delete"] as const).filter((k) => count(k) > 0).map((k) => `${KIND[k].label} ${count(k)}개`);
+    const ok = await confirmDialog({
+      title: `제안 ${applicable.length}개를 모두 적용할까요?`,
+      body: (
+        <>
+          <p>{parts.join(", ")}를 위에서부터 차례로 적용합니다. 앞의 적용으로 메모리가 바뀐 제안은 적용하지 않고 "오래됨"으로 남깁니다.</p>
+          {left > 0 && <p className="muted">모순 제안, 경고가 붙은 제안, 지금 적용할 수 없는 제안 {left}개는 그대로 둡니다. 하나씩 보고 정하세요.</p>}
+          <p className="muted">바뀐 메모리는 이력에 남아 메모리 화면에서 되돌릴 수 있습니다.</p>
+        </>
+      ),
+      confirmLabel: `${applicable.length}개 적용`,
+      danger: count("delete") > 0 || count("merge") > 0,
+    });
+    if (!ok) return;
+    setBulk(true);
+    // In batches of 500 (the server's limit), in screen order. act fires "memory:changed":
+    // proposals, stale memories and the scope summary all reload.
+    const ids = applicable.map((p) => p.id);
+    const r = await act(async () => {
+      const all: Awaited<ReturnType<typeof api.applyProposals>> = { applied: [], failed: [], skipped: [] };
+      for (let i = 0; i < ids.length; i += 500) {
+        const part = await api.applyProposals(ids.slice(i, i + 500));
+        all.applied.push(...part.applied);
+        all.failed.push(...part.failed);
+        all.skipped.push(...part.skipped);
+      }
+      return all;
+    });
+    setBulk(false);
+    if (!r) return;
+    if (r.failed.length) {
+      // 409 = memories changed after the proposal; 422 = the store refused it (its own reason).
+      const first = r.failed[0];
+      toast({
+        kind: "error",
+        title: `${r.applied.length}개 적용, ${r.failed.length}개는 적용하지 못했습니다`,
+        description: `오래됨으로 표시했습니다. 제안 #${first.id}: ${describeError(new Error(first.error)).text}`,
+      });
+    } else toast({ kind: "ok", title: `제안 ${r.applied.length}개를 적용했습니다` });
   };
 
   // j / k move, a apply, d dismiss — read the latest state through a ref so the listener stays put.
@@ -214,6 +266,17 @@ export function ReviewPage({ projectId }: { projectId?: number }) {
             <kbd>j</kbd>
             <kbd>k</kbd> 이동 · <kbd>a</kbd> 적용 · <kbd>d</kbd> 무시
           </span>
+        )}
+        {applicable.length > 0 && (
+          <button
+            className="btn small primary"
+            disabled={busy !== null || bulk}
+            aria-busy={bulk || undefined}
+            title={left > 0 ? `모순·적용할 수 없는 제안 ${left}개는 남깁니다` : undefined}
+            onClick={applyAll}
+          >
+            <Icon name="check-check" /> {bulk ? "적용 중…" : `전체 승인 (${applicable.length})`}
+          </button>
         )}
       </div>
       {proposals.loading && !proposals.data && <SkeletonList rows={2} />}

@@ -12,6 +12,7 @@ export interface PluginOptions {
   project?: string;
   skill_nudge?: number;
   mirror_skills?: boolean;
+  show_activity?: boolean | string;
 }
 
 export interface Settings {
@@ -26,6 +27,8 @@ export interface Settings {
   skillNudge: number;
   /** Mirror the server's global skills into the Claude Code skills folder. */
   mirrorSkills: boolean;
+  /** Log "memory_recall" / "memory_curate" lines in the transcript (never sent to Claude). */
+  showActivity: boolean;
 }
 
 export const DEFAULT_SERVER = "http://127.0.0.1:8765";
@@ -35,6 +38,15 @@ const num = (env: string | undefined, opt: unknown, dflt: number) => {
   const fromOpt = typeof opt === "number" ? opt : typeof opt === "string" && opt.trim() ? Number(opt) : dflt; // /config may store text
   const n = env?.trim() ? Number(env) : fromOpt;
   return Number.isFinite(n) && n >= 0 ? n : dflt;
+};
+
+/** true/1/on/yes → true, false/0/off/no → false, anything else → null (not set). /config may store text. */
+const boolText = (v: unknown): boolean | null => {
+  if (typeof v === "boolean") return v;
+  const t = typeof v === "string" ? v.trim().toLowerCase() : "";
+  if (["true", "on", "yes", "1"].includes(t)) return true;
+  if (["false", "off", "no", "0"].includes(t)) return false;
+  return null;
 };
 
 /** Env vars (same names as the pi extension) win over the plugin options, the options over defaults. */
@@ -49,11 +61,12 @@ export function resolveSettings(options: PluginOptions | undefined, env: Record<
     project: env.MEMORY_PROJECT?.trim() || (typeof o.project === "string" ? o.project.trim() : ""),
     skillNudge: num(env.MEMORY_SKILL_NUDGE, o.skill_nudge, 8),
     mirrorSkills: mirrorEnv ? mirrorEnv !== "0" : !(o.mirror_skills === false || String(o.mirror_skills).trim().toLowerCase() === "false"),
+    showActivity: boolText(env.MEMORY_SHOW_ACTIVITY) ?? boolText(o.show_activity) ?? true,
   };
 }
 
 /** The env vars resolveSettings reads (register.ts asks for each by name). */
-export const ENV_KEYS = ["MEMORY_SERVER_URL", "MEMORY_TIMEOUT_MS", "MEMORY_SETTLE_DELAY_MS", "MEMORY_PROJECT", "MEMORY_SKILL_NUDGE", "MEMORY_MIRROR_SKILLS"] as const;
+export const ENV_KEYS = ["MEMORY_SERVER_URL", "MEMORY_TIMEOUT_MS", "MEMORY_SETTLE_DELAY_MS", "MEMORY_PROJECT", "MEMORY_SKILL_NUDGE", "MEMORY_MIRROR_SKILLS", "MEMORY_SHOW_ACTIVITY"] as const;
 
 // ----------------------------------------------------------------- project
 
@@ -86,6 +99,32 @@ export const baseName = (p: string) => p.replace(/[\\/]+$/, "").split(/[\\/]/).p
  * remote = origin's URL): the same key the pi extension computes, so one
  * repository is one project on the server whichever agent works in it.
  */
+/** A path in the form keys use (same as the pi extension's keyPath). */
+export function keyPath(p: string, windows: boolean): string {
+  let t = p.trim().replace(/\\/g, "/").replace(/\/+$/, "");
+  if (windows) t = t.toLowerCase();
+  return t;
+}
+
+/**
+ * The project for a folder outside any git repository — never global: "home/<user>" for the
+ * home directory itself, "home/<user>/<relative path>" under it, else "path/<absolute path>".
+ * The same key the pi extension builds (pi-extension/project.ts folderProject).
+ */
+export function folderProject(cwd: string, home: string, user: string, windows: boolean): ProjectRef {
+  const c = keyPath(cwd, windows);
+  const h = keyPath(home, windows);
+  const base = (x: string) => x.split("/").filter(Boolean).pop() ?? "";
+  const who = user.trim() || base(keyPath(home, false));
+  if (h && who && (c === h || c.startsWith(`${h}/`))) {
+    const rel = c.slice(h.length).replace(/^\/+/, "");
+    const userKey = `home/${who.toLowerCase()}`;
+    return rel ? { key: `${userKey}/${rel}`, name: base(rel), remote: null } : { key: userKey, name: who, remote: null };
+  }
+  const abs = c.replace(/^\/+/, "");
+  return abs ? { key: `path/${abs}`, name: base(abs), remote: null } : { key: "path/", name: "/", remote: null };
+}
+
 export function projectFromRepo(repo: { root: string; remote: string | null } | null, override: string): ProjectRef | null {
   if (override) return { key: override, name: override.split("/").pop() || override, remote: null };
   if (!repo) return null;
@@ -703,3 +742,52 @@ function formatSkill(a: Args, res: SkillReply): string {
   const where = k.scope === "global" ? " PCs that install global skills get it as a Claude Code skill." : " It stays on the server: read it with skill_manage view.";
   return `${created ? "created" : "updated"} ${k.scope}:${k.name} (updated_at ${k.updated_at}) on the memory server.${where}`;
 }
+
+// ---------------------------------------------------------------- activity
+
+const isObj = (v: unknown): v is Record<string, unknown> => Boolean(v) && typeof v === "object" && !Array.isArray(v);
+const CHANGE_OPS = new Set(["add", "update", "delete"]);
+const OP_MARK: Record<string, string> = { add: "+", update: "~", delete: "-" };
+
+/**
+ * The transcript line for memories recalled for a prompt, or null when none were (same
+ * rules as the pi extension's memory_recall card: titles from recalledEntries, else from
+ * the "- [#id] title" lines of an older server's recall block).
+ */
+export function recallLine(res: { recall?: unknown; recalledEntries?: unknown }): string | null {
+  if (typeof res.recall !== "string" || !res.recall.trim()) return null;
+  let entries: { id: number; title: string }[] = [];
+  if (Array.isArray(res.recalledEntries)) {
+    entries = res.recalledEntries
+      .filter(isObj)
+      .filter((e) => typeof e.id === "number")
+      .map((e) => ({ id: e.id as number, title: typeof e.title === "string" ? e.title : "" }));
+  }
+  if (!entries.length) {
+    for (const m of res.recall.matchAll(/^- \[#(\d+)\] (.*)$/gm)) entries.push({ id: Number(m[1]), title: (m[2] ?? "").split(": ")[0] ?? "" });
+  }
+  if (!entries.length) return null;
+  const n = entries.length;
+  return `🧠 memory_recall · ${n} ${n === 1 ? "memory" : "memories"} · ${entries.map((e) => `#${e.id} ${e.title}`.trim()).join(", ")}`;
+}
+
+/** The transcript line for a curated turn, or null when it changed no memory (confirm only, skipped, error, not done). */
+export function curationLine(status: unknown, result: unknown): string | null {
+  if (status !== "done" || !isObj(result) || !Array.isArray(result.applied)) return null;
+  const applied = result.applied.filter(isObj).filter((a) => typeof a.op === "string" && CHANGE_OPS.has(a.op) && typeof a.entryId === "number");
+  if (!applied.length) return null;
+  const count = (op: string) => applied.filter((a) => a.op === op).length;
+  const summary = [
+    [count("add"), "added"],
+    [count("update"), "updated"],
+    [count("delete"), "deleted"],
+  ]
+    .filter(([c]) => (c as number) > 0)
+    .map(([c, w]) => `${c} ${w}`)
+    .join(" · ");
+  const list = applied.map((a) => `${OP_MARK[a.op as string]} #${a.entryId} ${typeof a.title === "string" ? a.title : ""}`.trim()).join(", ");
+  return `🧠 memory_curate · ${summary} — ${list}`;
+}
+
+/** The statuses GET /turns/:id/status answers; anything else (an old server's index.html) is a failed poll. */
+export const TURN_STATUSES = ["pending", "processing", "done", "skipped", "error"];

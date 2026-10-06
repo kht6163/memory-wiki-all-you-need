@@ -18,6 +18,11 @@ process.env.TIMEZONE = "UTC";
 // The pi extension reads <agent dir>/extensions/memory-wiki-all-you-need.json at import:
 // never the developer's real ~/.pi/agent (a "disabled": true there would break the suites).
 process.env.PI_CODING_AGENT_DIR = path.join(dir, "pi-agent");
+// Nor the extension's built-in default http://127.0.0.1:8765, which on a developer's machine
+// is the real memory server: a suite that imports the extension before pointing
+// MEMORY_SERVER_URL at its mock gets a closed port instead (G-073).
+process.env.MEMORY_SERVER_URL = "http://127.0.0.1:9";
+delete process.env.MEMORY_SHOW_ACTIVITY;
 process.env.WEB_DIR = path.join(dir, "web");
 // Server switches the developer may have exported to try them (WIKI_COMPOSE=0 would 409 every compose suite).
 delete process.env.WIKI_COMPOSE;

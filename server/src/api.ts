@@ -61,6 +61,7 @@ import { deleteTurn, enqueueTurn, getTurn, listTurns, retryTurn } from "./turns.
 import { config, llmEnabled } from "./config.ts";
 import {
   applyProposal,
+  applyProposals,
   dismissProposal,
   enqueueReview,
   listProposals,
@@ -263,7 +264,9 @@ api.post("/context", async (c) => {
   recordShown(ctx.included);
   if (debug) logContext("context", project, prompt, ctx, debug);
   // The extension compares this with the skills it mirrored and says so when they differ.
-  return c.json({ project, ...ctx, skillsVersion: skillsVersion(project) });
+  // recalledEntries: titles for the extension's "memory recall" card (what was injected for this prompt).
+  const recalledEntries = ctx.recalled.map((id) => ({ id, title: getEntry(id)?.title ?? "" }));
+  return c.json({ project, ...ctx, recalledEntries, skillsVersion: skillsVersion(project) });
 });
 
 api.get("/context/preview", async (c) => {
@@ -550,6 +553,7 @@ api.get("/review/proposals", (c) => {
     }),
   );
 });
+api.post("/review/proposals/apply", async (c) => c.json(applyProposals((await body<{ ids?: unknown }>(c)).ids)));
 api.post("/review/proposals/:id/apply", (c) => c.json(applyProposal(idParam(c))));
 api.post("/review/proposals/:id/dismiss", (c) => c.json(dismissProposal(idParam(c))));
 /** Not used and not edited for `days` days (no LLM). */
@@ -574,6 +578,12 @@ api.get("/turns/:id", (c) => {
   const t = getTurn(idParam(c));
   if (!t) throw new HttpError(404, "turn not found");
   return c.json({ ...t, project: t.project_id ? getProject(t.project_id) : null });
+});
+/** Light poll for the pi extension's "memory updated" card: status and result, without the turn's messages. */
+api.get("/turns/:id/status", (c) => {
+  const t = getTurn(idParam(c));
+  if (!t) throw new HttpError(404, "turn not found");
+  return c.json({ id: t.id, status: t.status, error: t.error, result: t.result });
 });
 api.post("/turns/:id/retry", (c) => c.json(retryTurn(idParam(c))));
 api.delete("/turns/:id", (c) => {

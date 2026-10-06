@@ -67,6 +67,9 @@ const tail = (key: string) => key.split("/").filter(Boolean).pop()?.toLowerCase(
 const isLocal = (key: string) => key.startsWith("local/");
 const seen = (p: SimilarProjectInput) => p.last_seen_at ?? p.created_at;
 
+/** Keys the clients give a folder outside git (home/<user>[/path], path/<path>). */
+const isFolderKey = (key: string) => key.startsWith("home/") || key.startsWith("path/");
+
 function side(p: SimilarProjectInput): SimilarProjectSide {
   return { id: p.id, key: p.key, name: p.name, last_seen_at: p.last_seen_at, entry_count: p.entry_count };
 }
@@ -83,8 +86,11 @@ export function findSimilarProjects(projects: SimilarProjectInput[], dismissed =
       const folder = [...a.folders].some((f) => b.folders.has(f));
       const ta = tail(a.key);
       const tb = tail(b.key);
-      const local = Boolean(ta) && ta === tb && isLocal(a.key) !== isLocal(b.key);
-      const name = !local && !isLocal(a.key) && !isLocal(b.key) && (a.name.toLowerCase() === b.name.toLowerCase() || (Boolean(ta) && ta === tb));
+      // A folder project outside git (home/…, path/…; ADR-0044) is named after a folder, not a
+      // repo: a shared last segment says nothing (docs, test, app…). Same folder or entities still count.
+      const folderKeys = isFolderKey(a.key) || isFolderKey(b.key);
+      const local = !folderKeys && Boolean(ta) && ta === tb && isLocal(a.key) !== isLocal(b.key);
+      const name = !local && !folderKeys && !isLocal(a.key) && !isLocal(b.key) && (a.name.toLowerCase() === b.name.toLowerCase() || (Boolean(ta) && ta === tb));
       let shared = 0;
       const [small, big] = a.entities.size <= b.entities.size ? [a.entities, b.entities] : [b.entities, a.entities];
       for (const e of small) if (big.has(e)) shared++;

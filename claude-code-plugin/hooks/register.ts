@@ -35,7 +35,11 @@ import {
   locateTurn,
   originFromGitConfig,
   planMirror,
+  folderProject,
+  curationLine,
   projectFromRepo,
+  recallLine,
+  TURN_STATUSES,
   projectSkillsNote,
   renderRetired,
   resolveSettings,
@@ -80,6 +84,8 @@ interface Chunk {
 const PENDING = "pending:";
 /** A chunk left by a session that is gone (crash, quit before sending) is sent by another session after this long. */
 const ORPHAN_AFTER_MS = 10 * 60_000;
+/** How long a sent turn is watched for its curation result (memory_curate line). */
+const WATCH_MS = 10 * 60_000;
 /** Skill folders this mod wrote, so it never removes one it did not write. */
 const MIRROR_KEY = "mirror";
 /** The last project-skills note per project key, for the first prompt of the next session. */
@@ -93,6 +99,11 @@ let systemBlock = "";
 let skillsNote = "";
 let warned = false;
 let hint = "";
+// Activity lines ($.ui.log: in the transcript, never sent to Claude): the recall line waits for
+// the turn to start so it lands under the prompt; curation watches end with the session.
+let recallNote: string | null = null;
+let watchGen = 0;
+const watches = new Set<{ cancel(): void }>();
 /** A prompt was typed while a turn ran: the hint from that turn would reach the wrong prompt, so it is dropped. */
 let promptDuringTurn = false;
 /**
@@ -168,6 +179,7 @@ async function readEnv($: Api): Promise<Record<string, string | undefined>> {
     MEMORY_PROJECT: (await $.env.get("MEMORY_PROJECT")) ?? undefined,
     MEMORY_SKILL_NUDGE: (await $.env.get("MEMORY_SKILL_NUDGE")) ?? undefined,
     MEMORY_MIRROR_SKILLS: (await $.env.get("MEMORY_MIRROR_SKILLS")) ?? undefined,
+    MEMORY_SHOW_ACTIVITY: (await $.env.get("MEMORY_SHOW_ACTIVITY")) ?? undefined,
   };
 }
 
@@ -187,14 +199,29 @@ async function findProject($: Api): Promise<ProjectRef | null> {
       // a submodule's .git is a file, or no access: keep Claude Code's answer
     }
   }
+  if (!repo && !settings.project) return folderProjectHere($);
   return projectFromRepo(repo, settings.project);
+}
+
+/** Outside git: the folder itself (home/<user>[/<path>] or path/<path>, see lib.ts folderProject). */
+async function folderProjectHere($: Api): Promise<ProjectRef | null> {
+  try {
+    const windows = (await $.env.get("OS")) === "Windows_NT";
+    const home = (windows ? (await $.env.get("USERPROFILE")) || (await $.env.get("HOME")) : (await $.env.get("HOME")) || (await $.env.get("USERPROFILE"))) ?? "";
+    const user = (await $.env.get("USER")) || (await $.env.get("USERNAME")) || "";
+    if (!cwd.trim()) return null;
+    return folderProject(cwd, home, user, windows);
+  } catch {
+    return null;
+  }
 }
 
 // ------------------------------------------------------------------ context
 
 async function fetchContext($: Api, prompt: string, ms: number): Promise<string> {
   try {
-    const res = await call<{ system?: string; recall?: string; skillsVersion?: string }>($, "POST", "/context", { project: projectBody(), prompt }, ms);
+    const res = await call<{ system?: string; recall?: string; recalledEntries?: unknown; skillsVersion?: string }>($, "POST", "/context", { project: projectBody(), prompt }, ms);
+    if (prompt.trim()) recallNote = settings.showActivity ? recallLine(res) : null;
     if (typeof res.system === "string") systemBlock = res.system;
     if (warned) $.ui.status(undefined);
     warned = false;
@@ -293,8 +320,9 @@ async function keepTurn($: Api, messages: TurnMessage[]) {
 }
 
 /** Send this session's chunks (and chunks other sessions left long ago for this server), oldest first; each is deleted only once the server has it. */
-async function flush($: Api, ms = 10_000, onlyOwn = false) {
+async function flush($: Api, ms = 10_000, onlyOwn = false, watch = true) {
   if (flushing) return flushing;
+  const gen = watchGen; // a session.end during the sends must not start watches for the old conversation
   flushing = (async () => {
     flushTimer?.cancel();
     flushTimer = null;
@@ -330,13 +358,15 @@ async function flush($: Api, ms = 10_000, onlyOwn = false) {
       }
       try {
         if (chunk.messages.some((m) => m.role === "user" || m.role === "assistant")) {
-          await call(
+          const sent = await call<{ id?: number }>(
             $,
             "POST",
             "/turns",
             { sessionId: chunk.sessionId, batchId: chunk.id, project: chunk.project, client: chunk.client, cwd: chunk.cwd, agent: "claude-code", messages: chunk.messages },
             ms,
           );
+          // This session's own turn: say what curation changed once the server is done.
+          if (watch && gen === watchGen && chunk.sessionId === sessionId && typeof sent?.id === "number") watchTurn($, sent.id);
         }
         await done($, key, chunk);
       } catch (err) {
@@ -358,6 +388,57 @@ async function flush($: Api, ms = 10_000, onlyOwn = false) {
   } finally {
     flushing = null;
   }
+}
+
+/**
+ * Poll GET /turns/:id/status until the server has curated the turn, then log a memory_curate
+ * line when memories changed. Every 3 s for 30 s, then every 10 s, for at most 10 min; three
+ * failed polls in a row (an old server: 404 or its web UI's index.html), another server, or
+ * the session's end stop it. Never throws.
+ */
+function watchTurn($: Api, id: number) {
+  if (!settings.showActivity) return;
+  const gen = watchGen;
+  const server = settings.server;
+  let failures = 0;
+  let started = 0;
+  const schedule = (elapsed: number) => {
+    if (elapsed > WATCH_MS) return;
+    const timer = $.clock.after(elapsed < 30_000 ? 3_000 : 10_000, () => {
+      watches.delete(timer);
+      void tick().catch(() => {});
+    });
+    watches.add(timer);
+  };
+  const tick = async () => {
+    if (gen !== watchGen || server !== settings.server) return;
+    let t: { status?: unknown; result?: unknown } | null = null;
+    try {
+      t = await call<{ status?: unknown; result?: unknown }>($, "GET", `/turns/${id}/status`, undefined, 5000);
+    } catch {
+      t = null;
+    }
+    if (!t || !TURN_STATUSES.includes(String(t.status))) {
+      if (++failures >= 3) return;
+    } else failures = 0;
+    if (gen !== watchGen || server !== settings.server || !settings.showActivity) return;
+    if (t && (t.status === "done" || t.status === "skipped" || t.status === "error")) {
+      const line = curationLine(t.status, t.result);
+      if (line) $.ui.log(line);
+      return;
+    }
+    schedule((await $.clock.now()) - started);
+  };
+  void (async () => {
+    started = await $.clock.now();
+    schedule(0);
+  })().catch(() => {});
+}
+
+function stopWatches() {
+  watchGen++;
+  for (const w of watches) w.cancel();
+  watches.clear();
 }
 
 async function done($: Api, key: string | null, chunk: Chunk) {
@@ -703,6 +784,7 @@ export function register(on: any, options?: PluginOptions) {
     flushTimer?.cancel();
     flushTimer = null;
     if (turns.size) promptDuringTurn = true;
+    recallNote = null; // only this prompt's recall (a failed or text-less fetch leaves none)
     const recall = await fetchContext($, e.text ?? "", settings.timeoutMs);
     const extra = [recall, hint].filter(Boolean);
     hint = "";
@@ -712,6 +794,10 @@ export function register(on: any, options?: PluginOptions) {
 
   // Every main-loop turn starts here (a queued prompt, a continuation too); subagents raise none.
   on("turn.start", async ($: Api, e: any, next: Next) => {
+    if (recallNote) {
+      $.ui.log(recallNote); // under the prompt that recalled it
+      recallNote = null;
+    }
     if (turns.size > 20) turns.clear(); // marks whose turn.complete never came (a crash in the engine): start over
     try {
       const rows = (await $.session.messages()) as SessionRow[];
@@ -771,8 +857,10 @@ export function register(on: any, options?: PluginOptions) {
     flushTimer?.cancel();
     flushTimer = null;
     hint = ""; // a /clear or resume starts another conversation
+    recallNote = null;
+    stopWatches();
     try {
-      await flush($, 1000, true);
+      await flush($, 1000, true, false);
     } catch {
       // kept for the next session
     }

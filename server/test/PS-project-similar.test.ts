@@ -117,3 +117,17 @@ test("ADR-0030: memories in the trash do not count as shared entities", async ()
   await ok("DELETE", `/entries/${m.id}`);
   assert.equal(pairOf(await similar(), a.id, b.id), undefined);
 });
+
+test("ADR-0044: a folder project outside git (home/…, path/…) is not paired by its last segment alone", () => {
+  for (const [a, b] of [
+    ["local/test", "path/tmp/test"],
+    ["home/kim/Downloads/docs", "local/docs"],
+    ["path/srv/app", "github.com/o/app"],
+    ["home/kim/app", "path/opt/app"],
+  ]) {
+    assert.equal(findSimilarProjects([input(1, a), input(2, b)]).length, 0, `${a} ~ ${b}`);
+  }
+  // The same folder still counts (a folder that later became a repo).
+  const f = findSimilarProjects([input(1, "path/work/app", { folders: new Set(["pc|/work/app"]) }), input(2, "local/app", { folders: new Set(["pc|/work/app"]) })]);
+  assert.deepEqual(f[0]?.reasons, ["folder"]);
+});

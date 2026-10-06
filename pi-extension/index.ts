@@ -2,15 +2,17 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { Type } from "@earendil-works/pi-ai";
-import { getAgentDir, type ExtensionAPI, type ExtensionContext } from "@earendil-works/pi-coding-agent";
+import { getAgentDir, keyHint, type ExtensionAPI, type ExtensionContext } from "@earendil-works/pi-coding-agent";
+import { Box, Text } from "@earendil-works/pi-tui";
 import { resolveProject, type ProjectRef } from "./project.ts";
 import { applySkills, mirroredVersion, skillPaths, skillsRoot, type SkillsPayload, type SyncResult } from "./skills.ts";
 
 // memory-wiki-all-you-need — central memory + LLM wiki for pi.
 //
 // - before_agent_start: fetches the memory block from the server and puts it
-//   into the system prompt (plus memories matching this prompt as a hidden
-//   message), so memory is always in context without the agent asking.
+//   into the system prompt (plus memories matching this prompt as a
+//   "memory-recall" message, shown as a card), so memory is always in context
+//   without the agent asking.
 // - message_end: buffers the turn (user prompt, assistant text, tool calls,
 //   tool results).
 // - agent_settled: once pi is truly idle (no retries, compaction or queued
@@ -34,11 +36,15 @@ import { applySkills, mirroredVersion, skillPaths, skillsRoot, type SkillsPayloa
 //   the result is mirrored back. After a run with many tool calls and no
 //   skill_manage call, the next prompt carries a hidden hint to consider saving
 //   the procedure (skillNudge, 0 = off).
+// - Activity cards (showActivity, on by default): memories recalled for a prompt
+//   show under it as a "memory_recall" card, and once the server has curated a
+//   sent turn, what it added, updated or deleted shows as a "memory_curate" card
+//   (an appended session entry: rendered in the transcript, never sent to the model).
 
 // Settings: <agent dir>/extensions/memory-wiki-all-you-need.json (like other pi
 // extensions), e.g. {"serverUrl": "http://<server>:8765"}. Env vars override the
 // file (MEMORY_SERVER_URL, MEMORY_SETTLE_DELAY_MS, MEMORY_TIMEOUT_MS,
-// MEMORY_PROJECT, MEMORY_SKILL_NUDGE, MEMORY_DISABLED=1). The install script writes serverUrl; the
+// MEMORY_PROJECT, MEMORY_SKILL_NUDGE, MEMORY_SHOW_ACTIVITY=0|1, MEMORY_DISABLED=1). The install script writes serverUrl; the
 // literal below is only the last fallback and the server swaps it for its own
 // origin when serving this file (G-008) — keep it the only occurrence.
 const DEFAULT_SERVER = "http://127.0.0.1:8765";
@@ -50,6 +56,8 @@ export interface MemoryConfig {
   project?: string;
   /** Tool calls in one run (with 2+ different tools) after which the agent is nudged to save a skill; 0 = never. */
   skillNudge?: number;
+  /** Show the memory_recall / memory_curate cards in the transcript (default true). */
+  showActivity?: boolean;
   disabled?: boolean;
 }
 
@@ -87,6 +95,14 @@ const num = (env: string | undefined, file: unknown, dflt: number) => {
   return Number.isFinite(n) && n >= 0 ? n : dflt;
 };
 
+/** "1/true/on" → true, "0/false/off" → false, anything else → null (not set). */
+const boolText = (v: string | undefined): boolean | null => {
+  const t = v?.trim().toLowerCase() ?? "";
+  if (["true", "on", "yes", "1"].includes(t)) return true;
+  if (["false", "off", "no", "0"].includes(t)) return false;
+  return null;
+};
+
 /** Effective settings: env vars win over the settings file, the file over built-in defaults. */
 export function resolveSettings(env: Record<string, string | undefined>, file: MemoryConfig) {
   const envServer = env.MEMORY_SERVER_URL?.trim() ?? "";
@@ -99,6 +115,7 @@ export function resolveSettings(env: Record<string, string | undefined>, file: M
     timeoutMs: num(env.MEMORY_TIMEOUT_MS, file.timeoutMs, 1500),
     project: env.MEMORY_PROJECT?.trim() || (typeof file.project === "string" ? file.project.trim() : ""),
     skillNudge: num(env.MEMORY_SKILL_NUDGE, file.skillNudge, 8),
+    showActivity: boolText(env.MEMORY_SHOW_ACTIVITY) ?? (typeof file.showActivity === "boolean" ? file.showActivity : true),
     disabled: env.MEMORY_DISABLED === "1" || file.disabled === true,
   };
 }
@@ -110,6 +127,7 @@ let SETTLE_DELAY_MS = settings.settleDelayMs;
 let CONTEXT_TIMEOUT_MS = settings.timeoutMs;
 let PROJECT_OVERRIDE = settings.project;
 let SKILL_NUDGE = settings.skillNudge;
+let SHOW_ACTIVITY = settings.showActivity;
 
 /** Re-read env + file after /memory-config or /memory-server changed the file. "disabled" needs /reload. */
 function applySettings() {
@@ -120,6 +138,7 @@ function applySettings() {
   CONTEXT_TIMEOUT_MS = next.timeoutMs;
   PROJECT_OVERRIDE = next.project;
   SKILL_NUDGE = next.skillNudge;
+  SHOW_ACTIVITY = next.showActivity;
   return next;
 }
 
@@ -150,14 +169,22 @@ export const SETTINGS: Record<SettingKey, { env: string; help: string; parse: (v
     help: "after a run with this many tool calls, hint the agent to save the procedure as a skill (0 = off)",
     parse: (v) => positiveInt(v, 0),
   },
+  showActivity: {
+    env: "MEMORY_SHOW_ACTIVITY",
+    help: "show recalled memories and curation results as cards in the conversation",
+    parse: (v) => {
+      const b = boolText(v);
+      if (b === null) throw new Error("expected true or false");
+      return b;
+    },
+  },
   disabled: {
     env: "MEMORY_DISABLED",
     help: "turn the extension off (applies after /reload; /memory-config disabled false turns it back on)",
     parse: (v) => {
-      const t = v.trim().toLowerCase();
-      if (["true", "on", "yes", "1"].includes(t)) return true;
-      if (["false", "off", "no", "0"].includes(t)) return false;
-      throw new Error("expected true or false");
+      const b = boolText(v);
+      if (b === null) throw new Error("expected true or false");
+      return b;
     },
   },
 };
@@ -168,6 +195,7 @@ export function envOverrides(key: SettingKey, env: Record<string, string | undef
   const v = env[SETTINGS[key].env]?.trim();
   if (!v) return null;
   if (key === "disabled") return v === "1" ? v : null;
+  if (key === "showActivity") return boolText(v) === null ? null : v;
   return v;
 }
 
@@ -183,12 +211,12 @@ function describeSetting(key: SettingKey): string {
   const env = envOverrides(key);
   const eff = resolveSettings(process.env, file);
   const value =
-    key === "serverUrl" ? eff.server : key === "timeoutMs" ? eff.timeoutMs : key === "settleDelayMs" ? eff.settleDelayMs : key === "project" ? eff.project || "(git origin)" : key === "skillNudge" ? eff.skillNudge : eff.disabled;
+    key === "serverUrl" ? eff.server : key === "timeoutMs" ? eff.timeoutMs : key === "settleDelayMs" ? eff.settleDelayMs : key === "project" ? eff.project || "(git origin)" : key === "skillNudge" ? eff.skillNudge : key === "showActivity" ? eff.showActivity : eff.disabled;
   const from = env ? `env ${SETTINGS[key].env}` : file[key] !== undefined ? "settings file" : "default";
   return `${key} = ${value}  (${from})`;
 }
 
-/** Autocomplete for /memory-config: keys, "unset <key>", and true/false for disabled. */
+/** Autocomplete for /memory-config: keys, "unset <key>", and true/false for disabled / showActivity. */
 export function configCompletions(prefix: string): { value: string; label: string; description?: string }[] | null {
   const parts = prefix.split(/\s+/);
   if (parts.length <= 1) {
@@ -200,13 +228,16 @@ export function configCompletions(prefix: string): { value: string; label: strin
     const hits = SETTING_KEYS.filter((k) => k.startsWith(parts[1])).map((k) => ({ value: `unset ${k}`, label: k }));
     return hits.length ? hits : null;
   }
-  if (parts[0] === "disabled" && parts.length === 2) {
-    const hits = ["true", "false"].filter((v) => v.startsWith(parts[1])).map((v) => ({ value: `disabled ${v}`, label: v }));
+  if ((parts[0] === "disabled" || parts[0] === "showActivity") && parts.length === 2) {
+    const hits = ["true", "false"].filter((v) => v.startsWith(parts[1])).map((v) => ({ value: `${parts[0]} ${v}`, label: v }));
     return hits.length ? hits : null;
   }
   return null;
 }
 const MAX_BUFFER = 600;
+/** How long a sent turn is watched for its curation result (memory_curate card). */
+const WATCH_MS = 10 * 60_000;
+const TURN_STATUSES = new Set(["pending", "processing", "done", "skipped", "error"]);
 
 interface TurnMessage {
   role: "user" | "assistant" | "tool";
@@ -288,12 +319,134 @@ function fmtEntries(entries: EntryLite[]): string {
     .join("\n");
 }
 
+// ------------------------------------------------------- activity cards
+
+/** What the "memory_recall" card shows (stored in the hidden-from-model `details`). */
+export interface RecallCard {
+  entries: { id: number; title: string }[];
+}
+/** What the "memory_curate" card shows (an appended session entry). */
+export interface CurationCard {
+  turnId: number;
+  applied: { op: "add" | "update" | "delete"; entryId: number; title: string }[];
+  skipped: number;
+}
+
+const CARD_OPS = new Set(["add", "update", "delete"]);
+const isObj = (v: unknown): v is Record<string, unknown> => Boolean(v) && typeof v === "object" && !Array.isArray(v);
+
+/**
+ * The recall card for a /context reply, or null when nothing was recalled.
+ * Titles come from recalledEntries; an older server only sends ids (or nothing), so
+ * the ids fall back to the "- [#id] title" lines of the recall block itself.
+ */
+export function recallCard(res: { recall?: unknown; recalled?: unknown; recalledEntries?: unknown }): RecallCard | null {
+  if (typeof res.recall !== "string" || !res.recall.trim()) return null;
+  let entries: RecallCard["entries"] = [];
+  if (Array.isArray(res.recalledEntries)) {
+    entries = res.recalledEntries
+      .filter(isObj)
+      .filter((e) => typeof e.id === "number")
+      .map((e) => ({ id: e.id as number, title: typeof e.title === "string" ? e.title : "" }));
+  }
+  if (!entries.length) {
+    for (const m of res.recall.matchAll(/^- \[#(\d+)\] (.*)$/gm)) entries.push({ id: Number(m[1]), title: m[2].split(": ")[0] });
+  }
+  return entries.length ? { entries } : null;
+}
+
+/** The curation card for a finished turn, or null when it changed no memory (confirm-only, nothing, an error). */
+export function curationCard(turnId: number, status: unknown, result: unknown): CurationCard | null {
+  if (status !== "done" || !isObj(result)) return null;
+  const applied = (Array.isArray(result.applied) ? result.applied : [])
+    .filter(isObj)
+    .filter((a) => typeof a.op === "string" && CARD_OPS.has(a.op) && typeof a.entryId === "number")
+    .map((a) => ({ op: a.op as CurationCard["applied"][number]["op"], entryId: a.entryId as number, title: typeof a.title === "string" ? a.title : "" }));
+  if (!applied.length) return null;
+  // Only exact duplicates are worth a line; refused edits are in skipped too (worker.ts).
+  const skipped = Array.isArray(result.skipped) ? result.skipped.filter((x) => isObj(x) && x.reason === "duplicate").length : 0;
+  return { turnId, applied, skipped };
+}
+
+/** One-line summary of a recall card: "2 memories · A, B". */
+export function recallSummary(card: RecallCard): string {
+  const titles = card.entries.map((e) => e.title || `#${e.id}`);
+  const n = card.entries.length;
+  return `${n} ${n === 1 ? "memory" : "memories"} · ${titles.join(", ")}`;
+}
+
+/** One-line summary of a curation card: "1 added · 2 updated · 1 deleted". */
+export function curationSummary(card: CurationCard): string {
+  const n = (op: string) => card.applied.filter((a) => a.op === op).length;
+  const parts = [
+    [n("add"), "added"],
+    [n("update"), "updated"],
+    [n("delete"), "deleted"],
+  ]
+    .filter(([c]) => (c as number) > 0)
+    .map(([c, w]) => `${c} ${w}`);
+  return parts.join(" · ");
+}
+
+const OP_MARK = { add: "+", update: "~", delete: "-" } as const;
+
+/** Card lines (summary first; the rest only when expanded, like a tool result). */
+export function cardLines(kind: "recall" | "curate", data: unknown, expanded: boolean): { title: string; summary: string; detail: string[] } | null {
+  if (kind === "recall") {
+    if (!isObj(data) || !Array.isArray(data.entries)) return null;
+    const card = data as unknown as RecallCard;
+    if (!card.entries.length) return null;
+    return {
+      title: "memory_recall",
+      summary: recallSummary(card),
+      detail: expanded ? card.entries.map((e) => `#${e.id} ${e.title}`) : [],
+    };
+  }
+  if (!isObj(data) || !Array.isArray(data.applied) || !data.applied.length) return null;
+  const card = data as unknown as CurationCard;
+  return {
+    title: "memory_curate",
+    summary: curationSummary(card),
+    detail: expanded
+      ? [
+          ...card.applied.map((a) => `${OP_MARK[a.op] ?? "?"} #${a.entryId} ${a.title}`),
+          ...(card.skipped ? [`(${card.skipped} skipped as duplicates)`] : []),
+          `turn #${card.turnId}`,
+        ]
+      : [],
+  };
+}
+
+const expandHint = () => {
+  try {
+    return keyHint("app.tools.expand", "to expand");
+  } catch {
+    return "ctrl+o to expand";
+  }
+};
+
+/** A tool-call-like card (same box and colors as pi's own tool results). */
+function renderCard(kind: "recall" | "curate", data: unknown, expanded: boolean, theme: any) {
+  const lines = cardLines(kind, data, expanded);
+  if (!lines) return undefined;
+  const box = new Box(1, 1, (t: string) => theme.bg("toolSuccessBg", t));
+  let body = `${theme.fg("toolTitle", theme.bold(lines.title))} ${theme.fg("muted", lines.summary)}`;
+  if (lines.detail.length) body += `\n${lines.detail.map((l) => theme.fg("toolOutput", l)).join("\n")}`;
+  else body += theme.fg("dim", ` (${expandHint()})`);
+  box.addChild(new Text(body, 0, 0));
+  return box;
+}
+
 const SOURCE_LABEL = { env: "MEMORY_SERVER_URL", file: "settings file", default: "built-in default" } as const;
 const isSettingKey = (k: string): k is SettingKey => (SETTING_KEYS as string[]).includes(k);
 const unreachableHint = () =>
   serverSource === "env" ? "" : `\nSet the server with /memory-server http://<server>:8765 (saved to ${configPath()})`;
 
 export default function memoryAllYouNeed(pi: ExtensionAPI) {
+  // Display only, no server: registered even when the extension is off, so a resumed
+  // session's cards never fall back to pi's raw "[memory-recall]" box.
+  pi.registerMessageRenderer("memory-recall", (message, options, theme) => renderCard("recall", message.details, options.expanded, theme));
+  pi.registerEntryRenderer("memory-curate", (entry, options, theme) => renderCard("curate", entry.data, options.expanded, theme));
   if (resolveSettings(process.env, readConfig()).disabled) {
     // Off: register nothing but a /memory-config that can turn it back on.
     pi.registerCommand("memory-config", {
@@ -340,6 +493,11 @@ export default function memoryAllYouNeed(pi: ExtensionAPI) {
   const runTools = new Set<string>();
   let runUsedSkills = false;
   let skillHint = "";
+  // Activity cards: only with a UI, and a curation result only lands in the session that
+  // sent the turn (session_start/shutdown bump the generation; older watchers stop).
+  let hasUI = false;
+  let generation = 0;
+  const watchers = new Set<ReturnType<typeof setTimeout>>();
 
   const projectBody = () => (project ? { key: project.key, name: project.name, remote: project.remote } : null);
 
@@ -353,8 +511,10 @@ export default function memoryAllYouNeed(pi: ExtensionAPI) {
     flushTimer = null;
   };
 
-  async function flush() {
+  /** Send the buffered turn; `watch` = show its curation result as a card once the server is done. */
+  async function flush(watch = true) {
     cancelFlush();
+    const gen = generation; // a shutdown during the POST must not start a watcher for a gone session
     if (!buffer.some((m) => m.role === "user" || m.role === "assistant")) {
       buffer = [];
       return;
@@ -362,7 +522,8 @@ export default function memoryAllYouNeed(pi: ExtensionAPI) {
     const messages = buffer;
     buffer = [];
     try {
-      await call("POST", "/turns", { sessionId, project: projectBody(), client: os.hostname(), cwd, messages });
+      const sent = await call<{ id?: number }>("POST", "/turns", { sessionId, project: projectBody(), client: os.hostname(), cwd, messages });
+      if (watch && gen === generation && typeof sent.id === "number") watchTurn(sent.id);
     } catch (err) {
       // Keep the turn for the next attempt, bounded so a dead server cannot grow memory forever.
       buffer = [...messages, ...buffer].slice(-MAX_BUFFER);
@@ -370,7 +531,69 @@ export default function memoryAllYouNeed(pi: ExtensionAPI) {
     }
   }
 
+  /**
+   * Poll the turn until the server has curated it, then append a memory_curate card when
+   * memories changed. Every 3s for the first 30s, then every 10s, for at most WATCH_MS;
+   * three failed polls in a row (old server without the route, server down, a reply
+   * without a known status) give up, and so does a switch to another server.
+   * Never throws and never blocks pi.
+   */
+  function watchTurn(id: number) {
+    if (!SHOW_ACTIVITY || !hasUI) return;
+    const gen = generation;
+    const server = SERVER; // turn ids are per server: a /memory-server switch ends the watch
+    const started = Date.now();
+    let failures = 0;
+    const schedule = () => {
+      const elapsed = Date.now() - started;
+      if (elapsed > WATCH_MS) return;
+      const timer = setTimeout(() => {
+        watchers.delete(timer);
+        void tick();
+      }, elapsed < 30_000 ? 3_000 : 10_000);
+      timer.unref?.();
+      watchers.add(timer);
+    };
+    const tick = async () => {
+      if (gen !== generation || server !== SERVER) return;
+      let t: { status?: string; result?: unknown } | null = null;
+      try {
+        t = await call<{ status?: string; result?: unknown }>("GET", `/turns/${id}/status`, undefined, 5000);
+      } catch {
+        t = null;
+      }
+      // Anything but a known status counts as a failure: an old server without the route
+      // answers 404, or 200 with the web UI's index.html (call() makes that {}).
+      if (!t || !TURN_STATUSES.has(String(t.status))) {
+        if (++failures >= 3) return;
+        t = null;
+      } else failures = 0;
+      if (gen !== generation || server !== SERVER || !SHOW_ACTIVITY) return;
+      if (t?.status === "done" || t?.status === "skipped" || t?.status === "error") {
+        const card = curationCard(id, t.status, t.result);
+        if (card) {
+          try {
+            pi.appendEntry("memory-curate", card);
+          } catch (err) {
+            console.error(`[memory] could not show the curation result: ${(err as Error).message}`);
+          }
+        }
+        return;
+      }
+      schedule();
+    };
+    schedule();
+  }
+
+  const stopWatchers = () => {
+    generation++;
+    for (const t of watchers) clearTimeout(t);
+    watchers.clear();
+  };
+
   pi.on("session_start", async (_event, ctx) => {
+    stopWatchers();
+    hasUI = ctx.hasUI;
     sessionId = ctx.sessionManager.getSessionId();
     cwd = ctx.cwd;
     project = resolveProject(cwd, PROJECT_OVERRIDE);
@@ -428,8 +651,9 @@ export default function memoryAllYouNeed(pi: ExtensionAPI) {
   pi.on("before_agent_start", async (event, ctx) => {
     cancelFlush();
     let recall = "";
+    let card: RecallCard | null = null;
     try {
-      const res = await call<{ system: string; recall: string; skillsVersion?: string }>(
+      const res = await call<{ system: string; recall: string; recalled?: number[]; recalledEntries?: unknown; skillsVersion?: string }>(
         "POST",
         "/context",
         { project: projectBody(), prompt: event.prompt },
@@ -437,6 +661,7 @@ export default function memoryAllYouNeed(pi: ExtensionAPI) {
       );
       cachedSystem = res.system;
       recall = res.recall;
+      card = SHOW_ACTIVITY && ctx.hasUI ? recallCard(res) : null;
       const wasStale = skillsStale;
       checkSkills(ctx, res.skillsVersion);
       if (warned || wasStale !== skillsStale) setStatus(ctx, okStatus());
@@ -452,7 +677,9 @@ export default function memoryAllYouNeed(pi: ExtensionAPI) {
     const hint = skillHint;
     skillHint = "";
     const content = [recall, hint].filter(Boolean).join("\n");
-    if (content) return { message: { customType: "memory-recall", content, display: false } };
+    // Shown (as a memory_recall card, see the renderer) only when memories were recalled;
+    // a hint alone stays hidden. The model gets `content` either way, never `details`.
+    if (content) return { message: { customType: "memory-recall", content, display: Boolean(card), ...(card ? { details: card } : {}) } };
     return undefined;
   });
 
@@ -483,7 +710,8 @@ export default function memoryAllYouNeed(pi: ExtensionAPI) {
   });
 
   pi.on("session_shutdown", async () => {
-    await flush();
+    stopWatchers();
+    await flush(false);
   });
 
   // ---------------------------------------------------------------- tools
@@ -890,8 +1118,8 @@ export default function memoryAllYouNeed(pi: ExtensionAPI) {
       const picked = await ctx.ui.select(`memory settings — ${configPath()}`, lines);
       if (!picked) return;
       const key = picked.split(" ")[0] as SettingKey;
-      if (key === "disabled") {
-        const v = await ctx.ui.select("disabled (applies after /reload)", ["false", "true", "unset"]);
+      if (key === "disabled" || key === "showActivity") {
+        const v = await ctx.ui.select(key === "disabled" ? "disabled (applies after /reload)" : "showActivity", ["false", "true", "unset"]);
         if (!v) return;
         return v === "unset" ? saveSetting(ctx, key, undefined) : setFromText(ctx, key, v);
       }

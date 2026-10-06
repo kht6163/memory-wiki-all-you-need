@@ -31,9 +31,10 @@ Shown in `/config` (stored under `pluginConfigs` in `~/.claude/settings.json`). 
 | `server_url` | `MEMORY_SERVER_URL` | `http://127.0.0.1:8765` | Server URL |
 | `timeout_ms` | `MEMORY_TIMEOUT_MS` | 1500 | How long a prompt waits for the memory block |
 | `settle_delay_ms` | `MEMORY_SETTLE_DELAY_MS` | 8000 | Wait after a turn before sending it (a prompt in between sends both together) |
-| `project` | `MEMORY_PROJECT` | (git origin) | Fixed project key |
+| `project` | `MEMORY_PROJECT` | (git origin; outside git the folder: `home/<user>[/<path>]` or `path/<path>`) | Fixed project key |
 | `skill_nudge` | `MEMORY_SKILL_NUDGE` | 8 | After a turn with this many tool calls (2+ different tools) and no `skill_manage` call, hint Claude to save the procedure as a skill; `0` = off |
 | `mirror_skills` | `MEMORY_MIRROR_SKILLS` (`0` = off) | `true` | Install the server's global skills into `~/.claude/skills` |
+| `show_activity` | `MEMORY_SHOW_ACTIVITY` (`0` = off) | `true` | Log a line in the conversation when memories are recalled for a prompt (`🧠 memory_recall`) and when a turn's curation changed memories (`🧠 memory_curate`). Display only: never sent to Claude |
 
 ## Commands
 

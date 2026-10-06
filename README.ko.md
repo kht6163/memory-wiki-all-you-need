@@ -51,14 +51,14 @@ flowchart LR
 
 **메모리**
 - **강제 주입** — 정책, 고정 지시, 사용자 프로필, 프로젝트·전역 메모리 순으로 `CONTEXT_BUDGET_CHARS` 안에서 넣습니다. 메모리가 바뀔 때만 내용이 바뀌므로 프롬프트 캐시가 유지됩니다.
-- **프롬프트별 회상** — 이번 프롬프트와 관련된 나머지 메모리는 숨은 메시지(`memory-recall`)로 붙습니다.
+- **프롬프트별 회상** — 이번 프롬프트와 관련된 나머지 메모리는 `memory-recall` 메시지로 붙고, 화면에는 `memory_recall` 카드로 보입니다. 턴이 정리되어 메모리가 바뀌면 `memory_curate` 카드가 붙습니다(`showActivity`).
 - **턴 정리** — LLM이 관련 기존 메모리를 함께 보고 add / update / edit / delete / confirm을 정합니다. 모든 변경은 이력에 남아 되돌릴 수 있고, 똑같은 메모리는 다시 추가하지 않습니다.
 - **정확한 날짜** — "어제"는 정리한 날이 아니라 턴이 일어난 날(`TIMEZONE` 기준)로 적습니다. 메모리마다 어느 턴에서 추가·수정·확인됐는지도 남습니다.
 - **지난 사실** — 새 메모리가 옛 메모리를 `supersedes`로 대체하고, 임시 사실은 `valid_until`이 지나면 이력으로 넘어갑니다. 이력은 주입되지 않지만 검색할 수 있습니다.
 - **의미 검색(선택)** — 임베딩 서버(예: [infinity](https://github.com/michaelfeil/infinity) + `BAAI/bge-m3`)를 붙이면 메모리와 위키를 뜻으로도, 언어가 달라도 찾습니다. 한국어로 물어도 영어 메모리가 나옵니다. 키워드 검색은 그대로 함께 쓰고 두 순위를 합칩니다. 임베딩 서버가 죽거나 느리면 키워드 검색으로 돌아갑니다.
 - **검색 키워드** — 동의어·번역·다른 표기(`Postgres`, `포스트그레스`)는 검색과 회상에만 쓰이고 프롬프트에는 들어가지 않습니다.
 - **정리 방침** — 서버 LLM이 따를 규칙을 전역·프로젝트별로 사람이 적어 둡니다.
-- **프로젝트 구분** — git `origin` 주소를 정규화해 씁니다(`github.com/foo/bar`, worktree는 메인 저장소 기준). 원격이 없으면 `local/<폴더명>`, git 밖이면 전역만 씁니다. 설정 파일의 `project`(또는 `MEMORY_PROJECT`)로 직접 지정할 수 있습니다.
+- **프로젝트 구분** — git `origin` 주소를 정규화해 씁니다(`github.com/foo/bar`, worktree는 메인 저장소 기준). 원격이 없으면 `local/<폴더명>`. git 밖이면 전역으로 보내지 않고 그 폴더를 프로젝트로 씁니다: 홈 디렉터리(`~`)는 `home/<사용자명>`, 그 아래 폴더는 `home/<사용자명>/<경로>`, 그 밖은 `path/<절대 경로>`. 설정 파일의 `project`(또는 `MEMORY_PROJECT`)로 직접 지정할 수 있습니다.
 
 **그래프**
 - **엔티티와 관계** — 메모리는 엔티티를 언급하고 `because`·`depends_on`·`supersedes`·`related`로 서로 이어집니다. 턴 정리와 같은 호출에서 정하므로 LLM을 더 부르지 않습니다. 엔티티는 프로젝트끼리 공유되고, 이름을 바꾸거나 합치면 예전 이름이 별칭으로 남습니다.
@@ -252,6 +252,7 @@ Claude Code는 **memory-wiki** 플러그인으로 같은 서버에 붙습니다.
 | `timeoutMs` | `MEMORY_TIMEOUT_MS` | 1500 | 주입할 메모리를 조회하는 타임아웃 |
 | `project` | `MEMORY_PROJECT` | (자동) | 프로젝트 키 직접 지정 |
 | `skillNudge` | `MEMORY_SKILL_NUDGE` | 8 | 한 번의 응답에서 도구를 이만큼(2종류 이상) 쓰고 `skill_manage`를 부르지 않았으면, 다음 요청 때 에이전트에게 절차를 스킬로 저장할지 살펴보라고 알림. `0`이면 끔 |
+| `showActivity` | `MEMORY_SHOW_ACTIVITY` | true | 요청에 끌어온 메모리(`memory_recall`)와 턴 정리 결과(`memory_curate`: 추가·수정·삭제)를 대화 중간에 도구 호출 같은 카드로 보여 줌. `ctrl+o`로 펼침. 화면 표시만 바뀌고 모델이 받는 내용은 그대로 |
 | `disabled` | `MEMORY_DISABLED=1` | `false` | 확장 끄기(`/memory-config disabled false`로 다시 켬) |
 
 </details>

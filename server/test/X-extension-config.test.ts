@@ -149,7 +149,7 @@ test("ADR-0033: /memory-config with no arguments lets you pick a setting and typ
   ctx.answers.push(undefined); // cancelled: nothing changes
   await cfg.handler("", ctx);
   assert.equal(ctx.asked[0].kind, "select");
-  assert.deepEqual(ctx.asked[0].options!.map((o) => o.split(" ")[0]), ["serverUrl", "timeoutMs", "settleDelayMs", "project", "skillNudge", "disabled"]);
+  assert.deepEqual(ctx.asked[0].options!.map((o) => o.split(" ")[0]), ["serverUrl", "timeoutMs", "settleDelayMs", "project", "skillNudge", "showActivity", "disabled"]);
   const pick = ctx.asked[0].options!.find((o) => o.startsWith("settleDelayMs"))!;
   ctx.answers.push(pick, "9000");
   await cfg.handler("", ctx);
@@ -166,7 +166,7 @@ test("ADR-0033: /memory-config with no arguments lets you pick a setting and typ
 
 test("ADR-0033: /memory-config autocompletes keys, unset targets and true/false", async () => {
   const { configCompletions } = await import("../../pi-extension/index.ts");
-  assert.deepEqual(configCompletions("")!.map((i) => i.label), ["serverUrl", "timeoutMs", "settleDelayMs", "project", "skillNudge", "disabled", "unset"]);
+  assert.deepEqual(configCompletions("")!.map((i) => i.label), ["serverUrl", "timeoutMs", "settleDelayMs", "project", "skillNudge", "showActivity", "disabled", "unset"]);
   assert.deepEqual(configCompletions("se")!.map((i) => i.value), ["serverUrl ", "settleDelayMs "]);
   assert.deepEqual(configCompletions("unset p")!.map((i) => i.value), ["unset project"]);
   assert.deepEqual(configCompletions("disabled t")!.map((i) => i.value), ["disabled true"]);
@@ -204,6 +204,8 @@ test("ADR-0033: when disabled, only /memory-config is registered and it can turn
   mod.default(off.api);
   assert.deepEqual([...off.commands.keys()], ["memory-config"]);
   assert.equal(off.tools.size, 0);
+  // Card renderers stay registered (display only): a resumed session never shows raw recall text (G-074).
+  assert.deepEqual([...off.messageRenderers.keys(), ...off.entryRenderers.keys()], ["memory-recall", "memory-curate"]);
   const ctx = makeCtx(agentDir);
   await off.commands.get("memory-config")!.handler("", ctx);
   assert.match(ctx.notices.at(-1)!.msg, /\/memory-config disabled false/);

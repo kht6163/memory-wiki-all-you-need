@@ -51,14 +51,14 @@ flowchart LR
 
 **Memory**
 - **Forced injection** — policy, standing instructions, user profile, then project and global memories, within `CONTEXT_BUDGET_CHARS`. The block only changes when memory changes, so the prompt cache survives.
-- **Per-prompt recall** — related memories are attached as a hidden `memory-recall` message.
+- **Per-prompt recall** — related memories are attached as a `memory-recall` message, shown as a `memory_recall` card; once a turn is curated, a `memory_curate` card lists the memories it changed (`showActivity`).
 - **Per-turn curation** — the LLM sees related existing memories and returns add / update / edit / delete / confirm; every change is versioned and revertible, and exact duplicates are skipped.
 - **Real dates** — "yesterday" is resolved to the day the turn happened (`TIMEZONE`), and each memory records which turns added, edited or confirmed it.
 - **Superseded facts** — a new memory can replace an old one via `supersedes`, and `valid_until` expires temporary facts; history stays searchable but is never injected.
 - **Semantic search (optional)** — with an embedding server (e.g. [infinity](https://github.com/michaelfeil/infinity) serving `BAAI/bge-m3`), memories and wiki pages are also found by meaning and across languages: a Korean question finds an English memory. Keyword search stays, and the two rankings are fused. If the embedding server is down or slow, search falls back to keywords.
 - **Search keywords** — synonyms and translations (`Postgres`, `포스트그레스`) help search and recall without entering the prompt.
 - **Curation guidelines** — global and per-project rules for the server LLM, written by humans.
-- **Project detection** — the normalized git `origin` URL (`github.com/foo/bar`; worktrees use the main repo), `local/<dir>` without a remote, global-only outside git. Override with `project` in the settings file (or `MEMORY_PROJECT`).
+- **Project detection** — the normalized git `origin` URL (`github.com/foo/bar`; worktrees use the main repo), `local/<dir>` without a remote. Outside git the folder itself is the project, never global: `home/<user>` in the home directory, `home/<user>/<path>` under it, `path/<absolute path>` elsewhere. Override with `project` in the settings file (or `MEMORY_PROJECT`).
 
 **Graph**
 - **Entities and relations** — memories mention entities and link via `because`, `depends_on`, `supersedes`, `related`, decided in the same curation call (no extra LLM call). Entities are shared across projects; renamed or merged names stay as aliases.
@@ -252,6 +252,7 @@ Set **Memory server URL** (memory-wiki) in `/config` to `http://<server>:8765`, 
 | `timeoutMs` | `MEMORY_TIMEOUT_MS` | 1500 | Timeout for fetching the injected memory |
 | `project` | `MEMORY_PROJECT` | (auto) | Override the project key |
 | `skillNudge` | `MEMORY_SKILL_NUDGE` | 8 | After a run with this many tool calls (2+ different tools) and no `skill_manage` call, hint the agent to save the procedure as a skill; `0` = off |
+| `showActivity` | `MEMORY_SHOW_ACTIVITY` | true | Show recalled memories (`memory_recall`) and curation results (`memory_curate`: added / updated / deleted) as tool-like cards in the conversation; `ctrl+o` expands them. Display only: what the model receives does not change |
 | `disabled` | `MEMORY_DISABLED=1` | `false` | Disable the extension (`/memory-config disabled false` turns it back on) |
 
 </details>

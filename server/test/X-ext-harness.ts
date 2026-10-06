@@ -173,6 +173,11 @@ export interface FakePi {
   handlers: Map<string, Handler[]>;
   tools: Map<string, { name: string; execute: (id: string, params: any, ...rest: any[]) => Promise<any> }>;
   commands: Map<string, { description?: string; handler: (args: string, ctx: any) => Promise<void> }>;
+  /** Renderers by customType (registerMessageRenderer / registerEntryRenderer). */
+  messageRenderers: Map<string, (message: any, options: any, theme: any) => unknown>;
+  entryRenderers: Map<string, (entry: any, options: any, theme: any) => unknown>;
+  /** pi.appendEntry calls, in order. */
+  entries: { customType: string; data: any }[];
   /** Run every handler for an event in order, like pi; returns the last non-undefined result. */
   emit(event: string, payload: any, ctx: FakeCtx): Promise<unknown>;
 }
@@ -181,6 +186,9 @@ export function makePi(): FakePi {
   const handlers = new Map<string, Handler[]>();
   const tools: FakePi["tools"] = new Map();
   const commands: FakePi["commands"] = new Map();
+  const messageRenderers: FakePi["messageRenderers"] = new Map();
+  const entryRenderers: FakePi["entryRenderers"] = new Map();
+  const entries: FakePi["entries"] = [];
   const api = {
     on(event: string, handler: Handler) {
       const list = handlers.get(event) ?? [];
@@ -194,12 +202,24 @@ export function makePi(): FakePi {
     registerCommand(name: string, def: any) {
       commands.set(name, def);
     },
+    registerMessageRenderer(customType: string, r: any) {
+      messageRenderers.set(customType, r);
+    },
+    registerEntryRenderer(customType: string, r: any) {
+      entryRenderers.set(customType, r);
+    },
+    appendEntry(customType: string, data?: unknown) {
+      entries.push({ customType, data });
+    },
   };
   return {
     api: api as unknown as ExtensionAPI,
     handlers,
     tools,
     commands,
+    messageRenderers,
+    entryRenderers,
+    entries,
     async emit(event, payload, ctx) {
       let result: unknown = undefined;
       for (const h of handlers.get(event) ?? []) {
@@ -254,4 +274,20 @@ export async function quietErrors<T>(fn: () => Promise<T>): Promise<{ result: T;
   } finally {
     console.error = orig;
   }
+}
+
+/** A theme stand-in for renderers: marks colors as <name:…> so tests can read the text. */
+export const plainTheme = {
+  fg: (c: string, t: string) => `<${c}:${t}>`,
+  bg: (_c: string, t: string) => t,
+  bold: (t: string) => t,
+};
+
+/** Render a pi-tui component at a width and strip the marks plainTheme added. */
+export function renderText(component: any, width = 120): string {
+  if (!component) return "";
+  return (component.render(width) as string[])
+    .map((l) => l.replace(/<[a-zA-Z]+:/g, "").replace(/>/g, "").trim())
+    .filter(Boolean)
+    .join("\n");
 }
