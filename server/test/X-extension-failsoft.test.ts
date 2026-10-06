@@ -54,7 +54,8 @@ test("G-010: 서버가 정상이면 메모리 블록을 system 섹션에, 회상
   assert.deepEqual(res, { message: { customType: "memory-recall", content: "RECALL", display: false } });
   const req = srv.requests.at(-1)!;
   assert.equal(req.path, "/api/context");
-  assert.deepEqual(req.body, { project: { key: "github.com/test/demo", name: "demo", remote: null }, prompt: "first" });
+  // agent / sessionId: for the server's recall measurement (ADR-0050).
+  assert.deepEqual(req.body, { project: { key: "github.com/test/demo", name: "demo", remote: null }, prompt: "first", agent: "pi", sessionId: "sess-x" });
   assert.equal(ctx.status.at(-1), "🧠 demo");
   assert.equal(ctx.notices.length, 0);
 });

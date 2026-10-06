@@ -27,6 +27,8 @@ process.env.WEB_DIR = path.join(dir, "web");
 // Server switches the developer may have exported to try them (WIKI_COMPOSE=0 would 409 every compose suite).
 delete process.env.WIKI_COMPOSE;
 delete process.env.DEBUG_MODE;
+// Debug logs always go under the temporary DATA_DIR, whatever the shell exports.
+for (const k of ["DEBUG_LOG_DIR", "DEBUG_LOG_KEEP_DAYS", "DEBUG_LOG_MAX_MB", "DEBUG_LOG_MAX_STRING"]) delete process.env[k];
 process.on("exit", () => fs.rmSync(dir, { recursive: true, force: true }));
 installFakeLlm(process.env.LLM_BASE_URL);
 // Embeddings stay off (EMBED_BASE_URL unset) so every other suite runs keyword-only;

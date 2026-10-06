@@ -58,6 +58,7 @@ import {
 import { mergePreview, mergeProject } from "./project-merge.ts";
 import { dismissSimilarProjects, similarProjects } from "./project-similar.ts";
 import { deleteTurn, enqueueTurn, getTurn, listTurns, retryTurn } from "./turns.ts";
+import { agentKind, noteTurnUse, recallReport, rememberRecall } from "./recall-use.ts";
 import { config, llmEnabled } from "./config.ts";
 import {
   applyProposal,
@@ -246,6 +247,8 @@ api.put("/debug", async (c) => {
   setDebug(b.enabled);
   return c.json({ ...debugState(), dir: config.debug.logDir, keepDays: config.debug.keepDays, maxMbPerDay: config.debug.maxBytesPerDay / 1048576, files: listDebugLogs() });
 });
+/** Recall measurement over the debug log (ADR-0050): ?days= (1-60, default 14). */
+api.get("/debug/recall-report", async (c) => c.json(await recallReport(num(c.req.query("days")) ?? 14)));
 api.get("/debug/logs/:date", (c) => {
   const date = c.req.param("date");
   if (!/^\d{4}-\d{2}-\d{2}$/.test(date)) throw new HttpError(400, "date must be YYYY-MM-DD");
@@ -261,14 +264,18 @@ api.get("/debug/logs/:date", (c) => {
 
 /** Called by the pi extension before every run. Upserts the project. */
 api.post("/context", async (c) => {
-  const b = await body<{ project?: ProjectRef | null; prompt?: string }>(c);
+  // agent / sessionId (v0.24.0 clients): for the measurement only (ADR-0050); older clients send neither.
+  const b = await body<{ project?: ProjectRef | null; prompt?: string; agent?: unknown; sessionId?: unknown }>(c);
   const project = projectFromRef(b.project);
   const prompt = String(b.prompt ?? "").slice(0, 8000);
   const { debug, ...ctx } = await buildContext(project, prompt);
   // Only prompt-specific recall counts as use; the stable block is shown every time.
   recordUsage(ctx.recalled, "recall");
   recordShown(ctx.included);
-  if (debug) logContext("context", project, prompt, ctx, debug);
+  const agent = agentKind(b.agent);
+  const session = typeof b.sessionId === "string" && b.sessionId.length <= 200 ? b.sessionId : null;
+  if (debug) logContext("context", project, prompt, ctx, { agent, session, ...debug });
+  rememberRecall(session, { prompt, recalled: ctx.recalled, agent, projectId: project?.id ?? null });
   // The extension compares this with the skills it mirrored and says so when they differ.
   // recalledEntries: the extension's "memory recall" card (what was injected for this prompt) —
   // the title per line, the start of the body when the card is expanded.
@@ -292,6 +299,12 @@ api.get("/context/preview", async (c) => {
 api.post("/turns", async (c) => {
   const b = await body<Parameters<typeof enqueueTurn>[0]>(c);
   const t = enqueueTurn(b);
+  // Did the agent use what recall gave this session's prompts? (debug mode, ADR-0050)
+  try {
+    noteTurnUse(t);
+  } catch (err) {
+    console.warn(`[recall-use] turn ${t.id}: ${(err as Error).message}`);
+  }
   return c.json({ id: t.id, status: t.status }, 202);
 });
 

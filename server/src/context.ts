@@ -93,6 +93,8 @@ export interface RecallDebug {
   mentioned: number[];
   extras: { id: number; via: string }[];
   cut: number[];
+  /** Candidates each recall gate dropped (ADR-0046, measured per ADR-0050). */
+  gated?: { common: number; minZ: number; keywordMinZ: number };
   embed?: QueryInfo;
   ms?: number;
 }
@@ -190,7 +192,9 @@ export function buildContextWith(project: Project | null, prompt: string, vector
     // Recall's gates (ADR-0046): common words and a cosine that does not stand out are no evidence.
     const gate = { commonRatio: config.recallCommonRatio, minZ: config.embed.recallMinZ, keywordMinZ: config.embed.recallKeywordMinZ };
     const semantic = { vector, minSimilarity: config.embed.recallMinSimilarity, gate };
-    const hits = searchEntries(prompt, { projectId: pid, limit: config.recallLimit, excludeIds: used, boostEntities: mentioned, ...semantic });
+    const gated = debug ? { common: 0, minZ: 0, keywordMinZ: 0 } : undefined;
+    const hits = searchEntries(prompt, { projectId: pid, limit: config.recallLimit, excludeIds: used, boostEntities: mentioned, ...semantic, gated });
+    if (debug) debug.gated = gated;
     if (debug) debug.hits = hits.map((h) => ({ id: h.entry.id, score: h.score, keyword: h.keyword, similarity: h.similarity, z: h.z, terms: h.terms }));
     if (debug) debug.mentioned = mentioned;
     for (const h of hits) {

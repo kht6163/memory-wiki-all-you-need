@@ -226,6 +226,24 @@ export function debugLogStream(date: string, type?: string): ReadableStream<Uint
   });
 }
 
+/** One day's events of the given types, parsed (bad lines skipped). Streams the file. */
+export async function* debugEvents(date: string, types: readonly string[]): AsyncGenerator<Record<string, unknown>> {
+  if (!DATE_RE.test(date)) throw new RangeError("date must be YYYY-MM-DD");
+  const file = fileOf(date);
+  if (!fs.existsSync(file)) return;
+  const needles = types.map((t) => `"type":${JSON.stringify(t)}`);
+  const lines = createInterface({ input: fs.createReadStream(file), crlfDelay: Infinity });
+  for await (const l of lines) {
+    if (!needles.some((n) => l.includes(n))) continue;
+    try {
+      const ev = JSON.parse(l) as Record<string, unknown>;
+      if (types.includes(String(ev.type))) yield ev;
+    } catch {
+      // a half-written line
+    }
+  }
+}
+
 /** One day's lines as text (tests, small files). */
 export async function readDebugLog(date: string, type?: string): Promise<string | null> {
   const stream = debugLogStream(date, type);

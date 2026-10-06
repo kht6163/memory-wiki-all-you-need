@@ -171,6 +171,21 @@ export interface SessionHit {
 }
 
 /** Debug mode (ADR-0035): the switch, where day files go and which exist. */
+/** Recall measurement summed over the debug log (ADR-0050). */
+export interface RecallReport {
+  days: number;
+  from: string;
+  to: string;
+  prompts: Record<string, number>;
+  emptyRecall: number;
+  recalled: number;
+  hits: { keywordOnly: number; vectorOnly: number; both: number };
+  gated: { common: number; minZ: number; keywordMinZ: number };
+  gatedPrompts: number;
+  extras: Record<string, number>;
+  use: Record<string, { prompts: number; memories: number; used: number; cited: number }>;
+}
+
 export interface DebugInfo {
   enabled: boolean;
   source: "env" | "file" | "default";
@@ -572,6 +587,7 @@ export const api = {
   stats: () => request<Stats>("GET", "/stats"),
   debug: () => request<DebugInfo>("GET", "/debug"),
   setDebug: (enabled: boolean) => request<DebugInfo>("PUT", "/debug", { enabled }),
+  recallReport: (days: number) => request<RecallReport>("GET", `/debug/recall-report${qs({ days })}`),
   settings: () => request<Settings>("GET", "/settings"),
   skills: (project_id: number | null, opts: { deleted?: boolean } = {}) =>
     request<Skill[]>("GET", `/skills${qs({ project_id: project_id ?? 0, deleted: opts.deleted ? 1 : undefined })}`),

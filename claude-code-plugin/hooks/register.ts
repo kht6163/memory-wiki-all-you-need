@@ -220,7 +220,9 @@ async function folderProjectHere($: Api): Promise<ProjectRef | null> {
 
 async function fetchContext($: Api, prompt: string, ms: number): Promise<string> {
   try {
-    const res = await call<{ system?: string; recall?: string; recalledEntries?: unknown; skillsVersion?: string }>($, "POST", "/context", { project: projectBody(), prompt }, ms);
+    // agent / sessionId: the server's recall measurement (debug mode) pairs this prompt with its turn.
+    const body = { project: projectBody(), prompt, agent: "claude-code", sessionId: await $.session.id() };
+    const res = await call<{ system?: string; recall?: string; recalledEntries?: unknown; skillsVersion?: string }>($, "POST", "/context", body, ms);
     if (prompt.trim()) recallNote = settings.showActivity ? recallLine(res) : null;
     if (typeof res.system === "string") systemBlock = res.system;
     if (warned) $.ui.status(undefined);

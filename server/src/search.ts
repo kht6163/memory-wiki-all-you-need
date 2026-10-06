@@ -192,6 +192,8 @@ export interface SearchOptions {
    * The z gates need a vector and at least Z_MIN_CORPUS compared memories. 1 / 0 = off.
    */
   gate?: { commonRatio: number; minZ: number; keywordMinZ: number };
+  /** With a gate: counts what each gate dropped, added to this object (debug log, ADR-0050). */
+  gated?: { common: number; minZ: number; keywordMinZ: number };
 }
 
 export interface SearchHit {
@@ -275,8 +277,14 @@ export function searchEntries(query: string, opts: SearchOptions = {}): SearchHi
     const sim = stats.sims.get(id);
     return sim === undefined || stats.n < Z_MIN_CORPUS || !(stats.sd > 0) ? undefined : (sim - stats.mean) / stats.sd;
   };
+  // Which gate kept each candidate out (counted once per memory after both sides, for the debug log).
+  const dropped = new Map<number, "common" | "minZ" | "keywordMinZ">();
   if (gate && gate.minZ > 0)
-    for (const id of [...similar.keys()]) if ((zOf(id) ?? Infinity) < gate.minZ) similar.delete(id);
+    for (const id of [...similar.keys()])
+      if ((zOf(id) ?? Infinity) < gate.minZ) {
+        similar.delete(id);
+        dropped.set(id, "minZ");
+      }
   const missing = [...similar.keys()].filter((id) => !candidates.has(id));
   if (missing.length)
     for (const r of db.prepare(`SELECT * FROM entries WHERE id IN (${missing.map(() => "?").join(",")})`).all(...missing))
@@ -321,12 +329,22 @@ export function searchEntries(query: string, opts: SearchOptions = {}): SearchHi
       }
       score += best;
     }
-    if (!matched || !evidence) continue;
-    if (gate && gate.keywordMinZ > 0 && (zOf(entry.id) ?? Infinity) < gate.keywordMinZ) continue;
+    if (!matched) continue;
+    if (!evidence) {
+      if (gate) dropped.set(entry.id, "common");
+      continue;
+    }
+    if (gate && gate.keywordMinZ > 0 && (zOf(entry.id) ?? Infinity) < gate.keywordMinZ) {
+      dropped.set(entry.id, "keywordMinZ");
+      continue;
+    }
     // Reward covering more of the query.
     keyword.set(entry.id, score * (0.5 + matched / terms.length));
     if (gate) matchedWords.set(entry.id, words);
   }
+
+  // A memory a gate dropped on one side may still be in on the other: count only those left out.
+  if (opts.gated) for (const [id, why] of dropped) if (!keyword.has(id) && !similar.has(id)) opts.gated[why]++;
 
   // Without a query vector the keyword score is the score (unchanged ranking).
   // With one, the two ranked lists are fused (reciprocal rank fusion): their

@@ -23,6 +23,7 @@
 }
 .debug-file {
   display: flex;
+  flex-direction: row; /* .list-row stacks by default */
   align-items: center;
   gap: var(--space-2);
 }
@@ -36,4 +37,9 @@
   grid-column: 1 / -1;
   display: block;
   margin-top: calc(-1 * var(--space-1));
+}
+/* 회상 측정 (ADR-0050) */
+.recall-measure > dd {
+  flex-wrap: wrap;
+  gap: var(--space-1) var(--space-3);
 }

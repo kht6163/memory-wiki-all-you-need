@@ -1,5 +1,6 @@
 import "./debug.css";
-import { api, type DebugInfo } from "../api.ts";
+import { useState } from "react";
+import { api, type DebugInfo, type RecallReport } from "../api.ts";
 import { Icon } from "../components/Icon.tsx";
 import { PageHeader } from "../components/PageHeader.tsx";
 import { SkeletonList } from "../components/Skeleton.tsx";
@@ -52,6 +53,7 @@ export function DebugPage() {
               <span className="callout-text">프롬프트와 대화 내용이 그대로 기록됩니다(알려진 비밀값 형태는 가림). 필요한 동안만 켜 두세요.</span>
             </div>
           )}
+          <RecallMeasure />
           <div className="section-head">
             <h2>날짜별 기록</h2>
             <span className="count">{data.files.length}</span>
@@ -80,5 +82,95 @@ export function DebugPage() {
         </>
       )}
     </article>
+  );
+}
+
+const AGENT: Record<string, string> = { pi: "pi", "claude-code": "Claude Code", "?": "알 수 없음(옛 확장)" };
+const pct = (a: number, b: number) => (b ? `${Math.round((a / b) * 100)}%` : "–");
+const sum = (o: Record<string, number>) => Object.values(o).reduce((a, b) => a + b, 0);
+
+/**
+ * Recall measurement (ADR-0050): what recall injected over a period and whether the agent used
+ * it, summed from the debug log. Numbers only cover days with debug mode on.
+ */
+function RecallMeasure() {
+  const [days, setDays] = useState(14);
+  const { data: r, error, loading } = useData(() => api.recallReport(days), [days]);
+  const prompts = r ? sum(r.prompts) : 0;
+  const hits = r ? r.hits.keywordOnly + r.hits.vectorOnly + r.hits.both : 0;
+  return (
+    <>
+      <div className="section-head">
+        <h2>회상 측정</h2>
+        <select aria-label="측정 기간" value={days} onChange={(e) => setDays(Number(e.target.value))}>
+          {[1, 7, 14, 30].map((d) => (
+            <option key={d} value={d}>
+              최근 {d}일
+            </option>
+          ))}
+        </select>
+      </div>
+      <p className="section-desc">
+        디버그 기록에서 모은 회상 통계입니다. "쓰임"은 에이전트의 답이나 도구 호출에 그 메모리의 <code>#id</code>가 나오거나, 질문에 없던 그 메모리의 드문 단어가 2개 이상 나온 경우입니다(추정치). 디버그 모드가 꺼져 있던 날은 빠집니다.
+      </p>
+      <ErrorBox error={error} />
+      {loading && !r && <SkeletonList rows={2} />}
+      {r && (
+        <dl className="card debug-state recall-measure">
+          <dt>기간</dt>
+          <dd className="tabular">
+            {r.from} ~ {r.to}
+          </dd>
+          <dt>프롬프트</dt>
+          <dd className="tabular">
+            {prompts}개
+            {Object.entries(r.prompts).map(([k, n]) => (
+              <span key={k} className="muted small">
+                {AGENT[k] ?? k} {n}
+              </span>
+            ))}
+          </dd>
+          <dt>회상</dt>
+          <dd className="tabular">
+            평균 {prompts ? (r.recalled / prompts).toFixed(1) : "–"}개 · 빈 회상 {r.emptyRecall}번({pct(r.emptyRecall, prompts)})
+          </dd>
+          <dt>찾은 경로</dt>
+          <dd className="tabular">
+            단어만 {r.hits.keywordOnly} · 뜻만 {r.hits.vectorOnly} · 둘 다 {r.hits.both}
+            <span className="muted small">뜻만 {pct(r.hits.vectorOnly, hits)}</span>
+          </dd>
+          <dt>관문이 거름</dt>
+          <dd className="tabular">
+            {r.gatedPrompts ? (
+              <>
+                흔한 단어 {r.gated.common} · 뜻 z {r.gated.minZ} · 단어 적중의 뜻 z {r.gated.keywordMinZ}
+                <span className="muted small">프롬프트 {r.gatedPrompts}개 기준</span>
+              </>
+            ) : (
+              "기록 없음 — 서버 0.24.0부터 셉니다"
+            )}
+          </dd>
+          <dt>그래프 덧붙임</dt>
+          <dd className="tabular">
+            {Object.keys(r.extras).length
+              ? Object.entries(r.extras)
+                  .sort((a, b) => b[1] - a[1])
+                  .map(([k, n]) => `${k} ${n}`)
+                  .join(" · ")
+              : "없음"}
+          </dd>
+          <dt>쓰임</dt>
+          <dd className="tabular">
+            {Object.keys(r.use).length
+              ? Object.entries(r.use).map(([k, u]) => (
+                  <span key={k}>
+                    {AGENT[k] ?? k}: 메모리 {u.memories}개 중 {u.used}개({pct(u.used, u.memories)}), #id 인용 {u.cited} · 프롬프트 {u.prompts}
+                  </span>
+                ))
+              : "아직 없음 — 새 확장(0.24.0 이상)이 보낸 턴부터 셉니다"}
+          </dd>
+        </dl>
+      )}
+    </>
   );
 }
