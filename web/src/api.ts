@@ -125,6 +125,8 @@ export interface TurnSummary {
   project_name: string | null;
   session_id: string;
   client: string | null;
+  /** The client kind that sent the turn ("claude-code"); null for the pi extension. */
+  agent?: string | null;
   status: "pending" | "processing" | "done" | "skipped" | "error";
   error: string | null;
   created_at: string;
@@ -144,7 +146,7 @@ export interface TurnMessage {
 
 export interface TurnDetail extends Omit<TurnSummary, "prompt" | "applied" | "note" | "project_name"> {
   cwd: string | null;
-  payload: { messages: TurnMessage[] };
+  payload: { messages: TurnMessage[]; agent?: string };
   result: {
     ops: unknown[];
     applied: TurnSummary["applied"];

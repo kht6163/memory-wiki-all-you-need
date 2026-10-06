@@ -1,0 +1,12 @@
+{
+  "name": "memory-wiki-all-you-need",
+  "owner": { "name": "kht6163" },
+  "description": "Central memory + LLM wiki server clients",
+  "plugins": [
+    {
+      "name": "memory-wiki",
+      "source": "./claude-code-plugin",
+      "description": "Central memory + LLM wiki for Claude Code (a mod: Claude Code v2.1.287 or later)"
+    }
+  ]
+}

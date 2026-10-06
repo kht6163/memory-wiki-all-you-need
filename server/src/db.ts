@@ -97,6 +97,10 @@ export interface TurnMessage {
 
 export interface TurnPayload {
   messages: TurnMessage[];
+  /** Which client sent the turn ("claude-code"); absent for the pi extension, which never said. */
+  agent?: string;
+  /** The client's batch id (one turn per session and id; see enqueueTurn). */
+  batch?: string;
 }
 
 export interface TurnResult {

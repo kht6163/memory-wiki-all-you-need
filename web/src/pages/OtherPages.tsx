@@ -544,6 +544,9 @@ export function ActivityPage() {
 
 // ----------------------------------------------------------------- turns
 
+/** The client that sent a turn, when it said (the pi extension does not). */
+const AGENT_LABEL: Record<string, string> = { "claude-code": "Claude Code", pi: "pi" };
+const agentLabel = (a: string | null | undefined) => (a ? (AGENT_LABEL[a] ?? a) : null);
 const STATUS_LABEL: Record<TurnSummary["status"], string> = { pending: "대기", processing: "정리 중", done: "완료", skipped: "건너뜀", error: "실패" };
 const STATUS_FILTERS = ["", "pending", "done", "skipped", "error"] as const;
 
@@ -612,6 +615,12 @@ export function TurnsPage({ projectId, status }: { projectId?: number; status?: 
                   <>
                     <span>·</span>
                     <span>{t.client}</span>
+                  </>
+                )}
+                {agentLabel(t.agent) && (
+                  <>
+                    <span>·</span>
+                    <span>{agentLabel(t.agent)}</span>
                   </>
                 )}
                 {t.applied.length > 0 && <OpCounts applied={t.applied} />}
@@ -809,6 +818,12 @@ export function TurnPage({ id }: { id: number }) {
             <>
               <span>·</span>
               <span>{t.client}</span>
+            </>
+          )}
+          {agentLabel(t.payload.agent) && (
+            <>
+              <span>·</span>
+              <span>{agentLabel(t.payload.agent)}</span>
             </>
           )}
           {t.cwd && (

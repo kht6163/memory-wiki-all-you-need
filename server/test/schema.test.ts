@@ -235,6 +235,16 @@ INSERT INTO revisions (entry_id, action, title, body, category, author, turn_id,
     assert.throws(() => db.exec(`INSERT INTO skills (name, description, body) VALUES ('deploy', 'twice', 'b')`), /UNIQUE/);
   });
 
+  test("v18: turns get an index by session (batch id lookups), rows untouched", () => {
+    const db = fresh();
+    migrate(db, MIGRATIONS.filter((m) => m.version <= 17));
+    db.exec(`INSERT INTO turns (session_id, payload, text) VALUES ('s1', '{"messages":[]}', '')`);
+    migrate(db);
+    const plan = db.prepare(`EXPLAIN QUERY PLAN SELECT id FROM turns WHERE session_id = ? AND json_extract(payload, '$.batch') = ?`).all("s1", "b").map((r) => String(r.detail));
+    assert.ok(plan.some((d) => d.includes("turns_session")), plan.join(" | "));
+    assert.equal((db.prepare(`SELECT COUNT(*) AS n FROM turns`).get() as { n: number }).n, 1);
+  });
+
   test("G-024: released steps are numbered 1..N without gaps", () => {
     assert.deepEqual(MIGRATIONS.map((m) => m.version), MIGRATIONS.map((_, i) => i + 1));
   });

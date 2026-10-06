@@ -2,7 +2,7 @@
 
 # memory-wiki-all-you-need
 
-**Central memory + LLM wiki server for the [pi](https://github.com/earendil-works/pi) coding agent.**
+**Central memory + LLM wiki server for the [pi](https://github.com/earendil-works/pi) coding agent — and Claude Code.**
 
 [![CI](https://github.com/kht6163/memory-wiki-all-you-need/actions/workflows/ci.yml/badge.svg)](https://github.com/kht6163/memory-wiki-all-you-need/actions/workflows/ci.yml)
 [![npm](https://img.shields.io/npm/v/pi-memory-wiki-all-you-need)](https://www.npmjs.com/package/pi-memory-wiki-all-you-need)
@@ -115,7 +115,7 @@ Docker Compose example (put `LLM_API_KEY` in `.env`):
 ```yaml
 services:
   memory:
-    image: kht6163/memory-wiki-all-you-need:0.17   # amd64 / arm64
+    image: kht6163/memory-wiki-all-you-need:0.18   # amd64 / arm64
     restart: unless-stopped
     environment:
       LLM_BASE_URL: http://<llm-host>:8317/v1
@@ -137,7 +137,7 @@ mkdir -p data && sudo chown 1000:1000 data
 docker run -d --name memory-wiki --restart unless-stopped \
   -p 127.0.0.1:8765:8765 -v "$PWD/data:/data" \
   -e LLM_BASE_URL=http://<llm-host>:8317/v1 -e LLM_API_KEY=<key> -e TIMEZONE=Asia/Seoul \
-  kht6163/memory-wiki-all-you-need:0.17
+  kht6163/memory-wiki-all-you-need:0.18
 ```
 
 **Optional: semantic search.** Add an embedding service to the same compose file. bge-m3 is multilingual and runs on CPU (about 55 ms per short query; the model, about 2.3 GB, is downloaded on first start):
@@ -194,6 +194,17 @@ Both save the URL to `~/.pi/agent/extensions/memory-wiki-all-you-need.json` (or 
 
 > [!IMPORTANT]
 > Use only one of the two. With both installed, the extension runs twice.
+
+### 3. Claude Code plugin (on each machine)
+
+Claude Code connects to the same server with the **memory-wiki** plugin, a mod (Claude Code v2.1.287 or later). In a Claude Code session:
+
+```text
+/plugin marketplace add kht6163/memory-wiki-all-you-need
+/plugin install memory-wiki@memory-wiki-all-you-need
+```
+
+Set **Memory server URL** (memory-wiki) in `/config` to `http://<server>:8765`, run `/reload-plugins`, and check with `/memory-wiki`. It does what the pi extension does — memory in every request, curation after each turn, the same tools — and a repository is one project for both agents. Global skills are installed into `~/.claude/skills/`; this project's skills stay on the server and are read with `skill_manage`. Settings and commands: [claude-code-plugin/README.md](claude-code-plugin/README.md).
 
 ## Configuration
 
@@ -268,6 +279,8 @@ Both save the URL to `~/.pi/agent/extensions/memory-wiki-all-you-need.json` (or 
 | `/memory-flush` | Send the buffered turn now instead of waiting |
 | `/wiki-compose [focus]` | Organize this session's turns into the wiki with the server LLM |
 | `/skills-sync` | Download the server's skills (global + this project) now and reload them; local edits are overwritten |
+
+In Claude Code the tools are named `mcp__memory-wiki__<name>`, and the commands are `/memory-wiki` (status; `/memory` is Claude Code's own), `/memory-pin`, `/memory-flush`, `/wiki-compose` and `/skills-sync`. Settings live in `/config` instead of `/memory-config`.
 
 ## Development
 

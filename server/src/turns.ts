@@ -54,6 +54,10 @@ export interface TurnInput {
   project?: ProjectRef | null;
   client?: string;
   cwd?: string;
+  /** The client kind, e.g. "claude-code" (kept only when it looks like one). */
+  agent?: unknown;
+  /** The client's id for this batch: a resend with the same session and id returns the first turn instead of a second one. */
+  batchId?: unknown;
   messages: unknown;
 }
 
@@ -66,8 +70,15 @@ export function enqueueTurn(input: TurnInput): Turn {
   if (!input.sessionId) throw new HttpError(400, "sessionId is required");
   const messages = sanitizeMessages(input.messages);
   if (!messages.length) throw new HttpError(400, "turn has no messages");
+  const batch = typeof input.batchId === "string" && /^[A-Za-z0-9._:-]{1,80}$/.test(input.batchId) ? input.batchId : undefined;
+  if (batch) {
+    // The client timed out on a request the server had already taken, and sent it again.
+    const seen = db.prepare(`SELECT id FROM turns WHERE session_id = ? AND json_extract(payload, '$.batch') = ? LIMIT 1`).get(input.sessionId, batch);
+    if (seen) return getTurn(Number(seen.id))!;
+  }
   const project = input.project?.key ? upsertProject(input.project) : null;
-  const payload: TurnPayload = { messages };
+  const agent = typeof input.agent === "string" && /^[a-z0-9][a-z0-9-]{0,31}$/.test(input.agent) ? input.agent : undefined;
+  const payload: TurnPayload = { messages, ...(agent ? { agent } : {}), ...(batch ? { batch } : {}) };
   const res = db
     .prepare(
       `INSERT INTO turns (project_id, session_id, client, cwd, payload, text) VALUES (?, ?, ?, ?, ?, ?)`,
@@ -120,6 +131,7 @@ export function listTurns(f: { projectId?: number; status?: string; limit?: numb
         project_name: r.project_name == null ? null : String(r.project_name),
         session_id: t.session_id,
         client: t.client,
+        agent: t.payload.agent ?? null,
         status: t.status,
         error: t.error,
         created_at: t.created_at,

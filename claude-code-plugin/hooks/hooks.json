@@ -1,0 +1,4 @@
+{
+  "description": "memory-wiki hooks module",
+  "modules": ["./register.ts"]
+}

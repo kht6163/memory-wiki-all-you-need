@@ -1,0 +1,52 @@
+{
+  "name": "memory-wiki",
+  "displayName": "memory-wiki-all-you-need",
+  "version": "0.18.0",
+  "description": "Central memory + LLM wiki for Claude Code: memory in every request, each turn curated by the server, global skills synced from the server.",
+  "author": { "name": "kht6163" },
+  "homepage": "https://github.com/kht6163/memory-wiki-all-you-need#readme",
+  "repository": "https://github.com/kht6163/memory-wiki-all-you-need",
+  "license": "MIT",
+  "keywords": ["memory", "wiki", "skills", "mod"],
+  "userConfig": {
+    "server_url": {
+      "type": "string",
+      "title": "Memory server URL",
+      "description": "The memory-wiki-all-you-need server, e.g. http://<server>:8765 (MEMORY_SERVER_URL overrides it)",
+      "default": "http://127.0.0.1:8765"
+    },
+    "timeout_ms": {
+      "type": "number",
+      "title": "Memory fetch timeout (ms)",
+      "description": "How long a prompt waits for the memory block before going on without it",
+      "default": 1500,
+      "min": 1
+    },
+    "settle_delay_ms": {
+      "type": "number",
+      "title": "Turn send delay (ms)",
+      "description": "Wait after a turn before sending it for curation; a prompt in between sends both together",
+      "default": 8000,
+      "min": 0
+    },
+    "project": {
+      "type": "string",
+      "title": "Fixed project key",
+      "description": "Use this project key instead of the git origin (empty = from git)",
+      "default": ""
+    },
+    "skill_nudge": {
+      "type": "number",
+      "title": "Skill nudge (tool calls)",
+      "description": "After a turn with this many tool calls, hint Claude to save the procedure as a skill (0 = off)",
+      "default": 8,
+      "min": 0
+    },
+    "mirror_skills": {
+      "type": "boolean",
+      "title": "Install global skills",
+      "description": "Mirror the server's global skills into the Claude Code skills folder (project skills are always read with skill_manage)",
+      "default": true
+    }
+  }
+}

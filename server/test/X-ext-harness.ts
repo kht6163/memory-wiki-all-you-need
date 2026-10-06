@@ -51,7 +51,7 @@ export async function startMockServer(): Promise<MockServer> {
     let raw = "";
     req.setEncoding("utf8");
     req.on("data", (c: string) => (raw += c));
-    req.on("end", () => {
+    req.on("end", async () => {
       let body: unknown = undefined;
       if (raw) {
         try {
@@ -77,8 +77,12 @@ export async function startMockServer(): Promise<MockServer> {
         return;
       }
       const route = mock.routes.get(rec.path.split("?")[0]);
-      res.writeHead(200, { "content-type": "application/json" });
-      res.end(JSON.stringify(route ? route(rec) : {}));
+      // A route may also return a promise (a slow server the test releases).
+      const out = (route ? await route(rec) : {}) as { __status?: number } | null;
+      // A route may answer with another status: { __status: 413, error: "…" }.
+      const status = out && typeof out === "object" && typeof out.__status === "number" ? out.__status : 200;
+      res.writeHead(status, { "content-type": "application/json" });
+      res.end(JSON.stringify(out));
     });
   });
 

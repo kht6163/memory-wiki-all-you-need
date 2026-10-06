@@ -9,3 +9,6 @@ docs/
 
 # 로컬 도구 상태 (worktree 등)
 .claude/
+
+# Claude Code가 플러그인을 --plugin-dir로 읽을 때 만드는 타입 선언
+claude-code-plugin/.claude-plugin/types/

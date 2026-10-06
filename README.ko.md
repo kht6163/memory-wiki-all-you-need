@@ -2,7 +2,7 @@
 
 # memory-wiki-all-you-need
 
-**[pi](https://github.com/earendil-works/pi) 코딩 에이전트를 위한 중앙 메모리 + LLM 위키 서버**
+**[pi](https://github.com/earendil-works/pi) 코딩 에이전트와 Claude Code를 위한 중앙 메모리 + LLM 위키 서버**
 
 [![CI](https://github.com/kht6163/memory-wiki-all-you-need/actions/workflows/ci.yml/badge.svg)](https://github.com/kht6163/memory-wiki-all-you-need/actions/workflows/ci.yml)
 [![npm](https://img.shields.io/npm/v/pi-memory-wiki-all-you-need)](https://www.npmjs.com/package/pi-memory-wiki-all-you-need)
@@ -115,7 +115,7 @@ Docker Compose 예시입니다(`LLM_API_KEY`는 `.env`에 둡니다).
 ```yaml
 services:
   memory:
-    image: kht6163/memory-wiki-all-you-need:0.17   # amd64 / arm64
+    image: kht6163/memory-wiki-all-you-need:0.18   # amd64 / arm64
     restart: unless-stopped
     environment:
       LLM_BASE_URL: http://<llm-host>:8317/v1
@@ -137,7 +137,7 @@ mkdir -p data && sudo chown 1000:1000 data
 docker run -d --name memory-wiki --restart unless-stopped \
   -p 127.0.0.1:8765:8765 -v "$PWD/data:/data" \
   -e LLM_BASE_URL=http://<llm-host>:8317/v1 -e LLM_API_KEY=<키> -e TIMEZONE=Asia/Seoul \
-  kht6163/memory-wiki-all-you-need:0.17
+  kht6163/memory-wiki-all-you-need:0.18
 ```
 
 **선택: 의미 검색.** 같은 compose 파일에 임베딩 서비스를 더합니다. bge-m3는 다국어 모델이고 CPU로 돌아갑니다(짧은 질의 하나에 약 55ms, 모델 약 2.3GB는 첫 기동 때 내려받음).
@@ -194,6 +194,17 @@ pi install npm:pi-memory-wiki-all-you-need
 
 > [!IMPORTANT]
 > 둘 중 하나만 쓰세요. 둘 다 설치하면 확장이 두 번 실행됩니다.
+
+### 3. Claude Code 플러그인 설치 (각 PC)
+
+Claude Code는 **memory-wiki** 플러그인으로 같은 서버에 붙습니다. mod 형식의 플러그인이라 Claude Code v2.1.287 이상이 필요합니다. Claude Code 세션에서 다음을 실행합니다.
+
+```text
+/plugin marketplace add kht6163/memory-wiki-all-you-need
+/plugin install memory-wiki@memory-wiki-all-you-need
+```
+
+`/config`에서 **Memory server URL**(memory-wiki)을 `http://<서버 주소>:8765`로 바꾸고 `/reload-plugins`를 실행한 뒤 `/memory-wiki`로 확인합니다. pi 확장과 같은 일을 합니다. 요청마다 메모리를 넣고, 턴마다 정리를 맡기고, 같은 도구를 줍니다. 같은 저장소라면 두 에이전트가 한 프로젝트를 함께 씁니다. 전역 스킬은 `~/.claude/skills/`에 설치되고, 이 프로젝트의 스킬은 서버에 둔 채 `skill_manage`로 읽습니다. 설정과 명령은 [claude-code-plugin/README.md](claude-code-plugin/README.md)에 있습니다.
 
 ## 설정
 
@@ -268,6 +279,8 @@ pi install npm:pi-memory-wiki-all-you-need
 | `/memory-flush` | 모아 둔 턴을 기다리지 않고 지금 보냄 |
 | `/wiki-compose [정리 방향]` | 현재 세션의 턴을 서버 LLM으로 위키에 정리 |
 | `/skills-sync` | 서버의 스킬(전역 + 이 프로젝트)을 지금 내려받아 다시 불러옴. PC에서 고친 내용은 덮어씀 |
+
+Claude Code에서는 도구 이름이 `mcp__memory-wiki__<이름>`입니다. 명령은 `/memory-wiki`(상태. `/memory`는 Claude Code 자체 명령), `/memory-pin`, `/memory-flush`, `/wiki-compose`, `/skills-sync`입니다. 설정은 `/memory-config` 대신 `/config`에서 바꿉니다.
 
 ## 개발
 

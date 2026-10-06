@@ -719,6 +719,15 @@ INSERT INTO skill_revisions (skill_id, action, name, description, body, author, 
 `);
     },
   },
+  {
+    version: 18,
+    name: "turns_by_session",
+    up(db) {
+      // A client may resend a turn with the same batch id (ADR-0041): enqueueTurn
+      // looks it up among the session's turns, which this index keeps cheap.
+      db.exec(`CREATE INDEX turns_session ON turns(session_id, id);`);
+    },
+  },
 ];
 
 /**
