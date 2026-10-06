@@ -4,7 +4,7 @@ The [Claude Code](https://code.claude.com) client for [memory-wiki-all-you-need]
 
 - **Memory in every request** — the server's memory block is a section of the system prompt, and memories related to each prompt are attached as context only Claude reads.
 - **Curation after each turn** — the turn (prompt, answers, tool calls and results) is sent to the server, whose LLM adds, updates or removes memories. A pi session and a Claude Code session in the same repository share one project.
-- **Tools** — `memory_search`, `session_search`, `memory_add`, `memory_replace`, `memory_remove`, `memory_graph`, `wiki_search`, `wiki_read`, `wiki_write`, `skill_manage` (Claude sees them as `mcp__memory-wiki__<name>`).
+- **Tools** — `memory_search`, `session_search`, `memory_add`, `memory_replace`, `memory_remove`, `memory_graph`, `wiki_search`, `wiki_read`, `wiki_write`, `skill_manage`, `memory_review` (Claude sees them as `mcp__memory-wiki__<name>`).
 - **Skills** — the server's **global** skills are installed into `~/.claude/skills/<name>/` (one way; Claude Code picks them up without a restart, and a change on the server arrives before the next prompt). **This project's** skills stay on the server: they are listed in the memory block and Claude reads one with `skill_manage` before following it. A skills folder that this plugin did not write is never touched.
 
 It is fail-soft: when the server is down or slow, a prompt waits at most `timeout_ms` and goes on without memory, and finished turns are kept on this machine and sent later.

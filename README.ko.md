@@ -269,7 +269,7 @@ Claude Code는 **memory-wiki** 플러그인으로 같은 서버에 붙습니다.
 
 ## 에이전트 도구와 명령
 
-**도구:** `memory_search`, `session_search`, `memory_add`, `memory_replace`, `memory_remove`(pi-hermes-memory와 같은 이름·target이라 두 확장을 함께 설치할 수 없음), `memory_graph`, `wiki_search`, `wiki_read`, `wiki_write`, `skill_manage`(서버 스킬 목록·보기·만들기·고치기).
+**도구:** `memory_search`, `session_search`, `memory_add`, `memory_replace`, `memory_remove`(pi-hermes-memory와 같은 이름·target이라 두 확장을 함께 설치할 수 없음), `memory_graph`, `wiki_search`, `wiki_read`, `wiki_write`, `skill_manage`(서버 스킬 목록·보기·만들기·고치기), `memory_review`(이 프로젝트와 전역의 메모리 점검 대기 제안. **모순**은 에이전트가 실제 코드·환경을 확인하고 틀린 메모리를 고친 뒤 해결로 닫음 — 합치기·고치기·삭제는 웹에서 사람이 적용).
 
 | 명령 | 하는 일 |
 |---|---|

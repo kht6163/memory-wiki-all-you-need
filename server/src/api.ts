@@ -61,6 +61,7 @@ import { deleteTurn, enqueueTurn, getTurn, listTurns, retryTurn } from "./turns.
 import { config, llmEnabled } from "./config.ts";
 import {
   applyProposal,
+  agentReview,
   applyProposals,
   retireBlockedProposals,
   dismissProposal,
@@ -719,6 +720,12 @@ api.post("/wiki/compose", async (c) => {
     if (!ids.length) throw new HttpError(400, b.session_id ? "this session has no recorded turns yet" : "every turn is already composed into this wiki");
   }
   return c.json(enqueueCompose(projectId, ids, b.instruction), 201);
+});
+
+/** memory_review: the agent lists and reads review proposals and settles conflicts (ADR-0045). */
+api.post("/agent/review", async (c) => {
+  const b = await objectBody(c);
+  return c.json(agentReview(projectFromRef(b.project as ProjectRef | null | undefined), b));
 });
 
 /** skill_manage: the agent lists, reads, creates and updates skills (never deletes). */

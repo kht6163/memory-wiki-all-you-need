@@ -177,8 +177,8 @@ test("G-072: the mirror plan writes only absent or marked folders and removes on
 
 // ------------------------------------------------------------ the mod itself
 
-test("session start: 10 tools and the commands, the project from origin's url (not the push URL), global skills mirrored", async () => {
-  assert.equal(s.tools.size, 10);
+test("session start: 11 tools and the commands, the project from origin's url (not the push URL), global skills mirrored", async () => {
+  assert.equal(s.tools.size, 11);
   for (const c of ["memory-wiki", "memory-pin", "wiki-compose", "skills-sync", "memory-flush"]) assert.ok(s.commands.has(c), c);
   assert.ok(!s.commands.has("memory"), "/memory is Claude Code's own command");
   const ctx = posts("/api/context")[0];

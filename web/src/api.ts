@@ -485,6 +485,8 @@ export interface Proposal {
     /** A REFERENCE (global/user) memory this proposal relies on or contradicts, and its version then (G-055). */
     covered_by?: number;
     covered_snap?: string;
+    /** Conflict only: how it was settled — by the agent (memory_review resolve, with what it checked) or a person. */
+    resolution?: { by: "agent" | "human"; note: string; at: string };
   };
   reason: string;
   status: "pending" | "applied" | "dismissed" | "stale";

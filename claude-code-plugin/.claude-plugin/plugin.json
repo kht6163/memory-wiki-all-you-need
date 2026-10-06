@@ -1,7 +1,7 @@
 {
   "name": "memory-wiki",
   "displayName": "memory-wiki-all-you-need",
-  "version": "0.19.1",
+  "version": "0.20.0",
   "description": "Central memory + LLM wiki for Claude Code: memory in every request, each turn curated by the server, global skills synced from the server.",
   "author": {
     "name": "kht6163"

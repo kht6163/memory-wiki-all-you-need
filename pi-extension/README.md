@@ -4,7 +4,7 @@ The [pi](https://github.com/earendil-works/pi) extension for [memory-wiki-all-yo
 
 - **Injects memory into every request** — global, user and current-project memories go into the system prompt before each turn, and related memories are recalled per prompt.
 - **Curates after each turn** — the finished turn is sent to the server, whose LLM adds, updates or removes memories.
-- **Gives the agent tools** — `memory_search`, `session_search`, `memory_add`, `memory_replace`, `memory_remove`, `memory_graph`, `wiki_search`, `wiki_read`, `wiki_write`, `skill_manage`, plus `/memory`, `/memory-config`, `/memory-server`, `/memory-pin`, `/memory-flush`, `/wiki-compose`, `/skills-sync`.
+- **Gives the agent tools** — `memory_search`, `session_search`, `memory_add`, `memory_replace`, `memory_remove`, `memory_graph`, `wiki_search`, `wiki_read`, `wiki_write`, `skill_manage`, `memory_review` (read the memory review's pending proposals; settle a conflict after checking the real code), plus `/memory`, `/memory-config`, `/memory-server`, `/memory-pin`, `/memory-flush`, `/wiki-compose`, `/skills-sync`.
 - **Brings the server's skills** — on every pi start and with `/skills-sync`, the global and current-project skills written on the server are downloaded (one way; local edits are overwritten) to `~/.pi/agent/extensions/memory-wiki-all-you-need/skills/` and offered to pi as skills. The agent saves procedures itself with `skill_manage` (create/update on the server, never delete), and you are told on the next prompt when the server's skills changed.
 
 Projects are identified by the git `origin` URL. The extension is fail-soft: if the server is down or slow, pi keeps going after a short timeout and reuses the last memory block it received.

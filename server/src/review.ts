@@ -77,6 +77,8 @@ export interface Proposal {
     covered_by?: number;
     covered_snap?: string;
     snap: Record<string, string>;
+    /** conflict only: how it was settled (memory_review resolve, or the web's "resolved" button). */
+    resolution?: { by: "agent" | "human"; note: string; at: string; snap?: Record<string, string> };
   };
   reason: string;
   status: ProposalStatus;
@@ -736,17 +738,20 @@ export function tryAddProposal(
   }
   // The same memories already have an open proposal of this kind: skip the duplicate.
   // entry_ids keeps the LLM's order (a merge keeps the first). Skip a duplicate of an open
-  // proposal, and of a dismissed one whose memories have not changed since (no re-asking).
+  // proposal, and of a dismissed one whose memories have not changed since (no re-asking) — nor of
+  // a resolved conflict whose memories are as they were when it was resolved (ADR-0045).
   const sortedKey = JSON.stringify([...ids].sort((a, b) => a - b));
   const snapKey = JSON.stringify(data.snap);
   const priorRows = db
-    .prepare(`SELECT id, entry_ids, data, status FROM review_proposals WHERE kind = ? AND status IN ('pending','dismissed') AND job_id IN (SELECT id FROM review_jobs WHERE IFNULL(project_id, 0) = (SELECT IFNULL(project_id, 0) FROM review_jobs WHERE id = ?))`)
+    .prepare(`SELECT id, entry_ids, data, status FROM review_proposals WHERE kind = ? AND (status IN ('pending','dismissed') OR (kind = 'conflict' AND status = 'applied')) AND job_id IN (SELECT id FROM review_jobs WHERE IFNULL(project_id, 0) = (SELECT IFNULL(project_id, 0) FROM review_jobs WHERE id = ?))`)
     .all(kind, jobId);
   for (const r of priorRows) {
     if (JSON.stringify((JSON.parse(String(r.entry_ids)) as number[]).sort((a, b) => a - b)) !== sortedKey) continue;
-    const prevSnap = (JSON.parse(String(r.data ?? "{}")) as Proposal["data"]).snap ?? {};
+    const prev = JSON.parse(String(r.data ?? "{}")) as Proposal["data"];
+    // A resolved conflict: compare with the versions when it was resolved (the fix may have edited them).
+    const prevSnap = (r.status === "applied" ? prev.resolution?.snap : undefined) ?? prev.snap ?? {};
     const same = JSON.stringify(Object.fromEntries(Object.keys(data.snap).map((k) => [k, prevSnap[k]]))) === snapKey;
-    if (same) return { reason: r.status === "pending" ? "duplicate" : "dismissed_before" };
+    if (same) return { reason: r.status === "pending" ? "duplicate" : r.status === "applied" ? "resolved_before" : "dismissed_before" };
     // An open proposal built on older versions can never apply; retire it so the fresh one counts.
     if (r.status === "pending") decide(Number(r.id), "stale");
   }
@@ -840,13 +845,15 @@ export function listProposals(f: { status?: ProposalStatus; jobId?: number; proj
       ...p,
       entries: p.entry_ids.map((id) => {
         const e = getEntry(id);
-        return e ? { ...e, entities: entityNamesOf(id), changed: versionOf(id) !== p.data.snap[String(id)] || entryState(e).superseded_by != null } : null;
+        if (!e) return null;
+        const st = entryState(e);
+        return { ...e, ...st, entities: entityNamesOf(id), changed: versionOf(id) !== p.data.snap[String(id)] || st.superseded_by != null };
       }),
       // The global/user memory a cross-scope proposal relies on (null = gone); changed = apply would refuse.
       ...(p.data.covered_by != null
         ? (() => {
             const e = getEntry(p.data.covered_by);
-            return { covered_by_entry: e ? { ...e, changed: coveredByChanged(p) } : null };
+            return { covered_by_entry: e ? { ...e, ...entryState(e), changed: coveredByChanged(p) } : null };
           })()
         : {}),
     }));
@@ -865,8 +872,23 @@ function decide(id: number, status: ProposalStatus) {
   db.prepare(`UPDATE review_proposals SET status = ?, decided_at = ? WHERE id = ?`).run(status, now(), id);
 }
 
+/**
+ * A conflict is settled by editing the memories that disagree, so an edit never ends it; only a
+ * memory that is gone (deleted, superseded, expired) does — then nothing disagrees any more.
+ */
+function conflictGone(p: Proposal): boolean {
+  const gone = (id: number) => {
+    const e = getEntry(id);
+    if (!e || e.deleted_at) return true;
+    const st = entryState(e);
+    return st.superseded_by != null || st.expired;
+  };
+  return p.entry_ids.some(gone) || (p.data.covered_by != null && gone(p.data.covered_by));
+}
+
 /** Whether a proposal's memories (or the memory it relies on) changed since it was proposed: it can never be applied as is. */
 function isBlocked(p: Proposal): boolean {
+  if (p.kind === "conflict") return conflictGone(p);
   // Becoming superseded counts as a change too: versionOf (memory revisions) does not see a new link.
   const changed = p.entry_ids.some((eid) => {
     const e = getEntry(eid);
@@ -915,6 +937,16 @@ export function applyProposal(id: number, opts: { retire?: boolean } = {}): Prop
   const p = getProposal(id);
   if (!p) throw new HttpError(404, "proposal not found");
   if (p.status !== "pending") throw new HttpError(409, `proposal is already ${p.status}`);
+  // A conflict: marking it resolved after fixing the memories is the point, so no version check.
+  if (p.kind === "conflict") {
+    if (conflictGone(p)) {
+      decide(id, "stale");
+      throw new HttpError(409, "the memories changed since this was proposed; run the review again");
+    }
+    resolveConflict(p, { by: "human", note: "", at: now() });
+    if (opts.retire !== false) retireBlockedProposals();
+    return getProposal(id)!;
+  }
   const changed = p.entry_ids.some((eid) => {
     const e = getEntry(eid);
     return !e || e.deleted_at || versionOf(eid) !== p.data.snap[String(eid)] || entryState(e).superseded_by != null;
@@ -1059,4 +1091,89 @@ export function reviewStats() {
     reviewProposals: one(`SELECT COUNT(*) FROM review_proposals WHERE status = 'pending'`),
     reviewRunning: one(`SELECT COUNT(*) FROM review_jobs WHERE status IN ('pending','processing')`),
   };
+}
+
+// ------------------------------------------------------ agent (memory_review)
+
+function resolveConflict(p: Proposal, resolution: NonNullable<Proposal["data"]["resolution"]>) {
+  // The versions it was settled at: a later review re-asking about the same, unchanged memories is skipped.
+  resolution.snap = Object.fromEntries(p.entry_ids.map((id) => [String(id), versionOf(id)]));
+  db.prepare(`UPDATE review_proposals SET data = ?, status = 'applied', decided_at = ? WHERE id = ?`).run(
+    JSON.stringify({ ...p.data, resolution }),
+    resolution.at,
+    p.id,
+  );
+}
+
+const jobProjectId = (jobId: number): number | null => {
+  const r = db.prepare(`SELECT project_id FROM review_jobs WHERE id = ?`).get(jobId);
+  return r?.project_id == null ? null : Number(r.project_id);
+};
+
+function entryLine(id: number, withBody: boolean): string {
+  const e = getEntry(id);
+  if (!e) return `  #${id} (gone)`;
+  const st = entryState(e);
+  const flags = [e.deleted_at && "deleted", st.superseded_by != null && `superseded by #${st.superseded_by}`, st.expired && "expired"].filter(Boolean).join(", ");
+  const head = `  #${e.id} [${e.scope}/${e.category}] ${e.title}${flags ? ` (${flags})` : ""}`;
+  return withBody && e.body.trim() ? `${head}\n    ${e.body.trim().replace(/\n/g, "\n    ")}` : head;
+}
+
+function proposalText(p: Proposal, scope: string, detail: boolean): string {
+  const lines = [`#${p.id} [${p.kind}] ${scope}: ${p.reason}`];
+  if (p.data.note) lines.push(`  note: ${p.data.note}`);
+  if (p.data.warning) lines.push(`  warning: ${p.data.warning}`);
+  lines.push(...p.entry_ids.map((id) => entryLine(id, detail)));
+  if (p.data.covered_by != null) lines.push(`  ${p.kind === "conflict" ? "contradicts" : "relies on"} ${entryLine(p.data.covered_by, detail).trim()}`);
+  if (detail && (p.kind === "merge" || p.kind === "update")) {
+    if (p.data.title) lines.push(`  proposed title: ${p.data.title}`);
+    if (p.data.edits?.length) lines.push(...p.data.edits.map((x) => `  proposed edit: "${x.old}" -> "${x.new}"`));
+    else if (p.data.body) lines.push(`  proposed body: ${p.data.body.replace(/\n/g, "\n    ")}`);
+  }
+  if (isBlocked(p)) lines.push("  (cannot be applied any more: its memories changed)");
+  return lines.join("\n");
+}
+
+/**
+ * memory_review (pi extension / Claude Code plugin): the agent lists and reads the pending review
+ * proposals of its project and of global·user memory, and settles CONFLICTS after checking the facts
+ * (fixing the wrong memory with memory_replace / memory_remove first). Merges, updates and deletes
+ * stay a person's decision in the web UI (ADR-0013, ADR-0045). Replies carry `text` for the tool.
+ */
+export function agentReview(project: { id: number } | null, b: Record<string, unknown>) {
+  const action = typeof b.action === "string" ? b.action : "list";
+  const scopeOf = (p: Proposal) => {
+    const pid = jobProjectId(p.job_id);
+    return pid == null ? "global" : pid === project?.id ? "this project" : null;
+  };
+  const find = () => {
+    const id = Number(b.id);
+    const p = Number.isInteger(id) && id > 0 ? getProposal(id) : null;
+    if (!p || !scopeOf(p)) throw new HttpError(404, "proposal not found in this project or global memory");
+    return p;
+  };
+  if (action === "list") {
+    const ps = [...(project ? listProposals({ status: "pending", projectId: project.id }) : []), ...listProposals({ status: "pending", projectId: null })].slice(0, 50);
+    if (!ps.length) return { action, count: 0, text: "No pending review proposals for this project or global memory." };
+    const conflicts = ps.filter((p) => p.kind === "conflict").length;
+    const head = `${ps.length} pending review proposal(s)${conflicts ? `, ${conflicts} conflict(s) you can settle` : ""}. Merges, updates and deletes are applied by a person in the web UI.`;
+    return { action, count: ps.length, text: [head, ...ps.map((p) => proposalText(p, scopeOf(p) ?? "", false))].join("\n\n") };
+  }
+  if (action === "view") {
+    const p = find();
+    return { action, proposal: p, text: `${proposalText(p, scopeOf(p) ?? "", true)}\nstatus: ${p.status}` };
+  }
+  if (action === "resolve") {
+    const p = find();
+    if (p.kind !== "conflict") throw new HttpError(409, "only conflicts can be resolved here; merges, updates and deletes are applied by a person in the web UI");
+    if (p.status !== "pending") throw new HttpError(409, `proposal is already ${p.status}`);
+    const note = typeof b.note === "string" ? b.note.trim() : "";
+    if (note.length < 10) throw new HttpError(400, "note is required: say what you checked and which memory was right");
+    if (findSecrets(note).length) throw new HttpError(422, "note looks like it contains a secret");
+    // A memory of it is gone (often the agent's own memory_remove of the wrong one): settled, note kept.
+    const gone = conflictGone(p);
+    resolveConflict(p, { by: "agent", note: note.slice(0, 2000), at: now() });
+    return { action, proposal: getProposal(p.id), text: `resolved conflict #${p.id}${gone ? " (one of its memories is gone)" : ""}: ${note.slice(0, 2000)}` };
+  }
+  throw new HttpError(400, "action must be list, view or resolve");
 }

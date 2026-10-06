@@ -49,6 +49,16 @@ const isActive = (j: ReviewJob) => j.status === "pending" || j.status === "proce
 
 /** Why a proposal can't be applied (shown inline next to the disabled button), or null when it can. */
 function blockedReason(p: Proposal): string | null {
+  // A conflict is settled by editing its memories: only a memory that is gone ends it (server conflictGone).
+  if (p.kind === "conflict") {
+    const why = (e: { deleted_at?: string | null; superseded_by?: number | null; expired?: boolean } | null) =>
+      !e || e.deleted_at ? "삭제되어" : e.superseded_by != null ? "대체되어" : e.expired ? "만료되어" : null;
+    const gone = p.entries.findIndex((e) => why(e));
+    if (gone >= 0) return `메모리 #${p.entry_ids[gone]}이(가) ${why(p.entries[gone])} 더는 모순이 아닙니다`;
+    const cov = coveredBy(p);
+    if (cov && why(cov.entry)) return `맞서는 메모리 #${cov.id}이(가) ${why(cov.entry)} 더는 모순이 아닙니다`;
+    return null;
+  }
   const missing = p.entries.findIndex((e) => !e || e.deleted_at);
   if (missing >= 0) return `메모리 #${p.entry_ids[missing]}이(가) 삭제되어 적용할 수 없습니다`;
   const changed = p.entries.find((e) => e?.changed);
@@ -64,6 +74,12 @@ export function ReviewPage({ projectId }: { projectId?: number }) {
   const projects = useData(() => api.projects(), []);
   const jobs = useData(() => api.reviewJobs(projectId), [projectId]);
   const proposals = useData(() => api.proposals(projectId), [projectId]);
+  // Conflicts settled lately (by the agent's memory_review or a person), newest first, for a look back.
+  const resolved = useData(() => api.proposals(projectId, "applied"), [projectId]);
+  const settled = (resolved.data ?? [])
+    .filter((p) => p.kind === "conflict" && p.data.resolution)
+    .sort((a, b) => (b.decided_at ?? "").localeCompare(a.decided_at ?? ""))
+    .slice(0, 10);
   const stale = useData(() => api.staleEntries(projectId), [projectId]);
   const summary = useData(() => api.reviewScope(projectId), [projectId]);
   const [selected, setSelected] = useState(0);
@@ -335,6 +351,34 @@ export function ReviewPage({ projectId }: { projectId?: number }) {
           onDismiss={() => decide(p, "dismiss")}
         />
       ))}
+
+      {settled.length > 0 && (
+        <>
+          <div className="section-head">
+            <h2>최근 해결된 모순</h2>
+            <span className="count">{settled.length}</span>
+          </div>
+          <p className="section-desc">
+            에이전트는 <code>memory_review</code> 도구로 모순을 실제 코드·환경에서 확인하고, 틀린 메모리를 고친 뒤 무엇을 확인했는지 남기고 닫습니다.
+          </p>
+          <div className="list">
+            {settled.map((p) => (
+              <div key={p.id} className="list-row resolved-row">
+                <div className="stale-main">
+                  <div className="stale-title">
+                    <span className="badge">{p.data.resolution!.by === "agent" ? "에이전트" : "사람"}</span>
+                    <span>{p.reason}</span>
+                  </div>
+                  {p.data.resolution!.note && <div className="resolved-note">{p.data.resolution!.note}</div>}
+                  <span className="job-meta">
+                    #{p.id} · 메모리 {p.entry_ids.map((id) => `#${id}`).join(", ")} · <Time iso={p.data.resolution!.at} />
+                  </span>
+                </div>
+              </div>
+            ))}
+          </div>
+        </>
+      )}
 
       {scopeJobs.length > 0 && (
         <>

@@ -269,7 +269,7 @@ Set **Memory server URL** (memory-wiki) in `/config` to `http://<server>:8765`, 
 
 ## Agent tools & commands
 
-**Tools:** `memory_search`, `session_search`, `memory_add`, `memory_replace`, `memory_remove` (same names and targets as pi-hermes-memory, so the two extensions cannot be installed together), `memory_graph`, `wiki_search`, `wiki_read`, `wiki_write`, `skill_manage` (list, view, create, update skills on the server).
+**Tools:** `memory_search`, `session_search`, `memory_add`, `memory_replace`, `memory_remove` (same names and targets as pi-hermes-memory, so the two extensions cannot be installed together), `memory_graph`, `wiki_search`, `wiki_read`, `wiki_write`, `skill_manage` (list, view, create, update skills on the server), `memory_review` (the memory review's pending proposals for this project and global memory; a **conflict** is settled by the agent after it checks the real code or environment and fixes the wrong memory — merges, updates and deletes stay yours in the web UI).
 
 | Command | What it does |
 |---|---|

@@ -520,6 +520,19 @@ export const TOOLS: ToolDef[] = [
     inputSchema: obj({ target, old_text: str() }, ["target", "old_text"]),
   },
   {
+    name: "memory_review",
+    description:
+      "The memory review's pending proposals for this project and global memory (the server's LLM review of stored memories). list: what is pending. view: one proposal with its memories in full. resolve: settle a CONFLICT (memories that disagree) — first verify the facts against the real code, config or environment (read the files, run the commands), fix the wrong memory with memory_replace or remove it with memory_remove, then resolve with a note saying what you checked and which memory was right. Never resolve without checking. Merges, updates and deletes are applied by a person in the web UI.",
+    inputSchema: obj(
+      {
+        action: { type: "string", enum: ["list", "view", "resolve"] },
+        id: numb("Proposal id (view, resolve), e.g. 329 for #329"),
+        note: str("resolve: what you checked (command, file, result) and which memory was right"),
+      },
+      ["action"],
+    ),
+  },
+  {
     name: "skill_manage",
     eager: true,
     description: [
@@ -602,6 +615,8 @@ export function toolRequest(name: string, a: Args, project: ProjectRef | null): 
       return { method: "POST", path: "/agent/memory", body: { action: "replace", ...a, project: projectBody(project) } };
     case "memory_remove":
       return { method: "POST", path: "/agent/memory", body: { action: "remove", ...a, project: projectBody(project) } };
+    case "memory_review":
+      return { method: "POST", path: "/agent/review", body: { action: a.action, id: a.id, note: a.note, project: projectBody(project) } };
     case "skill_manage": {
       const body = a.action === "create" || a.action === "update" ? skillBody(a) : undefined;
       if (a.action === "create" && !body) return "create needs procedure_steps (with when_to_use, pitfalls, verification_steps) or a body.";
@@ -716,6 +731,8 @@ export function formatTool(name: string, a: Args, data: any): string {
     case "memory_replace":
     case "memory_remove":
       return `${data.action}: #${data.entry.id} [${data.entry.scope}/${data.entry.category}] ${data.entry.title}`;
+    case "memory_review":
+      return typeof data?.text === "string" ? data.text : JSON.stringify(data);
     case "skill_manage":
       return formatSkill(a, data as SkillReply);
   }

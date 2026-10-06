@@ -927,6 +927,22 @@ export default function memoryAllYouNeed(pi: ExtensionAPI) {
     [k.status === "candidate" && "candidate: waiting for approval", k.locked && "locked", k.pending_edit && "edit waiting for approval"].filter(Boolean).join(", ");
 
   pi.registerTool({
+    name: "memory_review",
+    label: "Memory review",
+    description:
+      "The memory review's pending proposals for this project and global memory (the server's LLM review of stored memories). list: what is pending. view: one proposal with its memories in full. resolve: settle a CONFLICT (memories that disagree) — first verify the facts against the real code, config or environment (read the files, run the commands), fix the wrong memory with memory_replace or remove it with memory_remove, then resolve with a note saying what you checked and which memory was right. Never resolve without checking. Merges, updates and deletes are applied by a person in the web UI.",
+    parameters: Type.Object({
+      action: Type.Union([Type.Literal("list"), Type.Literal("view"), Type.Literal("resolve")]),
+      id: Type.Optional(Type.Number({ description: "Proposal id (view, resolve), e.g. 329 for #329" })),
+      note: Type.Optional(Type.String({ description: "resolve: what you checked (command, file, result) and which memory was right" })),
+    }),
+    async execute(_id, p) {
+      const r = await call<{ text?: string }>("POST", "/agent/review", { action: p.action, id: p.id, note: p.note, project: projectBody() });
+      return text(r.text ?? JSON.stringify(r));
+    },
+  });
+
+  pi.registerTool({
     name: "skill_manage",
     label: "Skill manage",
     description:

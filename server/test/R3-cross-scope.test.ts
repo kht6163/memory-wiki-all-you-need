@@ -329,10 +329,14 @@ test("G-055: a conflict with a REFERENCE memory is kept; a reason citing it fill
   assert.equal(del.data.covered_by, g.id, "covered_by taken from the reason");
   const dropped = job.result.dropped as Any[];
   assert.equal(dropped.find((d) => JSON.stringify(d.ids) === JSON.stringify([sp.id]))?.reason, "no_change");
-  // The cited memory changes → both proposals are stale on apply.
+  // The cited memory changes → the delete is stale on apply; the conflict is not: editing the
+  // memories is how a conflict gets settled, so it can still be marked resolved (ADR-0045).
   updateEntry(g.id, { body: "Commit messages are written in Korean (changed)." }, { author: "human" });
   assert.equal((await call("POST", `/review/proposals/${del.id}/apply`)).status, 409);
-  assert.equal((await call("POST", `/review/proposals/${conf.id}/apply`)).status, 409);
+  const settled = await call("POST", `/review/proposals/${conf.id}/apply`);
+  assert.equal(settled.status, 200);
+  assert.equal(settled.data.status, "applied");
+  assert.equal(settled.data.data.resolution.by, "human");
   assert.equal((await ok("GET", `/entries/${dup.id}`)).entry.deleted_at, null);
 });
 

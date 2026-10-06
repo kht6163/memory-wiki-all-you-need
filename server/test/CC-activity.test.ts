@@ -6,7 +6,7 @@
 import assert from "node:assert/strict";
 import { after, before, test } from "node:test";
 import { curationLine, recallLine } from "../../claude-code-plugin/hooks/lib.ts";
-import { assistant, complete, prompt, sessionStart, startSession, type FakeSession } from "./CC-harness.ts";
+import { assistant, callTool, complete, prompt, sessionStart, startSession, type FakeSession } from "./CC-harness.ts";
 import { startMockServer, waitFor, type MockServer } from "./X-ext-harness.ts";
 
 let srv: MockServer;
@@ -71,4 +71,12 @@ test("an old server answering the status poll with something else gives up after
   await new Promise((r) => setTimeout(r, 3_500));
   assert.equal(statusPolls().filter((r) => r.path.includes("/43/")).length, 3);
   assert.equal(activity().length, before);
+});
+
+test("memory_review goes to POST /agent/review with the project and shows the server's text", async () => {
+  srv.routes.set("/api/agent/review", (req) => ({ action: req.body.action, text: `server text for ${req.body.action} #${req.body.id}` }));
+  const r = await callTool(s, "memory_review", { action: "resolve", id: 329, note: "checked .env on the host" });
+  assert.equal(r.result, "server text for resolve #329");
+  const sent = srv.requests.find((x) => x.path === "/api/agent/review")!;
+  assert.deepEqual(sent.body, { action: "resolve", id: 329, note: "checked .env on the host", project: { key: "github.com/foo/app", name: "app", remote: "git@github.com:foo/app.git" } });
 });
