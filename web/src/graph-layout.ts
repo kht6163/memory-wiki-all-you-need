@@ -2,7 +2,7 @@
 // server/test). cose stacks unconnected nodes into a tall column, and fitting that to the screen makes
 // every label unreadable. Instead GraphView lays out only the connected part with cose and puts the
 // isolated nodes in a compact grid below or beside it, shaped so the whole picture fits the viewport
-// at the largest zoom.
+// at the largest zoom. placeLabels picks which node names to draw so none overlap on screen.
 
 export interface Box {
   x1: number;
@@ -165,4 +165,69 @@ export function fitViewport(
       y: insets.top + pad + (availH - bh * zoom) / 2 - box.y1 * zoom,
     },
   };
+}
+
+// ------------------------------------------------------------------ labels
+
+/** A label that wants to be drawn: its box on screen (pixels) and how much it matters. */
+export interface LabelCandidate {
+  id: string;
+  box: Box;
+  /** Higher first: a selected or matched node, then entities by how many memories mention them, then memories. */
+  priority: number;
+}
+
+export interface LabelOptions {
+  /** Gap kept around each label (px). */
+  pad?: number;
+  /** Spatial grid cell (px). */
+  cell?: number;
+  /**
+   * Boxes a label must not cover — other nodes' shapes. A label may sit on its own node (same id)
+   * and on a node less important than itself (lower priority; the named node is drawn on top).
+   */
+  obstacles?: readonly { id: string; box: Box; priority: number }[];
+  /** At most this many labels (the most important ones). */
+  budget?: number;
+}
+
+/**
+ * Which labels to draw so that no two overlap on screen and none covers another node: greedy,
+ * highest priority first (ties by id, so the same picture gives the same labels), up to the
+ * budget. A uniform grid of cells keeps it near-linear for thousands of nodes. (Cognee's
+ * pickNonOverlappingLabels and Logseq's label grid do the same.)
+ */
+export function placeLabels(items: readonly LabelCandidate[], opts: LabelOptions = {}): Set<string> {
+  const pad = opts.pad ?? 2;
+  const cell = opts.cell ?? 64;
+  const budget = opts.budget ?? Infinity;
+  const order = [...items].sort((a, b) => b.priority - a.priority || (a.id < b.id ? -1 : a.id > b.id ? 1 : 0));
+  const grid = new Map<string, { id: string | null; box: Box; priority: number }[]>();
+  const shown = new Set<string>();
+  const cellsOf = (b: Box) => {
+    const keys: string[] = [];
+    for (let x = Math.floor(b.x1 / cell); x <= Math.floor(b.x2 / cell); x++)
+      for (let y = Math.floor(b.y1 / cell); y <= Math.floor(b.y2 / cell); y++) keys.push(`${x},${y}`);
+    return keys;
+  };
+  const put = (id: string | null, box: Box, priority: number) => {
+    for (const k of cellsOf(box)) {
+      const list = grid.get(k);
+      if (list) list.push({ id, box, priority });
+      else grid.set(k, [{ id, box, priority }]);
+    }
+  };
+  const hit = (a: Box, b: Box) => a.x1 < b.x2 && b.x1 < a.x2 && a.y1 < b.y2 && b.y1 < a.y2;
+  for (const o of opts.obstacles ?? []) put(o.id, o.box, o.priority);
+  for (const it of order) {
+    if (shown.size >= budget) break;
+    const b = { x1: it.box.x1 - pad, y1: it.box.y1 - pad, x2: it.box.x2 + pad, y2: it.box.y2 + pad };
+    // Another label (id null) blocks it, and so does a node at least as important; its own node does not.
+    const blocks = (o: { id: string | null; box: Box; priority: number }) =>
+      (o.id === null || (o.id !== it.id && o.priority >= it.priority)) && hit(b, o.box);
+    if (cellsOf(b).some((k) => grid.get(k)?.some(blocks))) continue;
+    put(null, b, Infinity);
+    shown.add(it.id);
+  }
+  return shown;
 }

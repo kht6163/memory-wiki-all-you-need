@@ -362,7 +362,7 @@ export interface EntryLink {
 }
 
 export type GraphNode =
-  | { id: string; type: "memory"; entryId: number; label: string; category: string; scope: string; projectId: number | null }
+  | { id: string; type: "memory"; entryId: number; label: string; category: string; scope: string; projectId: number | null; active?: boolean }
   | { id: string; type: "entity"; entityId: number; label: string; kind: string; count: number };
 
 export interface GraphData {

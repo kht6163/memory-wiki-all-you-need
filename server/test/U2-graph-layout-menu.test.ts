@@ -4,7 +4,7 @@ import assert from "node:assert/strict";
 import { readdirSync, readFileSync } from "node:fs";
 import { test } from "node:test";
 import { ApiError, describeError } from "../../web/src/errors.ts";
-import { GRID_DEFAULTS, fitViewport, isolatedIds, isolatedKey, placeIsolated, planGrid, sortIsolated, type Box } from "../../web/src/graph-layout.ts";
+import { GRID_DEFAULTS, fitViewport, isolatedIds, isolatedKey, placeIsolated, placeLabels, planGrid, sortIsolated, type Box } from "../../web/src/graph-layout.ts";
 import { menuKeyAction, openFocusIndex } from "../../web/src/menu-keys.ts";
 
 const webSrc = new URL("../../web/src/", import.meta.url);
@@ -186,17 +186,81 @@ test("web-ui: graph fit keeps nodes clear of the toolbar (top) and legend (botto
   assert.equal(fitViewport({ x1: 0, y1: 0, x2: 1, y2: 1 }, view, insets, 40, { min: 0.1, max: 3 }).zoom, 3, "zoom capped");
 });
 
-test("G-080: the graph is laid out with fcose, hubs pull weakly, titles only once zoomed in", () => {
+test("G-080: the graph is laid out with fcose, edges pull by kind, names never overlap on screen", () => {
   const view = read("pages/GraphView.tsx");
   assert.match(view, /cytoscape\.use\(fcose\)/);
   assert.match(view, /name: "fcose"/);
   assert.doesNotMatch(view, /name: "cose"/, "cose pulled every memory around the project's own entity into one ball");
-  // A mentions edge knows its entity's hub size; the layout lengthens and loosens it by that.
+  // A mentions edge knows its entity's hub size; the layout lengthens and loosens it by that,
+  // typed links are short and stiff.
   assert.match(view, /hub: e\.type === "mentions" \? \(deg\.get\(e\.target\)/);
-  assert.match(view, /idealEdgeLength: \(e: EdgeSingular\) => [^\n]*hubOf\(e\)/);
-  assert.match(view, /edgeElasticity: \(e: EdgeSingular\) => [^\n]*hubOf\(e\)/);
-  // Overview: no memory titles (min 12 px), hub entities named, minor ones once zoomed in.
-  assert.match(view, /"min-zoomed-font-size": 12,/);
-  assert.match(view, /"min-zoomed-font-size": "mapData\(deg, /);
-  assert.match(view, /edge\[type = "mentions"\]/);
+  assert.match(view, /idealEdgeLength: edgeLength/);
+  assert.match(view, /t === "mentions" \? 80 \+ 16 \* Math\.sqrt\(hubOf\(e\)\)/);
+  assert.match(view, /t === "mentions" \? 0\.45 \/ Math\.sqrt\(hubOf\(e\)\)/);
+  // G-081: packComponents needs layout-utilities registered and set up.
+  assert.match(view, /cytoscape\.use\(layoutUtilities\)/);
+  assert.match(view, /\.layoutUtilities\(\{/);
+  // Names: constant size on screen, chosen by placeLabels after every viewport change, never by
+  // cytoscape's size threshold (it scales with the pixel ratio: a Retina screen showed every name).
+  assert.match(view, /"font-size": "data\(fs\)"/);
+  assert.match(view, /placeLabels\(candidates, \{ obstacles, budget:/);
+  assert.match(view, /c\.on\("viewport resize layoutstop select unselect dragfree", relabel\)/);
+  assert.match(view, /node\.nolabel/);
+  assert.doesNotMatch(view, /min-zoomed-font-size/);
+  // Hover / selection focus, faint mentions when zoomed out, edges hidden while moving, history hidden.
+  assert.match(view, /c\.on\("mouseover", "node"/);
+  assert.match(view, /closedNeighborhood\(\)/);
+  assert.match(view, /edge\.far/);
+  assert.match(view, /hideEdgesOnViewport: true/);
+  assert.match(view, /const \[showHistory, setShowHistory\] = useState\(false\)/);
+  // Review fixes: a focused history memory stays; closing the drawer unselects (no stuck fade);
+  // a search hit beats the fade; a refresh keeps runtime classes; fits ignore screen-sized labels.
+  assert.match(view, /f\.showHistory \|\| !isPast\(n\) \|\| n\.id === f\.focus/);
+  assert.match(view, /if \(!selected\) cy\.current\?\.nodes\(":selected"\)\.unselect\(\)/);
+  assert.match(view, /selector: "node\.match", style: \{ opacity: 1 \}/);
+  assert.match(view, /for \(const k of \["focus", "past"\]\) el\.toggleClass/);
+  assert.match(view, /boundingBox\(\{ includeLabels: false \}\)/);
+});
+
+test("G-080: placeLabels draws no two overlapping names, the more important one wins, same input same result", () => {
+  const box = (x: number, y: number, w = 60, h = 14): Box => ({ x1: x, y1: y, x2: x + w, y2: y + h });
+  const items = [
+    { id: "m:1", box: box(0, 0), priority: 0 },
+    { id: "e:hub", box: box(30, 5), priority: 1040 },
+    { id: "e:small", box: box(200, 0), priority: 1003 },
+    { id: "m:2", box: box(205, 8), priority: 0 },
+    { id: "m:3", box: box(400, 0), priority: 0 },
+    { id: "sel", box: box(395, 2), priority: 1e6 },
+  ];
+  const shown = placeLabels(items);
+  assert.deepEqual([...shown].sort(), ["e:hub", "e:small", "sel"]);
+  // No two shown boxes overlap.
+  const kept = items.filter((i) => shown.has(i.id)).map((i) => i.box);
+  for (const a of kept) for (const b of kept) if (a !== b) assert.ok(!(a.x1 < b.x2 && b.x1 < a.x2 && a.y1 < b.y2 && b.y1 < a.y2));
+  assert.deepEqual([...placeLabels([...items].reverse())].sort(), [...shown].sort(), "input order does not matter");
+  // A node at least as important blocks a name; a lesser node or the name's own node does not.
+  const obstacles = [
+    { id: "e:big", box: box(0, 100, 30, 30), priority: 1040 },
+    { id: "e:tiny", box: box(200, 100, 10, 10), priority: 1002 },
+  ];
+  const named = placeLabels(
+    [
+      { id: "m:9", box: box(-10, 110), priority: 500 },
+      { id: "e:mid", box: box(190, 98), priority: 1020 },
+      { id: "e:big", box: box(-5, 105), priority: 1040 },
+    ],
+    { obstacles },
+  );
+  assert.ok(!named.has("m:9"), "a memory name may not cover a hub's square");
+  assert.ok(named.has("e:mid"), "a bigger entity's name may sit over a tiny square (drawn on top)");
+  assert.ok(named.has("e:big"), "a name may sit on its own node");
+  // A budget keeps the most important names only.
+  assert.deepEqual([...placeLabels(items, { budget: 2 })].sort(), ["e:hub", "sel"]);
+  // Equal priority: by id. Far apart: both. Thousands stay fast (grid cells).
+  assert.deepEqual([...placeLabels([{ id: "b", box: box(0, 0), priority: 1 }, { id: "a", box: box(10, 0), priority: 1 }])], ["a"]);
+  assert.equal(placeLabels([{ id: "a", box: box(0, 0), priority: 1 }, { id: "b", box: box(500, 500), priority: 1 }]).size, 2);
+  const many = Array.from({ length: 5000 }, (_, i) => ({ id: `n${i}`, box: box((i * 37) % 3000, Math.floor(i / 80) * 9), priority: i % 7 }));
+  const t0 = performance.now();
+  placeLabels(many);
+  assert.ok(performance.now() - t0 < 500);
 });

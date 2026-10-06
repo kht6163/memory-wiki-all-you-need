@@ -682,7 +682,7 @@ export function neighborhood(center: { entity?: string; id?: number }, visibleFr
 
 export interface GraphData {
   nodes: (
-    | { id: string; type: "memory"; entryId: number; label: string; category: string; scope: string; projectId: number | null }
+    | { id: string; type: "memory"; entryId: number; label: string; category: string; scope: string; projectId: number | null; active: boolean }
     | { id: string; type: "entity"; entityId: number; label: string; kind: string; count: number }
   )[];
   edges: { id: string; source: string; target: string; type: LinkType | "mentions" }[];
@@ -719,8 +719,16 @@ export function graphData(projectId: number | null, opts: { limit?: number } = {
   const truncated = entries.length > limit;
   entries = entries.slice(0, limit);
   const ids = new Set(entries.map((e) => e.id));
+  // Superseded / expired memories are history: the web hides them unless asked (ADR-0047).
+  const active = new Set<number>();
+  const idList = [...ids];
+  for (let i = 0; i < idList.length; i += 500) {
+    const part = idList.slice(i, i + 500);
+    for (const r of db.prepare(`SELECT e.id FROM entries e WHERE e.id IN (${part.map(() => "?").join(",")}) AND ${ACTIVE_SQL("e")}`).all(...part))
+      active.add(Number(r.id));
+  }
   const nodes: GraphData["nodes"] = entries.map((e) => ({
-    id: `m${e.id}`, type: "memory", entryId: e.id, label: e.title, category: e.category, scope: e.scope, projectId: e.project_id,
+    id: `m${e.id}`, type: "memory", entryId: e.id, label: e.title, category: e.category, scope: e.scope, projectId: e.project_id, active: active.has(e.id),
   }));
   const edges: GraphData["edges"] = [];
   if (ids.size) {

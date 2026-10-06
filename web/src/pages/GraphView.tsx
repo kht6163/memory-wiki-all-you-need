@@ -1,6 +1,7 @@
 import "./graph.css";
-import cytoscape, { type Core, type EdgeSingular, type ElementDefinition } from "cytoscape";
+import cytoscape, { type Core, type EdgeSingular, type ElementDefinition, type NodeSingular } from "cytoscape";
 import fcose from "cytoscape-fcose";
+import layoutUtilities from "cytoscape-layout-utilities";
 import { useEffect, useMemo, useRef, useState } from "react";
 import { api, type GraphData, type GraphJob, type GraphNode } from "../api.ts";
 import { CATEGORY_LABEL, CATEGORY_ORDER, CategoryBadge, Empty, ErrorBox, JOB_STATUS_LABEL, Markdown, SCOPE_LABEL, StateBadge, act, go, isHistory, usePoll, useData } from "../lib.tsx";
@@ -8,7 +9,7 @@ import { EntityChips, KIND_LABEL, KindIcon, LINK_LABEL, LINK_TYPES, LinkList } f
 import { ScopeTabs } from "./WikiPages.tsx";
 import { Icon } from "../components/Icon.tsx";
 import { SkeletonText } from "../components/Skeleton.tsx";
-import { fitViewport, isolatedIds, isolatedKey, placeIsolated, sortIsolated, type Insets } from "../graph-layout.ts";
+import { fitViewport, isolatedIds, isolatedKey, placeIsolated, placeLabels, sortIsolated, type Insets, type LabelCandidate } from "../graph-layout.ts";
 
 // The interactive graph (cytoscape). Loaded lazily so the rest of the UI does not pay for it.
 
@@ -18,14 +19,27 @@ const LEGEND_CATS = CATEGORY_ORDER.filter((c) => c !== "standing");
 const isRunning = (j: GraphJob) => j.status === "pending" || j.status === "processing";
 
 cytoscape.use(fcose);
+// fcose's packComponents silently does nothing unless layout-utilities is registered (G-081).
+cytoscape.use(layoutUtilities);
 
 /**
  * fcose (force-directed with spectral start): spreads clusters apart where cose pulled every
- * memory into one ball. A memory → entity "mentions" edge pulls less and longer the more
- * memories mention that entity (data "hub"): the project's own name, mentioned by a third of
- * its memories, no longer ties everything to the middle.
+ * memory into one ball. Edges pull by kind (ADR-0047):
+ *  - memory → entity "mentions": the more memories mention the entity (data "hub"), the
+ *    longer and looser — the project's own name no longer ties everything to the middle;
+ *  - because / depends_on / supersedes: short and stiff, so a chain of reasons reads as a unit;
+ *  - related: in between.
+ * (Cognee's story view loosens containment edges and tightens semantic ones the same way.)
  */
 const hubOf = (e: EdgeSingular) => (e.data("type") === "mentions" ? Math.max(1, Number(e.data("hub")) || 1) : 1);
+const edgeLength = (e: EdgeSingular) => {
+  const t = e.data("type");
+  return t === "mentions" ? 80 + 16 * Math.sqrt(hubOf(e)) : t === "related" ? 70 : 55;
+};
+const edgeElasticity = (e: EdgeSingular) => {
+  const t = e.data("type");
+  return t === "mentions" ? 0.45 / Math.sqrt(hubOf(e)) : t === "related" ? 0.55 : 0.7;
+};
 const LAYOUT = {
   name: "fcose",
   quality: "default",
@@ -33,12 +47,121 @@ const LAYOUT = {
   padding: 40,
   nodeSeparation: 110,
   nodeRepulsion: () => 16000,
-  idealEdgeLength: (e: EdgeSingular) => 80 + 16 * Math.sqrt(hubOf(e)),
-  edgeElasticity: (e: EdgeSingular) => 0.45 / Math.sqrt(hubOf(e)),
+  idealEdgeLength: edgeLength,
+  edgeElasticity,
   gravity: 0.2,
   numIter: 2500,
   packComponents: true,
 };
+
+// ------------------------------------------------------------------ labels
+// Names stay the same size on screen at any zoom (like a map), and only names that fit are
+// drawn — no two overlap and none covers an entity: entities first (most-mentioned first),
+// the best-connected memories next, every memory title once zoomed in, at most one name per
+// ~2400 px². Recomputed after every viewport change (placeLabels, graph-layout.ts). A
+// cytoscape size threshold alone could not do it: it depends on the screen's pixel ratio (a
+// Retina screen showed every name) and never stops two names overlapping. Same idea as
+// Cognee's label claimer, Logseq's label grid and SiYuan's label budget.
+
+/** On-screen label size (px): memories 11, entities 11–15 by how many memories mention them. */
+const labelPx = (n: NodeSingular) =>
+  n.data("kind") === "entity" ? 11 + 4 * Math.min(1, Math.max(0, (Number(n.data("deg")) - 2) / 22)) : 11;
+/** Memory titles show from this zoom and hide again below the lower one (no flicker at the edge). */
+const MEMORY_LABEL_SHOW = 0.95;
+const MEMORY_LABEL_HIDE = 0.8;
+/** Below this zoom "mentions" edges almost vanish: typed links and the clusters' shape show. */
+const MENTIONS_FAR_ZOOM = 0.6;
+/** Widest a memory title / an entity name gets on screen before the ellipsis (px). */
+const MEMORY_LABEL_MAX = 160;
+const ENTITY_LABEL_MAX = 400;
+
+const widths = new Map<string, number>();
+let measure: CanvasRenderingContext2D | null | undefined;
+function textWidth(text: string, px: number, bold: boolean): number {
+  const key = `${px}|${bold ? 1 : 0}|${text}`;
+  let w = widths.get(key);
+  if (w === undefined) {
+    if (measure === undefined) measure = document.createElement("canvas").getContext("2d");
+    if (measure) {
+      measure.font = `${bold ? "bold " : ""}${px}px Helvetica Neue, Helvetica, sans-serif`;
+      w = measure.measureText(text).width;
+    } else w = text.length * px * 0.7;
+    if (widths.size > 20_000) widths.clear();
+    widths.set(key, w);
+  }
+  return w;
+}
+
+/**
+ * Sets each node's label size for the current zoom, fades "mentions" edges when zoomed out
+ * and hides the names that would overlap. While a node is hovered or selected, only it and
+ * its neighbours are candidates (the rest is faded).
+ */
+function updateLabels(c: Core) {
+  const z = c.zoom();
+  const vw = c.width();
+  const vh = c.height();
+  const prev = c.scratch("memoryTitles") === true;
+  const memoryTitles = prev ? z >= MEMORY_LABEL_HIDE : z >= MEMORY_LABEL_SHOW;
+  c.scratch("memoryTitles", memoryTitles);
+  const focusing = c.nodes(".faded").nonempty();
+  // Sizes depend on the zoom only: a pan keeps them (a refresh clears "labelZoom" to redo them).
+  if (c.scratch("labelZoom") !== z) {
+    c.scratch("labelZoom", z);
+    c.batch(() => {
+      c.nodes().forEach((n) => {
+        const px = labelPx(n);
+        const max = n.data("kind") === "entity" ? ENTITY_LABEL_MAX : MEMORY_LABEL_MAX;
+        n.data({ fs: px / z, tm: 3 / z, tmw: max / z });
+      });
+      c.edges('[type = "mentions"]').toggleClass("far", z < MENTIONS_FAR_ZOOM);
+    });
+  }
+  const candidates: LabelCandidate[] = [];
+  const obstacles: { id: string; box: { x1: number; y1: number; x2: number; y2: number }; priority: number }[] = [];
+  c.nodes().forEach((n) => {
+    const p = n.renderedPosition();
+    const r = n.renderedWidth() / 2;
+    if (p.x + r < 0 || p.x - r > vw || p.y + r < 0 || p.y - r > vh) return;
+    // Faded = outside the hovered/selected node's neighbourhood; a search hit still counts.
+    if (n.hasClass("faded") && !n.hasClass("match")) return;
+    const entity = n.data("kind") === "entity";
+    // Entity squares block names (they covered "ClickHouse" once); memory dots are small and
+    // so many that treating them as obstacles hid every name in the dense middle.
+    if (entity) obstacles.push({ id: n.id(), box: { x1: p.x - r, x2: p.x + r, y1: p.y - r, y2: p.y + r }, priority: 1000 + Number(n.data("deg") ?? 0) });
+    const label = String(n.data("label") ?? "");
+    if (!label || n.hasClass("dim")) return;
+    const forced = n.selected() || n.hasClass("match") || n.hasClass("focus") || n.hasClass("hover");
+    const key = n.data("key") === true;
+    if (!entity && !forced && !focusing && !memoryTitles && !key) return;
+    const px = labelPx(n);
+    const w = Math.min(textWidth(label, px, entity), entity ? ENTITY_LABEL_MAX : MEMORY_LABEL_MAX) + 4;
+    const top = p.y + r + 3;
+    const box = { x1: p.x - w / 2, x2: p.x + w / 2, y1: top, y2: top + px * 1.3 };
+    const deg = Number(n.data("deg") ?? 0);
+    const priority = forced ? 1e6 : (focusing ? 1e5 : 0) + (entity ? 1000 + deg : key ? 500 + deg : deg);
+    candidates.push({ id: n.id(), box, priority });
+  });
+  const shown = placeLabels(candidates, { obstacles, budget: Math.max(32, Math.floor((vw * vh) / 2400)) });
+  c.batch(() =>
+    c.nodes().forEach((n) => {
+      const hide = !shown.has(n.id());
+      if (n.hasClass("nolabel") !== hide) n.toggleClass("nolabel", hide);
+    }),
+  );
+}
+
+/** Hover/selection focus: the node and its neighbours stay, everything else fades (LightRAG, Obsidian, Quartz…). */
+function highlight(c: Core, n: NodeSingular | null) {
+  c.batch(() => {
+    c.elements().removeClass("faded hl hover");
+    if (!n || n.removed()) return;
+    const near = n.closedNeighborhood();
+    c.elements().not(near).addClass("faded");
+    near.edges().addClass("hl");
+    n.addClass("hover");
+  });
+}
 
 /** How far the floating toolbar/notices (top) and legend/hint (bottom) reach into the canvas. */
 function overlayInsets(c: Core): Insets {
@@ -60,7 +183,8 @@ function overlayInsets(c: Core): Insets {
 /** Fit `eles` into the part of the canvas the overlays leave free (cytoscape's fit pads evenly). */
 function fitClear(c: Core, eles = c.elements(), animate = false, pad = 40) {
   if (!eles.length) return;
-  const bb = eles.boundingBox({});
+  // Without labels: they keep their screen size, so their model-space box depends on the current zoom.
+  const bb = eles.boundingBox({ includeLabels: false });
   const v = fitViewport(bb, { w: c.width(), h: c.height() }, overlayInsets(c), pad, { min: c.minZoom(), max: c.maxZoom() });
   if (animate) c.animate({ zoom: v.zoom, pan: v.pan }, { duration: 250 });
   else c.viewport({ zoom: v.zoom, pan: v.pan });
@@ -86,7 +210,7 @@ function runLayout(c: Core, randomize: boolean) {
   }
   const connected = c.elements().not(isolated);
   const place = () => {
-    const box = connected.nodes().length ? connected.nodes().boundingBox({}) : null;
+    const box = connected.nodes().length ? connected.nodes().boundingBox({ includeLabels: false }) : null;
     const order = sortIsolated(isolated.map((n) => isolatedKey({ ...(n.data("raw") as GraphNode), id: n.id() }, CATEGORY_ORDER)));
     const pos = placeIsolated(order, box, { w: c.width(), h: c.height() });
     c.batch(() => isolated.forEach((n) => void n.position(pos.get(n.id()) ?? { x: 0, y: 0 })));
@@ -103,6 +227,8 @@ export function GraphPage({ projectId, initialFocus }: { projectId?: number; ini
   const graph = useData(() => api.graph(projectId), [projectId]);
   const jobs = useData(() => api.graphJobs(), []);
   const [showEntities, setShowEntities] = useState(true);
+  // History (superseded / expired memories) is hidden unless asked for.
+  const [showHistory, setShowHistory] = useState(false);
   const [hidden, setHidden] = useState<Set<string>>(new Set());
   const [focus, setFocus] = useState<string | null>(initialFocus ?? null);
   const [selected, setSelected] = useState<GraphNode | null>(null);
@@ -126,11 +252,17 @@ export function GraphPage({ projectId, initialFocus }: { projectId?: number; ini
     if (prev !== null && prev !== progress) graph.reload();
   }, [progress, jobs.data, graph.reload]);
 
-  const elements = useMemo(() => buildElements(graph.data, { showEntities, hidden, focus }), [graph.data, showEntities, hidden, focus]);
+  const elements = useMemo(
+    () => buildElements(graph.data, { showEntities, showHistory, hidden, focus }),
+    [graph.data, showEntities, showHistory, hidden, focus],
+  );
+  const pastCount = graph.data?.nodes.filter(isPast).length ?? 0;
 
   useEffect(() => {
     if (!box.current) return;
-    const c = cytoscape({ container: box.current, elements: [], style: graphStyle(), wheelSensitivity: 0.3, minZoom: 0.1, maxZoom: 3 });
+    // hideEdgesOnViewport: no edges while panning/zooming (cytoscape's performance advice; LightRAG hides them on move too).
+    const c = cytoscape({ container: box.current, elements: [], style: graphStyle(), wheelSensitivity: 0.3, minZoom: 0.1, maxZoom: 3, hideEdgesOnViewport: true });
+    (c as unknown as { layoutUtilities(o: object): unknown }).layoutUtilities({ desiredAspectRatio: Math.max(0.5, c.width() / Math.max(1, c.height())), componentSpacing: 40 });
     c.on("tap", "node", (ev) => setSelected(ev.target.data("raw") as GraphNode));
     c.on("tap", (ev) => ev.target === c && setSelected(null));
     c.on("dbltap", "node", (ev) => {
@@ -138,6 +270,29 @@ export function GraphPage({ projectId, initialFocus }: { projectId?: number; ini
       go(raw.type === "memory" ? `/e/${raw.entryId}` : `/entity/${raw.entityId}`);
     });
     cy.current = c;
+    // Names are re-placed once a zoom, pan, resize, layout or selection settles.
+    let relabelTimer = 0;
+    const relabel = () => {
+      window.clearTimeout(relabelTimer);
+      relabelTimer = window.setTimeout(() => cy.current === c && updateLabels(c), 40);
+    };
+    c.on("viewport resize layoutstop select unselect dragfree", relabel);
+    c.scratch("relabel", relabel);
+    // Hover (or the selected node when not hovering) shows its neighbourhood, the rest fades.
+    let hoverTimer = 0;
+    const refocus = (n: NodeSingular | null) => {
+      window.clearTimeout(hoverTimer);
+      hoverTimer = window.setTimeout(() => {
+        if (cy.current !== c) return;
+        const sel = c.nodes(":selected");
+        highlight(c, n ?? (sel.nonempty() ? sel[0] : null));
+        relabel();
+      }, 30);
+    };
+    c.on("mouseover", "node", (ev) => refocus(ev.target as NodeSingular));
+    c.on("mouseout", "node", () => refocus(null));
+    c.on("select unselect", "node", () => refocus(null));
+    c.scratch("refocus", refocus);
     // Re-read colors when the theme changes: OS flip (for "system") or the in-app toggle.
     // rAF so the new data-theme has been applied before the tokens are read.
     const mq = window.matchMedia("(prefers-color-scheme: dark)");
@@ -147,6 +302,8 @@ export function GraphPage({ projectId, initialFocus }: { projectId?: number; ini
     return () => {
       mq.removeEventListener("change", onTheme);
       window.removeEventListener("theme:changed", onTheme);
+      window.clearTimeout(relabelTimer);
+      window.clearTimeout(hoverTimer);
       c.destroy();
       cy.current = null;
     };
@@ -169,13 +326,19 @@ export function GraphPage({ projectId, initialFocus }: { projectId?: number; ini
         if (el.empty()) add.push(def);
         else {
           el.data(def.data);
-          el.classes(def.classes ?? "");
+          // Only the data-driven classes; hover/selection fading and label state are runtime.
+          const cls = typeof def.classes === "string" ? def.classes.split(" ") : (def.classes ?? []);
+          for (const k of ["focus", "past"]) el.toggleClass(k, cls.includes(k));
         }
       }
       c.add(add);
       if (add.length) changed = true;
     });
-    // Same set of nodes and edges (a plain refresh): keep the current picture.
+    // Same set of nodes and edges (a plain refresh): keep the current picture. Sizes were reset
+    // by the new data; the hover/selection highlight is re-applied to the new elements.
+    c.scratch("labelZoom", null);
+    (c.scratch("refocus") as ((n: NodeSingular | null) => void) | undefined)?.(null);
+    (c.scratch("relabel") as (() => void) | undefined)?.();
     if (!changed || !c.nodes().length) return;
     runLayout(c, fresh);
   }, [elements]);
@@ -185,6 +348,7 @@ export function GraphPage({ projectId, initialFocus }: { projectId?: number; ini
     const c = cy.current;
     if (!c) return;
     c.nodes().removeClass("match dim");
+    (c.scratch("relabel") as (() => void) | undefined)?.();
     const needle = q.trim().toLowerCase();
     if (!needle) return;
     const hits = c.nodes().filter((n) => String((n.data("raw") as GraphNode).label).toLowerCase().includes(needle));
@@ -192,6 +356,12 @@ export function GraphPage({ projectId, initialFocus }: { projectId?: number; ini
     hits.addClass("match");
     if (hits.length) fitClear(c, hits, true, 80);
   }, [q, elements]);
+
+  // The drawer closed (X, Esc, another scope): drop cytoscape's selection too, or its
+  // neighbourhood highlight would keep the rest of the graph faded.
+  useEffect(() => {
+    if (!selected) cy.current?.nodes(":selected").unselect();
+  }, [selected]);
 
   // Esc closes the drawer (unless typing).
   useEffect(() => {
@@ -277,6 +447,12 @@ export function GraphPage({ projectId, initialFocus }: { projectId?: number; ini
             <span className="entity-swatch" aria-hidden="true" />
             엔티티
           </button>
+          {pastCount > 0 && (
+            <button className="chip" aria-pressed={showHistory} onClick={() => setShowHistory(!showHistory)} title="대체되거나 만료된 메모리(이력)도 표시">
+              <Icon name="rotate-ccw" size={13} />
+              이력 {pastCount}
+            </button>
+          )}
           {focus && (
             <button className="chip" aria-pressed onClick={() => setFocus(null)} title="주변만 보기를 끄고 전체 그래프 보기">
               <Icon name="crosshair" size={13} />
@@ -323,7 +499,7 @@ export function GraphPage({ projectId, initialFocus }: { projectId?: number; ini
           </span>
         </div>
 
-        <p className="graph-float graph-hint">누르면 정보 · 두 번 누르면 열기 · 휠로 확대</p>
+        <p className="graph-float graph-hint">올리면 연결 강조 · 누르면 정보 · 두 번 누르면 열기 · 휠로 확대</p>
 
         {graph.loading && !graph.data && (
           <div className="graph-center" aria-busy="true">
@@ -421,9 +597,18 @@ function JobBar({ job, scopeName, onChanged, onDismiss }: { job: GraphJob; scope
   );
 }
 
-function buildElements(data: GraphData | undefined, f: { showEntities: boolean; hidden: Set<string>; focus: string | null }): ElementDefinition[] {
+/** Memory node ids that are history (superseded / expired); shown only with "이력". An older server sends no flag: current. */
+const isPast = (n: GraphNode) => n.type === "memory" && n.active === false;
+
+function buildElements(
+  data: GraphData | undefined,
+  f: { showEntities: boolean; showHistory: boolean; hidden: Set<string>; focus: string | null },
+): ElementDefinition[] {
   if (!data) return [];
-  let nodes = data.nodes.filter((n) => (n.type === "memory" ? !f.hidden.has(n.category) : f.showEntities));
+  // The focused node stays even when it is history ("그래프에서 보기" from a replaced memory).
+  let nodes = data.nodes.filter((n) =>
+    n.type === "memory" ? !f.hidden.has(n.category) && (f.showHistory || !isPast(n) || n.id === f.focus) : f.showEntities,
+  );
   let ids = new Set(nodes.map((n) => n.id));
   let edges = data.edges.filter((e) => ids.has(e.source) && ids.has(e.target));
   if (f.focus && ids.has(f.focus)) {
@@ -447,6 +632,22 @@ function buildElements(data: GraphData | undefined, f: { showEntities: boolean; 
     nodes = nodes.filter((n) => !lonely.has(n.id));
     edges = edges.filter((e) => !lonely.has(e.target));
   }
+  // A memory's degree: mentions count once, a typed link twice (it says more). The top tenth
+  // (degree ≥ 3) are "key" memories, named even at the overview (Cognee's key labels, R2R's
+  // degree percentile).
+  const mdeg = new Map<string, number>();
+  for (const e of edges) {
+    if (e.type === "mentions") mdeg.set(e.source, (mdeg.get(e.source) ?? 0) + 1);
+    else for (const end of [e.source, e.target]) mdeg.set(end, (mdeg.get(end) ?? 0) + 2);
+  }
+  const memDegs = nodes.filter((n) => n.type === "memory").map((n) => mdeg.get(n.id) ?? 0).sort((a, b) => b - a);
+  const keyCut = Math.max(3, memDegs[Math.floor(memDegs.length * 0.1)] ?? Infinity);
+  const maxDeg = Math.max(3, ...deg.values());
+  // Sizes grow with the square root (LightRAG, Cognee, Quartz): a hub no longer dwarfs the rest.
+  const sizeOf = (n: GraphNode) =>
+    n.type === "entity"
+      ? 12 + 26 * Math.sqrt(Math.max(0, (deg.get(n.id) ?? 0) - 2) / (maxDeg - 2))
+      : Math.min(22, 10 + 3 * Math.sqrt(mdeg.get(n.id) ?? 0));
   return [
     ...nodes.map((n) => ({
       data: {
@@ -454,11 +655,16 @@ function buildElements(data: GraphData | undefined, f: { showEntities: boolean; 
         label: n.label.length > 40 ? `${n.label.slice(0, 38)}…` : n.label,
         kind: n.type,
         category: n.type === "memory" ? n.category : n.kind,
-        size: n.type === "entity" ? Math.min(60, 22 + n.count * 4) : 16,
-        deg: deg.get(n.id) ?? 0,
+        size: sizeOf(n),
+        deg: n.type === "entity" ? (deg.get(n.id) ?? 0) : (mdeg.get(n.id) ?? 0),
+        key: n.type === "memory" && (mdeg.get(n.id) ?? 0) >= keyCut,
         raw: n,
+        // Label size, gap and width in model units; updateLabels keeps them constant on screen.
+        fs: 11,
+        tm: 3,
+        tmw: n.type === "entity" ? ENTITY_LABEL_MAX : MEMORY_LABEL_MAX,
       },
-      classes: n.id === f.focus ? "focus" : undefined,
+      classes: [n.id === f.focus ? "focus" : "", isPast(n) ? "past" : ""].join(" ").trim() || undefined,
     })),
     ...edges.map((e) => ({ data: { id: e.id, source: e.source, target: e.target, type: e.type, hub: e.type === "mentions" ? (deg.get(e.target) ?? 1) : 1 } })),
   ];
@@ -483,15 +689,13 @@ function graphStyle(): cytoscape.StylesheetJson {
       selector: "node",
       style: {
         label: "data(label)",
-        "font-size": 10,
+        // Constant on screen whatever the zoom; which names show is updateLabels' job.
+        "font-size": "data(fs)",
         color: text,
         "text-valign": "bottom",
-        "text-margin-y": 4,
-        // A memory's title only once zoomed in past 1:1 (cytoscape rounds the zoom up to a power
-        // of two here): hundreds of titles at the overview are a smear.
-        "min-zoomed-font-size": 12,
+        "text-margin-y": "data(tm)",
         "text-wrap": "ellipsis",
-        "text-max-width": "140px",
+        "text-max-width": "data(tmw)",
         width: "data(size)",
         height: "data(size)",
         "border-width": 1,
@@ -502,23 +706,16 @@ function graphStyle(): cytoscape.StylesheetJson {
     {
       selector: 'node[kind = "entity"]',
       style: {
-        // A square sized by how many memories mention it; the name sits under it and, for a
-        // minor entity, shows once zoomed in (a box sized to a hidden label would stay empty).
+        // A square sized by how many memories mention it (data "size", square root); the name sits
+        // under it (a box sized to its label would stay as an empty box when the name is hidden).
         shape: "round-rectangle",
         "background-color": surface,
         "border-color": accent,
         "border-width": 2,
-        width: "mapData(deg, 2, 40, 14, 40)",
-        height: "mapData(deg, 2, 40, 14, 40)",
-        "font-size": "mapData(deg, 2, 40, 11, 20)",
         "font-weight": "bold",
-        "text-valign": "bottom",
-        "text-margin-y": 3,
         "text-background-color": surface,
         "text-background-opacity": 0.8,
         "text-background-padding": "1px",
-        // Hubs keep their name at the overview, minor entities show it once zoomed in.
-        "min-zoomed-font-size": "mapData(deg, 4, 24, 12, 0)",
       },
     },
     { selector: "edge", style: { width: 1, "line-color": border, "curve-style": "bezier", opacity: 0.7 } },
@@ -536,9 +733,24 @@ function graphStyle(): cytoscape.StylesheetJson {
         opacity: t === "related" ? 0.55 : 0.9,
       },
     })),
+    // Zoomed out, "mentions" (most of the edges) nearly vanish: typed links and the clusters show.
+    { selector: "edge.far", style: { opacity: 0.05 } },
+    // A memory that is history (superseded / expired), shown only with "이력".
+    { selector: "node.past", style: { opacity: 0.55, "border-style": "dashed", "border-width": 2, "border-color": muted } },
+    // Hover / selection: the node's own edges stand out, everything else fades.
+    { selector: "edge.hl", style: { opacity: 1, width: 2.5 } },
+    { selector: 'edge.hl[type = "mentions"]', style: { opacity: 0.8, width: 1.5, "line-color": accent } },
+    { selector: "node.faded", style: { opacity: 0.15 } },
+    { selector: "edge.faded", style: { opacity: 0.03 } },
     { selector: "node:selected, node.focus", style: { "border-width": 3, "border-color": accent } },
-    { selector: "node.match", style: { "border-width": 3, "border-color": accent, "min-zoomed-font-size": 0 } },
+    { selector: "node.match", style: { "border-width": 3, "border-color": accent } },
     { selector: "node.dim", style: { opacity: 0.25 } },
+    // A search hit stays visible even outside a hovered/selected neighbourhood.
+    { selector: "node.match", style: { opacity: 1 } },
+    // Named nodes are drawn last, so no other node's shape covers a name; a name that would
+    // overlap a more important one is not drawn (updateLabels).
+    { selector: "node", style: { "z-index": 10 } },
+    { selector: "node.nolabel", style: { label: "", "z-index": 0 } },
   ] as cytoscape.StylesheetJson;
 }
 
