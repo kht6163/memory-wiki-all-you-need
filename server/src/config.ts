@@ -129,6 +129,26 @@ export const config = {
   graph: {
     /** Extra memories recall may add through the graph (entity mentions, links), still inside RECALL_BUDGET_CHARS. */
     recallExtra: int("GRAPH_RECALL_EXTRA", 4),
+    /**
+     * Recall only, with a prompt vector: a 1-/2-hop linked memory whose meaning is this far
+     * below the prompt's mean cosine (z under this) is not added (G-087). Links are explicit,
+     * so the floor only drops clear misses. Absent vector / small store = no floor.
+     */
+    recallMinZ: float("GRAPH_RECALL_MIN_Z", -0.5, -100, 100),
+    /**
+     * Recall only, with a prompt vector: memories close to a recalled one in meaning (cosine
+     * ≥ GRAPH_SIMILAR_MIN) or written within GRAPH_NEARBY_HOURS of it may fill slots the
+     * links left, when the prompt's z for them is at least this (G-087, ADR-0051).
+     * Computed per request, never stored. 0 = off.
+     */
+    proximityMinZ: float("GRAPH_PROXIMITY_MIN_Z", 2, 0, 100),
+    similarMin: float("GRAPH_SIMILAR_MIN", 0.7, -1, 1),
+    /**
+     * Window for "written around the same time" (hours, either side). 0 = off, the default:
+     * imported memories share one created_at, and on a real store the window brought in
+     * unrelated memories from the same session (ADR-0051).
+     */
+    nearbyHours: float("GRAPH_NEARBY_HOURS", 0, 0, 24 * 365),
     /** Memory characters sent to the LLM per backfill call. */
     backfillChunkChars: int("GRAPH_BACKFILL_CHUNK_CHARS", 24_000),
     /** Most memories one backfill job may take. */

@@ -180,7 +180,7 @@ export interface RecallReport {
   emptyRecall: number;
   recalled: number;
   hits: { keywordOnly: number; vectorOnly: number; both: number };
-  gated: { common: number; minZ: number; keywordMinZ: number };
+  gated: { common: number; minZ: number; keywordMinZ: number; graphMinZ: number };
   gatedPrompts: number;
   extras: Record<string, number>;
   use: Record<string, { prompts: number; memories: number; used: number; cited: number }>;

@@ -153,6 +153,16 @@ export function extractTerms(query: string, max = 12): Term[] {
 const ftsQuote = (s: string) => `"${s.replace(/"/g, '""')}"`;
 const likeEscape = (s: string) => s.replace(/[\\%_]/g, (m) => `\\${m}`);
 
+/**
+ * How far a memory's cosine to the query stands above the query's mean cosine, in
+ * standard deviations. Undefined when it was not compared (no current vector) or the
+ * spread says little (fewer than Z_MIN_CORPUS compared, or no spread).
+ */
+export function zScore(stats: SimStats, id: number): number | undefined {
+  const sim = stats.sims.get(id);
+  return sim === undefined || stats.n < Z_MIN_CORPUS || !(stats.sd > 0) ? undefined : (sim - stats.mean) / stats.sd;
+}
+
 export interface SearchOptions {
   projectId?: number | null;
   /** Restrict to these scopes. Default: global + user + the project (if any). */
@@ -192,6 +202,11 @@ export interface SearchOptions {
    * The z gates need a vector and at least Z_MIN_CORPUS compared memories. 1 / 0 = off.
    */
   gate?: { commonRatio: number; minZ: number; keywordMinZ: number };
+  /**
+   * Filled with the query's cosine to every compared memory (vector side only): recall's
+   * graph extras judge their candidates against the same prompt (zScore).
+   */
+  simStats?: SimStats;
   /** With a gate: counts what each gate dropped, added to this object (debug log, ADR-0050). */
   gated?: { common: number; minZ: number; keywordMinZ: number };
 }
@@ -262,7 +277,7 @@ export function searchEntries(query: string, opts: SearchOptions = {}): SearchHi
 
   // Vector side first: the keyword gate needs every visible memory's cosine.
   const gate = opts.gate;
-  const stats: SimStats = { n: 0, mean: 0, sd: 0, sims: new Map() };
+  const stats: SimStats = opts.simStats ?? { n: 0, mean: 0, sd: 0, sims: new Map() };
   const similar = new Map<number, number>();
   if (vector) {
     const rows = db
@@ -273,10 +288,7 @@ export function searchEntries(query: string, opts: SearchOptions = {}): SearchHi
     for (const n of nearest("entry", vector, rows, opts.minSimilarity ?? config.embed.searchMinSimilarity, Math.max(limit * 3, 50), stats))
       similar.set(n.id, n.sim);
   }
-  const zOf = (id: number): number | undefined => {
-    const sim = stats.sims.get(id);
-    return sim === undefined || stats.n < Z_MIN_CORPUS || !(stats.sd > 0) ? undefined : (sim - stats.mean) / stats.sd;
-  };
+  const zOf = (id: number) => zScore(stats, id);
   // Which gate kept each candidate out (counted once per memory after both sides, for the debug log).
   const dropped = new Map<number, "common" | "minZ" | "keywordMinZ">();
   if (gate && gate.minZ > 0)

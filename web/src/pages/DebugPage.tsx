@@ -143,7 +143,7 @@ function RecallMeasure() {
           <dd className="tabular">
             {r.gatedPrompts ? (
               <>
-                흔한 단어 {r.gated.common} · 뜻 z {r.gated.minZ} · 단어 적중의 뜻 z {r.gated.keywordMinZ}
+                흔한 단어 {r.gated.common} · 뜻 z {r.gated.minZ} · 단어 적중의 뜻 z {r.gated.keywordMinZ} · 그래프 연결의 뜻 z {r.gated.graphMinZ ?? 0}
                 <span className="muted small">프롬프트 {r.gatedPrompts}개 기준</span>
               </>
             ) : (

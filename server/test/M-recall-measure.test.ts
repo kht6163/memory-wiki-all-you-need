@@ -42,7 +42,7 @@ test("G-085: a recalled memory the agent's answer draws on is \"used\"; one it i
   const line = ofType("context").at(-1);
   assert.equal(line.agent, "claude-code");
   assert.equal(line.session, "m-use-1");
-  assert.deepEqual(Object.keys(line.gated).sort(), ["common", "keywordMinZ", "minZ"]);
+  assert.deepEqual(Object.keys(line.gated).sort(), ["common", "graphMinZ", "keywordMinZ", "minZ"]);
 
   // The prompt as the turn records it (whitespace may differ); the answer uses one memory's words.
   await turn(
@@ -79,6 +79,7 @@ test("G-085: a recalled memory the agent's answer draws on is \"used\"; one it i
   assert.equal(r.use["claude-code"].used >= 1, true);
   assert.equal(r.use.pi.cited >= 1, true);
   assert.equal(typeof r.gated.common, "number");
+  assert.equal(typeof r.gated.graphMinZ, "number");
   assert.ok(r.gatedPrompts >= 3, "only prompts that logged the gates are counted");
   await ok("PUT", "/debug", { enabled: false });
 });
@@ -140,6 +141,8 @@ test("G-085: route kinds of graph extras", () => {
   assert.equal(use.viaKind("replaces #3"), "replaces");
   assert.equal(use.viaKind("follows from #3 (2-hop)"), "follows from 2-hop");
   assert.equal(use.viaKind("PostgreSQL"), "entity");
+  assert.equal(use.viaKind("similar to #4"), "similar to", "G-087 proximity routes");
+  assert.equal(use.viaKind("same time as #4"), "same time as");
   assert.equal(use.agentKind("claude-code"), "claude-code");
   assert.equal(use.agentKind("Bad Agent!"), null);
   assert.equal(use.agentKind("constructor"), null, "only known client kinds");

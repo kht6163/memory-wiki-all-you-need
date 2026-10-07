@@ -130,6 +130,14 @@ function currentHash(kind: EmbedKind, id: number, updatedAt: string): string | n
   return hash;
 }
 
+/**
+ * A row's stored vector, without the current-text check: only for ids whose
+ * cosine `nearest` already computed in this request (it skips stale rows).
+ */
+export function storedVector(kind: EmbedKind, id: number): Float32Array | undefined {
+  return vectors(kind).get(id)?.vector;
+}
+
 /** Tests: forget loaded vectors (rows written behind the indexer's back). */
 export function resetVectorCache() {
   cache.entry = null;

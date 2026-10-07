@@ -206,8 +206,11 @@ export interface RecallReport {
   recalled: number;
   /** Search hits by what found them. */
   hits: { keywordOnly: number; vectorOnly: number; both: number };
-  /** Candidates the gates dropped (ADR-0046), over `gatedPrompts` prompts that logged it (v0.24.0+). */
-  gated: { common: number; minZ: number; keywordMinZ: number };
+  /**
+   * Candidates the gates dropped (ADR-0046), over `gatedPrompts` prompts that logged it (v0.24.0+);
+   * graphMinZ = linked memories under GRAPH_RECALL_MIN_Z (G-087, v0.25.0+).
+   */
+  gated: { common: number; minZ: number; keywordMinZ: number; graphMinZ: number };
   gatedPrompts: number;
   /** Graph extras by route kind ("because", "replaces", entity, …). */
   extras: Record<string, number>;
@@ -217,10 +220,11 @@ export interface RecallReport {
 
 /**
  * The route kind of an extra's "via" label: a link ("because #12", "follows from #3", "replaces #3",
- * "… (2-hop)", see context.ts viaLabel) or, for anything else, an entity's name → "entity".
+ * "… (2-hop)", see context.ts viaLabel), proximity ("similar to #3", "same time as #3", context.ts
+ * proximityLabel) or, for anything else, an entity's name → "entity".
  */
 export function viaKind(via: string): string {
-  const m = /^(because|depends_on|supersedes|needs|follows from|replaces) #\d+( \(2-hop\))?$/.exec(via);
+  const m = /^(because|depends_on|supersedes|needs|follows from|replaces|similar to|same time as) #\d+( \(2-hop\))?$/.exec(via);
   return m ? `${m[1]}${m[2] ? " 2-hop" : ""}` : "entity";
 }
 
@@ -238,7 +242,7 @@ export async function recallReport(days: number, now = new Date()): Promise<Reca
     emptyRecall: 0,
     recalled: 0,
     hits: { keywordOnly: 0, vectorOnly: 0, both: 0 },
-    gated: { common: 0, minZ: 0, keywordMinZ: 0 },
+    gated: { common: 0, minZ: 0, keywordMinZ: 0, graphMinZ: 0 },
     gatedPrompts: 0,
     extras: {},
     use: {},
@@ -260,7 +264,7 @@ export async function recallReport(days: number, now = new Date()): Promise<Reca
         const g = ev.gated as Partial<RecallReport["gated"]> | undefined;
         if (g) {
           r.gatedPrompts++;
-          for (const k of ["common", "minZ", "keywordMinZ"] as const) r.gated[k] += Number(g[k]) || 0;
+          for (const k of ["common", "minZ", "keywordMinZ", "graphMinZ"] as const) r.gated[k] += Number(g[k]) || 0;
         }
         for (const x of Array.isArray(ev.extras) ? (ev.extras as { via?: string }[]) : []) {
           const k = viaKind(String(x.via ?? ""));

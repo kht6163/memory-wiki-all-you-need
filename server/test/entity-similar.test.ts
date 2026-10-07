@@ -3,7 +3,7 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
 import { call, entry, ok } from "./helpers.ts";
-import { findSimilarPairs } from "../src/entity-similar.ts";
+import { HUB_DEGREE, findSimilarPairs, numbersIn, sequenceRatio, wordsCompatible } from "../src/entity-similar.ts";
 
 type Any = any;
 
@@ -47,8 +47,11 @@ test("a short name does not pair with unrelated names, only with names it is a w
 test("entities that keep appearing together pair by co-occurrence", async () => {
   await entry({ title: "sim co 1", entities: ["Zephyr Gateway", "Quokka Auth"] });
   await entry({ title: "sim co 2", entities: ["Zephyr Gateway", "Quokka Auth"] });
+  // G-088: two shared memories are a small sample (2 / (2 + 2) = 0.5 → 0.35).
+  assert.equal(pairOf(await similar(), "Zephyr Gateway", "Quokka Auth"), undefined);
+  await entry({ title: "sim co 2b", entities: ["Zephyr Gateway", "Quokka Auth"] });
   const p = pairOf(await similar(), "Zephyr Gateway", "Quokka Auth");
-  assert.ok(p);
+  assert.ok(p, "three of three: 3 / 5 = 0.6");
   assert.deepEqual(p.reasons, ["cooccur"]);
   // A single shared memory is not enough.
   await entry({ title: "sim co 3", entities: ["Marlin Queue", "Osprey Cache"] });
@@ -150,4 +153,76 @@ test("G-040: a path and a same-letter name are never suggested as a merge", asyn
   const pairs = await similar();
   assert.equal(pairOf(pairs, "helmchart/", "Helmchart"), undefined, "file vs name with the same letters is kept apart");
   assert.ok(pairOf(pairs, "helmchart/", "helmcharts/"), "two paths can still pair");
+});
+
+test("G-086: words must agree — one long shared part does not hide a different short one", () => {
+  assert.equal(Math.round(sequenceRatio("john", "jane") * 100) / 100, 0.5);
+  assert.equal(Math.round(sequenceRatio("arbor", "arbour") * 100) / 100, 0.91);
+  for (const [a, b] of [
+    ["getUserById", "getUserByName"],
+    ["Spring Boot Starter Web", "Spring Boot Starter Test"],
+    ["sticky 위치", "sticky 헤더"],
+    ["backend/Dockerfile", "frontend/Dockerfile"],
+  ])
+    assert.equal(wordsCompatible(a, b), false, `${a} / ${b}`);
+  for (const [a, b] of [
+    ["Postgres", "PostgreSQL"], // one word each side of the camelCase split: exempt
+    ["Kafka Streams", "KafkaStream"],
+    ["Elasticsearch", "ElasticSearch Engine"],
+    ["Acme Corp", "Acme Corporation"], // a word may stand for one it starts
+    ["Docker Compose", "docker-compose"],
+  ])
+    assert.equal(wordsCompatible(a, b), true, `${a} / ${b}`);
+  const ents = ["getUserById", "getUserByName", "Postgres", "PostgreSQL"].map((name, i) => ({ id: i + 1, name, kind: "tech", count: 1 }));
+  assert.deepEqual(
+    findSimilarPairs(ents, new Map()).map((p) => `${p.a.name}~${p.b.name}`),
+    ["Postgres~PostgreSQL"],
+  );
+  // Same number of words: the verdict does not depend on which name comes first (lower id).
+  for (const [a, b] of [["pi-cliproxyapi-provider", "CLIProxyAPI"], ["sticky 위치", "sticky 헤더"], ["Acme Corp", "Acme Corporation"]])
+    assert.equal(wordsCompatible(a, b), wordsCompatible(b, a), `${a} / ${b}`);
+  const swap = (x: string, y: string) =>
+    [findSimilarPairs([{ id: 1, name: x, kind: "tech", count: 1 }, { id: 2, name: y, kind: "tech", count: 1 }], new Map()).length,
+     findSimilarPairs([{ id: 1, name: y, kind: "tech", count: 1 }, { id: 2, name: x, kind: "tech", count: 1 }], new Map()).length];
+  const [x1, x2] = swap("pi-cliproxyapi-provider", "CLIProxyAPI");
+  assert.equal(x1, x2, "id order does not change the suggestion");
+});
+
+test("G-086: each name with a number the other lacks is two things; a subset is fine", () => {
+  assert.deepEqual([...numbersIn("UA0123 v4.0 3.10")].sort(), ["123", "3.10", "4"]);
+  for (const [a, b] of [["python2", "python3"], ["UA123", "UA124"], ["Room 101 key", "Room 102 key"]]) assert.equal(wordsCompatible(a, b), false, `${a} / ${b}`);
+  for (const [a, b] of [["ES modules", "ES2015 modules"], ["Q3 earnings", "Q3 2024 earnings"]]) assert.equal(wordsCompatible(a, b), true, `${a} / ${b}`);
+  // The number rule only takes the name evidence away: co-occurrence still speaks.
+  const ents = [
+    { id: 1, name: "python2", kind: "tech", count: 6 },
+    { id: 2, name: "python3", kind: "tech", count: 6 },
+  ];
+  assert.deepEqual(findSimilarPairs(ents, new Map()), []);
+  assert.deepEqual(findSimilarPairs(ents, new Map([["1:2", 6]]))[0]?.reasons, ["cooccur"]);
+});
+
+test("G-088: co-occurrence shrinks small samples and damps hubs seen next to everything", () => {
+  const pair = (n: number, count: number, degree = 0) =>
+    findSimilarPairs(
+      [
+        { id: 1, name: "Alpha Thing", kind: "tech", count, degree },
+        { id: 2, name: "Beta Widget", kind: "tech", count, degree },
+      ],
+      new Map([["1:2", n]]),
+    )[0];
+  assert.equal(pair(2, 2), undefined, "2 / (2 + 2): not enough");
+  assert.ok(pair(5, 5), "5 / (5 + 2) ≈ 0.71: suggested");
+  assert.ok(pair(5, 5, HUB_DEGREE), "at HUB_DEGREE partners: no damping");
+  assert.equal(pair(5, 5, HUB_DEGREE * 4), undefined, "both hubs: × 0.5");
+  // Damping has a floor: two big entities in exactly the same memories are still a duplicate.
+  assert.ok(pair(100, 100, HUB_DEGREE * 4), "100 / 102 × 0.6 floor ≈ 0.59: suggested");
+  // Only when both are hubs: the smaller degree decides.
+  const mixed = findSimilarPairs(
+    [
+      { id: 1, name: "Alpha Thing", kind: "tech", count: 5, degree: HUB_DEGREE * 4 },
+      { id: 2, name: "Beta Widget", kind: "tech", count: 5, degree: 3 },
+    ],
+    new Map([["1:2", 5]]),
+  );
+  assert.equal(mixed.length, 1);
 });

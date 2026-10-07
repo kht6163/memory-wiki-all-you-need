@@ -294,8 +294,16 @@ export function findEntity(name: string): Entity | null {
  * see. activeOnly drops superseded/expired ones in SQL, before `limit` applies
  * (so inactive newer memories never crowd out active ones).
  */
-export function entityEntries(entityId: number, visibleFrom?: number | null, opts: { activeOnly?: boolean; limit?: number } = {}): Entry[] {
+/**
+ * `rankBy`: entity ids (the ones a prompt names) — memories mentioning more of them
+ * come first, before pinned and newest (recall's per-entity extras, G-042).
+ */
+export function entityEntries(entityId: number, visibleFrom?: number | null, opts: { activeOnly?: boolean; limit?: number; rankBy?: number[] } = {}): Entry[] {
   const vis = visibleFrom === undefined ? "" : "AND (e.scope IN ('global','user') OR e.project_id = ?)";
+  const rank = [...new Set(opts.rankBy ?? [])];
+  const shared = rank.length
+    ? `(SELECT COUNT(*) FROM entry_entities r WHERE r.entry_id = e.id AND r.entity_id IN (${rank.map(() => "?").join(",")})) DESC,`
+    : "";
   const args: number[] = [entityId];
   if (visibleFrom !== undefined) args.push(visibleFrom ?? -1);
   const active = opts.activeOnly ? `AND ${ACTIVE_SQL("e")}` : "";
@@ -304,9 +312,9 @@ export function entityEntries(entityId: number, visibleFrom?: number | null, opt
   return db
     .prepare(
       `SELECT e.* FROM entry_entities ee JOIN entries e ON e.id = ee.entry_id
-       WHERE ee.entity_id = ? AND e.deleted_at IS NULL ${vis} ${active} ORDER BY e.pinned DESC, e.updated_at DESC ${limit}`,
+       WHERE ee.entity_id = ? AND e.deleted_at IS NULL ${vis} ${active} ORDER BY ${shared} e.pinned DESC, e.updated_at DESC ${limit}`,
     )
-    .all(...args)
+    .all(...args.slice(0, args.length - (opts.limit != null ? 1 : 0)), ...rank, ...(opts.limit != null ? [opts.limit] : []))
     .map(rowToEntry);
 }
 
