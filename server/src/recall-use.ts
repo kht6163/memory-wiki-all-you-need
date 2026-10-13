@@ -20,7 +20,18 @@ interface Pending {
   recalled: number[];
   agent: string | null;
   projectId: number | null;
+  /** How recall found each memory (recallRoutes), copied onto its recall.use judgment. */
+  routes?: Map<number, Route>;
+  /** The client said it runs without a user (a script, `pi -p`): kept apart in the report. */
+  auto?: boolean;
   at: number;
+}
+
+/** How recall found one memory: hit route or graph extra kind, the prompt z, the keyword rank. */
+export interface Route {
+  route: string;
+  z?: number;
+  kwRank?: number;
 }
 
 /** Sessions remembered at most (oldest dropped first) and prompts kept per session. */
@@ -81,6 +92,23 @@ const promptKey = (s: string) => norm(redactSecrets(norm(s))).slice(0, KEY_CHARS
 const AGENTS = new Set(["pi", "claude-code"]);
 export function agentKind(raw: unknown): string | null {
   return typeof raw === "string" && AGENTS.has(raw) ? raw : null;
+}
+
+/**
+ * Each recalled memory's route from /context's debug: a search hit by what found it
+ * ("keywordOnly" / "both" / "vectorOnly"), a graph extra by viaKind.
+ */
+export function recallRoutes(debug: {
+  hits: { id: number; keyword?: number; similarity?: number; z?: number; kwRank?: number }[];
+  extras: { id: number; via: string; z?: number }[];
+}): Map<number, Route> {
+  const m = new Map<number, Route>();
+  for (const h of debug.hits) {
+    const route = h.keyword == null ? "vectorOnly" : h.similarity == null ? "keywordOnly" : "both";
+    m.set(h.id, { route, ...(h.z == null ? {} : { z: h.z }), ...(h.kwRank == null ? {} : { kwRank: h.kwRank }) });
+  }
+  for (const x of debug.extras) if (!m.has(x.id)) m.set(x.id, { route: viaKind(x.via), ...(x.z == null ? {} : { z: x.z }) });
+  return m;
 }
 
 /** Debug mode went off (or never was on): forget everything remembered. */
@@ -176,11 +204,12 @@ export function noteTurnUse(turn: Turn, now = Date.now()) {
     if (firstMatched < 0) firstMatched = i;
     common ??= commonWords(DISTINCT_RATIO, p.projectId);
     const out = agentOutput(turn, at);
-    const memories = p.recalled.map((id) => memoryUse(id, p.prompt, out, common!));
+    const memories = p.recalled.map((id) => ({ ...memoryUse(id, p.prompt, out, common!), ...p.routes?.get(id) }));
     debugLog("recall.use", {
       turn: turn.id,
       session: turn.session_id,
       agent: p.agent,
+      ...(p.auto ? { auto: true } : {}),
       project: p.projectId,
       prompt: p.prompt.slice(0, 300),
       memories,
@@ -216,6 +245,31 @@ export interface RecallReport {
   extras: Record<string, number>;
   /** recall.use lines: memories checked and judged used, per client kind. */
   use: Record<string, { prompts: number; memories: number; used: number; cited: number }>;
+  /** Prompts a client sent as non-interactive (v0.26.0+): left out of every other count. */
+  auto: number;
+  /** Judged memories by route (hit route or extra kind, v0.26.0+ lines only). */
+  useBy: Record<string, UseCount>;
+  /** Judged search hits by prompt z (the gate's measure), v0.26.0+ lines only. */
+  useByZ: Record<string, UseCount>;
+  /**
+   * Judged hits keyword search alone would not have recalled (vector-only, or keyword rank at or
+   * past RECALL_LIMIT): what the embeddings add to recall, v0.26.0+ lines only.
+   */
+  needVector: UseCount;
+}
+
+export interface UseCount {
+  memories: number;
+  used: number;
+}
+
+const HIT_ROUTES = new Set(["keywordOnly", "both", "vectorOnly"]);
+/** z buckets of useByZ, low edge first. */
+const Z_EDGES = [2, 2.5, 3, 3.5];
+export function zBucket(z: number | undefined): string {
+  if (z == null) return "none";
+  const i = Z_EDGES.findLastIndex((e) => z >= e);
+  return i < 0 ? `<${Z_EDGES[0]}` : i === Z_EDGES.length - 1 ? `≥${Z_EDGES[i]}` : `${Z_EDGES[i]}–${Z_EDGES[i + 1]}`;
 }
 
 /**
@@ -246,9 +300,21 @@ export async function recallReport(days: number, now = new Date()): Promise<Reca
     gatedPrompts: 0,
     extras: {},
     use: {},
+    auto: 0,
+    useBy: {},
+    useByZ: {},
+    needVector: { memories: 0, used: 0 },
+  };
+  const add = (c: UseCount, used: boolean) => {
+    c.memories++;
+    if (used) c.used++;
   };
   for (const date of dates)
     for await (const ev of debugEvents(date, ["context", "recall.use"])) {
+      if (ev.auto === true) {
+        if (ev.type === "context" && String(ev.prompt ?? "").trim()) r.auto++;
+        continue;
+      }
       if (ev.type === "context") {
         if (!String(ev.prompt ?? "").trim()) continue;
         const agent = agentKind(ev.agent) ?? "?";
@@ -274,10 +340,15 @@ export async function recallReport(days: number, now = new Date()): Promise<Reca
         const agent = agentKind(ev.agent) ?? "?";
         const u = (r.use[agent] ??= { prompts: 0, memories: 0, used: 0, cited: 0 });
         u.prompts++;
-        for (const m of Array.isArray(ev.memories) ? (ev.memories as MemoryUse[]) : []) {
+        for (const m of Array.isArray(ev.memories) ? (ev.memories as (MemoryUse & Partial<Route>)[]) : []) {
           u.memories++;
           if (m.used) u.used++;
           if (m.cited) u.cited++;
+          if (typeof m.route !== "string") continue;
+          add((r.useBy[m.route] ??= { memories: 0, used: 0 }), m.used);
+          if (!HIT_ROUTES.has(m.route)) continue;
+          add((r.useByZ[zBucket(m.z)] ??= { memories: 0, used: 0 }), m.used);
+          if (m.route === "vectorOnly" || (m.kwRank ?? 0) >= config.recallLimit) add(r.needVector, m.used);
         }
       }
     }

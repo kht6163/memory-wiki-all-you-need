@@ -58,7 +58,7 @@ import {
 import { mergePreview, mergeProject } from "./project-merge.ts";
 import { dismissSimilarProjects, similarProjects } from "./project-similar.ts";
 import { deleteTurn, enqueueTurn, getTurn, listTurns, retryTurn } from "./turns.ts";
-import { agentKind, noteTurnUse, recallReport, rememberRecall } from "./recall-use.ts";
+import { agentKind, noteTurnUse, recallReport, recallRoutes, rememberRecall } from "./recall-use.ts";
 import { config, llmEnabled } from "./config.ts";
 import {
   applyProposal,
@@ -265,7 +265,8 @@ api.get("/debug/logs/:date", (c) => {
 /** Called by the pi extension before every run. Upserts the project. */
 api.post("/context", async (c) => {
   // agent / sessionId (v0.24.0 clients): for the measurement only (ADR-0050); older clients send neither.
-  const b = await body<{ project?: ProjectRef | null; prompt?: string; agent?: unknown; sessionId?: unknown }>(c);
+  // interactive: false (v0.26.0 pi extension without a UI — a script, `pi -p`) keeps the prompt out of the use stats.
+  const b = await body<{ project?: ProjectRef | null; prompt?: string; agent?: unknown; sessionId?: unknown; interactive?: unknown }>(c);
   const project = projectFromRef(b.project);
   const prompt = String(b.prompt ?? "").slice(0, 8000);
   const { debug, ...ctx } = await buildContext(project, prompt);
@@ -274,8 +275,9 @@ api.post("/context", async (c) => {
   recordShown(ctx.included);
   const agent = agentKind(b.agent);
   const session = typeof b.sessionId === "string" && b.sessionId.length <= 200 ? b.sessionId : null;
-  if (debug) logContext("context", project, prompt, ctx, { agent, session, ...debug });
-  rememberRecall(session, { prompt, recalled: ctx.recalled, agent, projectId: project?.id ?? null });
+  const auto = b.interactive === false;
+  if (debug) logContext("context", project, prompt, ctx, { agent, session, ...(auto ? { auto } : {}), ...debug });
+  rememberRecall(session, { prompt, recalled: ctx.recalled, agent, projectId: project?.id ?? null, auto, ...(debug ? { routes: recallRoutes(debug) } : {}) });
   // The extension compares this with the skills it mirrored and says so when they differ.
   // recalledEntries: the extension's "memory recall" card (what was injected for this prompt) —
   // the title per line, the start of the body when the card is expanded.

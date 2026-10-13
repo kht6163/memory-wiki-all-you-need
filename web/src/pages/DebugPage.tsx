@@ -1,6 +1,6 @@
 import "./debug.css";
 import { useState } from "react";
-import { api, type DebugInfo, type RecallReport } from "../api.ts";
+import { api, type DebugInfo, type RecallReport, type UseCount } from "../api.ts";
 import { Icon } from "../components/Icon.tsx";
 import { PageHeader } from "../components/PageHeader.tsx";
 import { SkeletonList } from "../components/Skeleton.tsx";
@@ -87,6 +87,19 @@ export function DebugPage() {
 
 const AGENT: Record<string, string> = { pi: "pi", "claude-code": "Claude Code", "?": "알 수 없음(옛 확장)" };
 const pct = (a: number, b: number) => (b ? `${Math.round((a / b) * 100)}%` : "–");
+const ROUTE: Record<string, string> = { keywordOnly: "단어만", both: "단어+뜻", vectorOnly: "뜻만", entity: "엔티티 덧붙임" };
+const Z_ORDER = ["<2", "2–2.5", "2.5–3", "3–3.5", "≥3.5", "none"];
+const NO_ROUTES = "아직 없음 — 서버 0.26.0부터 셉니다";
+/** "label used/memories (pct)" per key; keys in `order` first, the rest by size. */
+function useCounts(by: Record<string, UseCount> | undefined, names?: Record<string, string>, order?: string[]) {
+  const rows = Object.entries(by ?? {});
+  if (!rows.length) return NO_ROUTES;
+  const at = (k: string) => (order?.includes(k) ? order.indexOf(k) : Infinity);
+  return rows
+    .sort((a, b) => at(a[0]) - at(b[0]) || b[1].memories - a[1].memories)
+    .map(([k, c]) => `${k === "none" ? "z 없음" : (names?.[k] ?? k)} ${c.used}/${c.memories}(${pct(c.used, c.memories)})`)
+    .join(" · ");
+}
 const sum = (o: Record<string, number>) => Object.values(o).reduce((a, b) => a + b, 0);
 
 /**
@@ -129,6 +142,7 @@ function RecallMeasure() {
                 {AGENT[k] ?? k} {n}
               </span>
             ))}
+            {r.auto ? <span className="muted small">자동 호출 {r.auto}개 제외</span> : null}
           </dd>
           <dt>회상</dt>
           <dd className="tabular">
@@ -168,6 +182,21 @@ function RecallMeasure() {
                   </span>
                 ))
               : "아직 없음 — 새 확장(0.24.0 이상)이 보낸 턴부터 셉니다"}
+          </dd>
+          <dt>경로별 쓰임</dt>
+          <dd className="tabular">{useCounts(r.useBy, ROUTE)}</dd>
+          <dt>뜻 z별 쓰임</dt>
+          <dd className="tabular">{useCounts(r.useByZ, undefined, Z_ORDER)}</dd>
+          <dt>뜻이 있어야 찾은 것</dt>
+          <dd className="tabular">
+            {r.needVector?.memories ? (
+              <>
+                메모리 {r.needVector.memories}개 중 {r.needVector.used}개 쓰임({pct(r.needVector.used, r.needVector.memories)})
+                <span className="muted small">뜻으로만 찾았거나 단어 순위가 회상 수 밖이던 것</span>
+              </>
+            ) : (
+              NO_ROUTES
+            )}
           </dd>
         </dl>
       )}

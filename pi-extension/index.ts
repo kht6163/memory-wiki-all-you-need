@@ -689,8 +689,9 @@ export default function memoryAllYouNeed(pi: ExtensionAPI) {
       const res = await call<{ system: string; recall: string; recalled?: number[]; recalledEntries?: unknown; skillsVersion?: string }>(
         "POST",
         "/context",
-        // agent / sessionId: the server's recall measurement (debug mode) pairs this prompt with its turn.
-        { project: projectBody(), prompt: event.prompt, agent: "pi", sessionId: ctx.sessionManager.getSessionId() },
+        // agent / sessionId: the server's recall measurement (debug mode) pairs this prompt with its turn;
+        // interactive: false without a UI (print / json mode, a script) keeps it out of the use stats.
+        { project: projectBody(), prompt: event.prompt, agent: "pi", sessionId: ctx.sessionManager.getSessionId(), interactive: ctx.hasUI },
         CONTEXT_TIMEOUT_MS,
       );
       cachedSystem = res.system;

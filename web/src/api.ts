@@ -184,6 +184,16 @@ export interface RecallReport {
   gatedPrompts: number;
   extras: Record<string, number>;
   use: Record<string, { prompts: number; memories: number; used: number; cited: number }>;
+  /** Server 0.26.0+: non-interactive prompts (kept out of the rest), use by route / prompt z, hits that needed vectors. */
+  auto?: number;
+  useBy?: Record<string, UseCount>;
+  useByZ?: Record<string, UseCount>;
+  needVector?: UseCount;
+}
+
+export interface UseCount {
+  memories: number;
+  used: number;
 }
 
 export interface DebugInfo {

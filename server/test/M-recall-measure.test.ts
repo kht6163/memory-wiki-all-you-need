@@ -150,7 +150,70 @@ test("G-085: route kinds of graph extras", () => {
 
 test("G-085: both clients send agent and sessionId with /context", () => {
   const pi = fs.readFileSync(new URL("../../pi-extension/index.ts", import.meta.url), "utf8");
-  assert.match(pi, /prompt: event\.prompt, agent: "pi", sessionId: ctx\.sessionManager\.getSessionId\(\)/);
+  assert.match(pi, /prompt: event\.prompt, agent: "pi", sessionId: ctx\.sessionManager\.getSessionId\(\), interactive: ctx\.hasUI/);
   const cc = fs.readFileSync(new URL("../../claude-code-plugin/hooks/register.ts", import.meta.url), "utf8");
   assert.match(cc, /prompt, agent: "claude-code", sessionId: await \$\.session\.id\(\)/);
+});
+
+test("ADR-0050: each judgment carries its route and z; the report splits use by route, z and what needed vectors; non-interactive prompts stay out", async () => {
+  await ok("PUT", "/debug", { enabled: true });
+  use.resetRecallUse();
+  const p = await project("github.com/test/m-route", "m-route");
+  const ref = { key: p.key, name: p.name };
+  const m = await entry({ project_id: p.id, title: "dingo 캐시 설정", body: "dingo 는 varnish ttl 120s 로 둔다" });
+  const before = await ok<Any>("GET", "/debug/recall-report?days=1");
+
+  await ok("POST", "/context", { project: ref, prompt: "dingo 캐시?", agent: "pi", sessionId: "m-route", interactive: true });
+  await turn([{ role: "user", text: "dingo 캐시?" }, { role: "assistant", text: "varnish ttl 120s 입니다." }], ref, "m-route");
+  const judged = ofType("recall.use").at(-1).memories.find((x: Any) => x.id === m.id);
+  assert.equal(judged.used, true);
+  assert.equal(judged.route, "keywordOnly", "no embeddings in tests: a keyword hit");
+  assert.equal(judged.kwRank, 0);
+
+  // A script's prompt (no UI): logged as auto, judged, but counted only in `auto`.
+  await ok("POST", "/context", { project: ref, prompt: "dingo 캐시 ttl?", agent: "pi", sessionId: "m-route-auto", interactive: false });
+  assert.equal(ofType("context").at(-1).auto, true);
+  await turn([{ role: "user", text: "dingo 캐시 ttl?" }, { role: "assistant", text: "varnish ttl 120s" }], ref, "m-route-auto");
+  assert.equal(ofType("recall.use").at(-1).auto, true);
+
+  const r = await ok<Any>("GET", "/debug/recall-report?days=1");
+  assert.equal(r.auto - before.auto, 1);
+  assert.equal(r.prompts.pi - before.prompts.pi, 1, "the auto prompt is not in the prompt count");
+  assert.equal(r.use.pi.prompts - before.use.pi.prompts, 1);
+  assert.equal(r.useBy.keywordOnly.used - (before.useBy.keywordOnly?.used ?? 0), 1);
+  const zSum = (x: Any) => Object.values(x.useByZ as Record<string, Any>).reduce((a: number, c: Any) => a + c.memories, 0);
+  assert.equal(zSum(r) - zSum(before), 1);
+  assert.equal(r.needVector.memories, before.needVector.memories, "a top keyword hit did not need vectors");
+  await ok("PUT", "/debug", { enabled: false });
+});
+
+test("ADR-0050: z buckets of the report", () => {
+  assert.equal(use.zBucket(undefined), "none");
+  assert.equal(use.zBucket(1.9), "<2");
+  assert.equal(use.zBucket(2), "2–2.5");
+  assert.equal(use.zBucket(2.49), "2–2.5");
+  assert.equal(use.zBucket(3.2), "3–3.5");
+  assert.equal(use.zBucket(5), "≥3.5");
+});
+
+test("ADR-0050: routes of a recall — hits by what found them, extras by kind, a hit wins over an extra", () => {
+  const r = use.recallRoutes({
+    hits: [
+      { id: 1, keyword: 3, z: 2.4, kwRank: 0 },
+      { id: 2, keyword: 1, similarity: 0.6, z: 3.1, kwRank: 9 },
+      { id: 3, similarity: 0.7, z: 3.6 },
+    ],
+    extras: [
+      { id: 4, via: "replaces #9" },
+      { id: 5, via: "JSON", z: 0.3 },
+      { id: 1, via: "because #2" },
+    ],
+  });
+  assert.deepEqual(Object.fromEntries(r), {
+    1: { route: "keywordOnly", z: 2.4, kwRank: 0 },
+    2: { route: "both", z: 3.1, kwRank: 9 },
+    3: { route: "vectorOnly", z: 3.6 },
+    4: { route: "replaces" },
+    5: { route: "entity", z: 0.3 },
+  });
 });

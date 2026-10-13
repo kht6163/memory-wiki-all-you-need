@@ -221,6 +221,8 @@ export interface SearchHit {
   /** With a gate: the matched query words ("*" = common) and the cosine's z-score. For the debug log. */
   terms?: string[];
   z?: number;
+  /** With a gate: rank (0-based) in the keyword list before fusion; ≥ limit = vectors brought it in. */
+  kwRank?: number;
 }
 
 /** Reciprocal rank fusion constant: smaller = the top of each list counts more. */
@@ -388,6 +390,7 @@ export function searchEntries(query: string, opts: SearchOptions = {}): SearchHi
       ...(sim === undefined ? {} : { similarity: sim }),
       ...(words ? { terms: words } : {}),
       ...(z === undefined ? {} : { z: Math.round(z * 100) / 100 }),
+      ...(gate && kwRank.has(id) ? { kwRank: kwRank.get(id) } : {}),
     });
   }
   if (opts.boostEntities?.length && hits.length)

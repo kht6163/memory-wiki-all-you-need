@@ -152,7 +152,7 @@ export interface BuiltContext {
 }
 
 export interface RecallDebug {
-  hits: { id: number; score: number; keyword?: number; similarity?: number; z?: number; terms?: string[] }[];
+  hits: { id: number; score: number; keyword?: number; similarity?: number; z?: number; terms?: string[]; kwRank?: number }[];
   replaced: { old: number; next: number }[];
   mentioned: number[];
   extras: { id: number; via: string; z?: number }[];
@@ -265,7 +265,7 @@ export function buildContextWith(project: Project | null, prompt: string, vector
     const sims: SimStats = { n: 0, mean: 0, sd: 0, sims: new Map() };
     const hits = searchEntries(prompt, { projectId: pid, limit: config.recallLimit, excludeIds: used, boostEntities: mentioned, ...semantic, gated, simStats: sims });
     if (debug) debug.gated = gated;
-    if (debug) debug.hits = hits.map((h) => ({ id: h.entry.id, score: h.score, keyword: h.keyword, similarity: h.similarity, z: h.z, terms: h.terms }));
+    if (debug) debug.hits = hits.map((h) => ({ id: h.entry.id, score: h.score, keyword: h.keyword, similarity: h.similarity, z: h.z, terms: h.terms, kwRank: h.kwRank }));
     if (debug) debug.mentioned = mentioned;
     for (const h of hits) {
       if (h.entry.category === "standing" || seen.has(h.entry.id)) continue;
@@ -315,7 +315,8 @@ export function buildContextWith(project: Project | null, prompt: string, vector
       const name = getEntity(entId)?.name ?? "";
       // Active ones only, filtered before the per-entity cap (newer expired memories must not hide them).
       // Memories naming more of the prompt's entities first (hubs count too, they only get no slots).
-      for (const e of entityEntries(entId, pid, { activeOnly: true, limit, rankBy: mentioned })) addExtra(e, name);
+      // No floor here (G-087 judges links only); the z is logged for the measurement (ADR-0050).
+      for (const e of entityEntries(entId, pid, { activeOnly: true, limit, rankBy: mentioned })) addExtra(e, name, zScore(sims, e.id));
     }
     const base = [...picks.map((p) => p.e.id), ...extras.map((x) => x.e.id)];
     const hop1: number[] = [];
