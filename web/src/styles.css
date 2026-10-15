@@ -2281,3 +2281,28 @@ code.key {
 .state-badge { color: var(--color-text-2); background: var(--color-surface-3); }
 .is-history { opacity: .62; }
 .is-history:hover, .is-history:focus-within { opacity: 1; }
+
+/* Pager under a paged list (G-089): memory list, trash. */
+.pager {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--space-1);
+  margin: var(--space-4) 0 0;
+}
+.pager .btn {
+  min-width: 32px;
+  justify-content: center;
+}
+.pager .btn[aria-current="page"] {
+  background: var(--color-accent-soft);
+  color: var(--color-accent-text);
+  font-weight: 600;
+}
+.pager-gap {
+  padding: 0 var(--space-1);
+  color: var(--color-text-3);
+}
+.pager > .muted {
+  margin-left: var(--space-2);
+}

@@ -551,6 +551,98 @@ export function listEntries(f: EntryFilter = {}): Entry[] {
     .map(rowToEntry);
 }
 
+/** Category order of the web memory list (web/src/lib.tsx CATEGORY_ORDER): pages flow through its sections. */
+export const LIST_CATEGORY_ORDER = ["standing", "convention", "decision", "fact", "preference", "correction", "failure", "tool-quirk", "insight"];
+
+export interface EntryPageFilter {
+  scope?: Scope;
+  projectId?: number;
+  /** Only standing instructions (the "고정 지시" page). */
+  standing?: boolean;
+  /** Substring of title, body, tags or keywords (case-insensitive for Latin letters). */
+  q?: string;
+  cats?: string[];
+  srcs?: string[];
+  /** Include history (superseded or expired). */
+  history?: boolean;
+  /** The trash (deleted memories): flat, newest deletion first; history and sort do not apply. */
+  deleted?: boolean;
+  sort?: "pinned" | "updated" | "title";
+  offset?: number;
+  limit?: number;
+}
+
+export interface EntryPage {
+  items: Entry[];
+  /** Matching every filter (the pager's size). */
+  total: number;
+  /** History memories in scope (the "지난 사실 N개" toggle), whatever the other filters. */
+  historyCount: number;
+  /**
+   * Chips: `present` = in the shown set (history toggle applied), `n` = what a click would give
+   * (every other filter applied).
+   */
+  cats: Record<string, { present: number; n: number }>;
+  srcs: Record<string, { present: number; n: number }>;
+}
+
+export const ENTRY_PAGE_MAX = 200;
+
+/**
+ * One page of the web memory list (G-089). Every filter of the page runs here: the list used to
+ * load up to 1,000 memories and filter in the browser, silently cutting off a larger scope.
+ */
+export function listEntryPage(f: EntryPageFilter = {}): EntryPage {
+  const base: string[] = [f.deleted ? "e.deleted_at IS NOT NULL" : "e.deleted_at IS NULL"];
+  const args: (string | number)[] = [];
+  if (f.scope) {
+    base.push("e.scope = ?");
+    args.push(f.scope);
+  }
+  if (f.projectId) {
+    base.push("e.project_id = ?");
+    args.push(f.projectId);
+  }
+  if (f.standing) base.push("e.category = 'standing'");
+  const historyCount = f.deleted
+    ? 0
+    : Number((db.prepare(`SELECT COUNT(*) AS n FROM entries e WHERE ${base.join(" AND ")} AND NOT ${ACTIVE_SQL("e")}`).get(...args) as { n: number }).n);
+  const shown = f.history || f.deleted ? [...base] : [...base, ACTIVE_SQL("e")];
+  const q = (f.q ?? "").trim().toLowerCase();
+  const text = q ? "instr(lower(e.title || char(10) || e.body || char(10) || e.tags || char(10) || e.keywords), ?) > 0" : "1";
+  const textArgs = q ? [q] : [];
+  const inList = (col: string, xs: string[] | undefined) => (xs?.length ? { sql: `${col} IN (${xs.map(() => "?").join(",")})`, args: xs } : { sql: "1", args: [] as string[] });
+  const cat = f.standing ? { sql: "1", args: [] as string[] } : inList("e.category", f.cats);
+  const src = inList("e.source", f.srcs);
+  // Chip counts: present in the shown set; n with the text filter and the other chip group.
+  const chips = (col: string, other: { sql: string; args: string[] }) => {
+    const out: Record<string, { present: number; n: number }> = {};
+    for (const r of db
+      .prepare(
+        `SELECT ${col} AS k, COUNT(*) AS present, SUM(CASE WHEN ${text} AND ${other.sql} THEN 1 ELSE 0 END) AS n
+         FROM entries e WHERE ${shown.join(" AND ")} GROUP BY ${col}`,
+      )
+      .all(...textArgs, ...other.args, ...args) as { k: string; present: number; n: number }[])
+      out[r.k] = { present: Number(r.present), n: Number(r.n) };
+    return out;
+  };
+  const where = [...shown, text, cat.sql, src.sql].join(" AND ");
+  const whereArgs = [...args, ...textArgs, ...cat.args, ...src.args];
+  const total = Number((db.prepare(`SELECT COUNT(*) AS n FROM entries e WHERE ${where}`).get(...whereArgs) as { n: number }).n);
+  const catRank = `CASE e.category ${LIST_CATEGORY_ORDER.map((c, i) => `WHEN '${c}' THEN ${i}`).join(" ")} ELSE ${LIST_CATEGORY_ORDER.length} END, e.category`;
+  // id last: many memories share one updated_at (a bulk import), and OFFSET needs a total order.
+  const order = f.deleted
+    ? "e.deleted_at DESC, e.id DESC"
+    : `${catRank}, ${f.sort === "updated" ? "e.updated_at DESC, e.id DESC" : f.sort === "title" ? "e.title, e.id DESC" : "e.pinned DESC, e.updated_at DESC, e.id DESC"}`;
+  const limit = Math.min(Math.max(Math.trunc(f.limit ?? 50) || 50, 1), ENTRY_PAGE_MAX);
+  const offset = Math.max(Math.trunc(f.offset ?? 0) || 0, 0);
+  const items = db
+    .prepare(`SELECT e.* FROM entries e WHERE ${where} ORDER BY ${order} LIMIT ? OFFSET ?`)
+    .all(...whereArgs, limit, offset)
+    .map(rowToEntry);
+  return { items, total, historyCount, cats: chips("e.category", src), srcs: chips("e.source", cat) };
+}
+
 /**
  * Usage day for ordering: the last day of use, except that a use TODAY does
  * not count yet — then the day of the use before it (rank_day). So the key is

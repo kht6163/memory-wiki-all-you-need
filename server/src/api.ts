@@ -33,6 +33,7 @@ import {
   getProjectByKey,
   projectAliases,
   listEntries,
+  listEntryPage,
   listProjects,
   listRevisions,
   purgeEntry,
@@ -455,6 +456,25 @@ api.get("/entries", (c) =>
     })),
   ),
 );
+// The web memory list, one page at a time with every filter on the server (G-089).
+api.get("/entries/page", (c) => {
+  const list = (k: string) => (c.req.query(k) ?? "").split(",").map((x) => x.trim()).filter(Boolean);
+  const sort = c.req.query("sort");
+  const page = listEntryPage({
+    scope: (c.req.query("scope") as Scope) || undefined,
+    projectId: num(c.req.query("project_id")),
+    standing: c.req.query("standing") === "1",
+    q: c.req.query("q") || undefined,
+    cats: list("cat"),
+    srcs: list("src"),
+    history: c.req.query("history") === "1",
+    deleted: c.req.query("deleted") === "1",
+    sort: sort === "updated" || sort === "title" ? sort : "pinned",
+    offset: num(c.req.query("offset")),
+    limit: num(c.req.query("limit")),
+  });
+  return c.json({ ...page, items: withStates(page.items) });
+});
 api.get("/entries/visible", (c) => c.json(withStates(visibleEntries(num(c.req.query("project_id")) ?? null))));
 api.get("/entries/:id", (c) => {
   const e = getEntry(idParam(c));

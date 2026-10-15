@@ -170,6 +170,30 @@ export interface SessionHit {
   snippet: string;
 }
 
+export interface EntryPageQuery {
+  scope?: Scope;
+  project_id?: number;
+  standing?: boolean;
+  q?: string;
+  cat?: string[];
+  src?: string[];
+  history?: boolean;
+  /** The trash: deleted memories, newest deletion first. */
+  deleted?: boolean;
+  sort?: "pinned" | "updated" | "title";
+  offset?: number;
+  limit?: number;
+}
+
+/** GET /entries/page: chips count `present` in the shown set and `n` with every other filter. */
+export interface EntryPage {
+  items: Entry[];
+  total: number;
+  historyCount: number;
+  cats: Record<string, { present: number; n: number }>;
+  srcs: Record<string, { present: number; n: number }>;
+}
+
 /** Debug mode (ADR-0035): the switch, where day files go and which exist. */
 /** Recall measurement summed over the debug log (ADR-0050). */
 export interface RecallReport {
@@ -623,6 +647,12 @@ export const api = {
   mergeProject: (id: number, into: number) => request<MergeResult>("POST", `/projects/${id}/merge`, { into }),
   similarProjects: (limit = 50) => request<SimilarProjectPair[]>("GET", `/projects/similar${qs({ limit })}`),
   dismissSimilarProjects: (a: number, b: number) => request<{ ok: true }>("POST", "/projects/similar/dismiss", { a, b }),
+  /** One page of the memory list; every filter runs on the server (G-089). */
+  entriesPage: (f: EntryPageQuery) =>
+    request<EntryPage>(
+      "GET",
+      `/entries/page${qs({ ...f, cat: f.cat?.join(","), src: f.src?.join(","), standing: f.standing ? 1 : undefined, history: f.history ? 1 : undefined, deleted: f.deleted ? 1 : undefined, sort: f.sort === "pinned" ? undefined : f.sort })}`,
+    ),
   entries: (f: { scope?: Scope; project_id?: number; category?: string; deleted?: boolean }) =>
     request<Entry[]>("GET", `/entries${qs({ ...f, deleted: f.deleted ? 1 : undefined })}`),
   entry: (id: number) =>

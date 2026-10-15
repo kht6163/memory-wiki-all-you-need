@@ -1,5 +1,5 @@
 import "./other.css";
-import { Fragment, useMemo, useState, type ReactNode } from "react";
+import { Fragment, useEffect, useMemo, useState, type ReactNode } from "react";
 import { api, type ActivityItem, type Entry, type Project, type SimilarProjectPair, type Source, type TurnDetail, type TurnMessage, type TurnSummary } from "../api.ts";
 import {
   ACTION_LABEL,
@@ -23,6 +23,7 @@ import {
 } from "../lib.tsx";
 import { Icon, type IconName } from "../components/Icon.tsx";
 import { PageHeader } from "../components/PageHeader.tsx";
+import { PAGE_SIZE, Pager, readPage, writePage } from "../components/Pager.tsx";
 import { SkeletonList, SkeletonPage } from "../components/Skeleton.tsx";
 import { PROJECT_REASON_HINT, PROJECT_REASON_LABEL } from "../project-merge.ts";
 import { ProjectMergeDialog } from "./ScopePage.tsx";
@@ -1062,7 +1063,29 @@ export function SearchPage({ q }: { q: string }) {
 // ----------------------------------------------------------------- trash
 
 export function TrashPage() {
-  const { data, error, loading } = useData(() => api.entries({ deleted: true }), []);
+  // One page at a time, newest deletion first (G-089); the page number lives in the hash query.
+  const [page, setPage] = useState(readPage);
+  useEffect(() => {
+    const on = () => setPage(readPage());
+    window.addEventListener("hashchange", on);
+    return () => window.removeEventListener("hashchange", on);
+  }, []);
+  const res = useData(() => api.entriesPage({ deleted: true, offset: (page - 1) * PAGE_SIZE, limit: PAGE_SIZE }), [page]);
+  const data = res.data?.items;
+  const { error, loading } = res;
+  const total = res.data?.total ?? 0;
+  const pages = Math.max(Math.ceil(total / PAGE_SIZE), 1);
+  const goPage = (n: number) => {
+    const next = Math.min(Math.max(n, 1), pages);
+    writePage(next);
+    setPage(next);
+    window.scrollTo({ top: 0 });
+  };
+  // A page past the end (restored or purged, or an old link): go to the last one.
+  useEffect(() => {
+    if (res.data && page > pages) goPage(pages);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [res.data, pages]);
   return (
     <article className="page narrow">
       <PageHeader title="휴지통" lead="삭제된 메모리입니다. 복원하거나 영구 삭제할 수 있습니다." busy={loading && Boolean(data)} />
@@ -1113,6 +1136,7 @@ export function TrashPage() {
           ))}
         </div>
       )}
+      {pages > 1 && <Pager page={Math.min(page, pages)} pages={pages} total={total} onGo={goPage} />}
     </article>
   );
 }

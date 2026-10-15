@@ -9,6 +9,7 @@ import { mergeCandidates, mergeSummary, PROJECT_REASON_HINT, PROJECT_REASON_LABE
 import { PageHeader } from "../components/PageHeader.tsx";
 import { SkeletonList } from "../components/Skeleton.tsx";
 import { ScopeTabs } from "./WikiPages.tsx";
+import { PAGE_SIZE, Pager } from "../components/Pager.tsx";
 
 interface Props {
   scope: Scope;
@@ -30,7 +31,11 @@ interface Filters {
   srcs: Source[];
   sort: Sort;
   history: boolean;
+  /** 1-based; any other filter change goes back to 1. */
+  page: number;
 }
+
+/** Memories per page of the list (G-089). */
 
 function hashParts(): [string, URLSearchParams] {
   const raw = window.location.hash.replace(/^#/, "") || "/";
@@ -48,6 +53,7 @@ function readFilters(): Filters {
     srcs: list("src").filter((s): s is Source => (SOURCES as string[]).includes(s)),
     sort: sort === "updated" || sort === "title" ? sort : "pinned",
     history: p.get("history") === "1",
+    page: Math.max(Number.parseInt(p.get("page") ?? "1", 10) || 1, 1),
   };
 }
 
@@ -60,6 +66,7 @@ function writeFilters(f: Filters) {
   put("src", f.srcs.join(","));
   put("sort", f.sort === "pinned" ? null : f.sort);
   put("history", f.history ? "1" : null);
+  put("page", f.page > 1 ? String(f.page) : null);
   const qs = p.toString();
   history.replaceState(history.state, "", `#${path}${qs ? `?${qs}` : ""}`);
 }
@@ -74,55 +81,77 @@ function useHashFilters(): [Filters, (patch: Partial<Filters>) => void] {
   }, []);
   const update = (patch: Partial<Filters>) =>
     setF((cur) => {
-      const next = { ...cur, ...patch };
+      const next = { ...cur, page: 1, ...patch };
       writeFilters(next);
       return next;
     });
   return [f, update];
 }
 
-const toggle = <T,>(xs: T[], x: T) => (xs.includes(x) ? xs.filter((y) => y !== x) : [...xs, x]);
-
-function sortEntries(xs: Entry[], sort: Sort): Entry[] {
-  if (sort === "pinned") return xs; // server order: pinned DESC, updated_at DESC
-  const out = [...xs];
-  if (sort === "updated") out.sort((a, b) => b.updated_at.localeCompare(a.updated_at));
-  else out.sort((a, b) => a.title.localeCompare(b.title, "ko"));
-  return out;
+/** `value` once it has stopped changing for `ms` (a server query per keystroke is too many). */
+function useDebounced<T>(value: T, ms: number): T {
+  const [v, setV] = useState(value);
+  useEffect(() => {
+    const t = setTimeout(() => setV(value), ms);
+    return () => clearTimeout(t);
+  }, [value, ms]);
+  return v;
 }
+
+const toggle = <T,>(xs: T[], x: T) => (xs.includes(x) ? xs.filter((y) => y !== x) : [...xs, x]);
 
 // ------------------------------------------------------------------- page
 
 export function ScopePage({ scope, projectId, standingOnly }: Props) {
-  const entries = useData(() => api.entries({ scope, project_id: projectId }), [scope, projectId]);
   const project = useData(() => (projectId ? api.project(projectId) : Promise.resolve(null)), [projectId]);
   const [f, setF] = useHashFilters();
   const filterRef = useRef<HTMLInputElement>(null);
+  const q = useDebounced(f.q.trim(), 250);
+  // One page at a time; filters, chip counts and order all come from the server (G-089).
+  const entries = useData(
+    () =>
+      api.entriesPage({
+        scope,
+        project_id: projectId,
+        standing: standingOnly,
+        q,
+        cat: standingOnly ? [] : f.cats,
+        src: f.srcs,
+        history: f.history,
+        sort: f.sort,
+        offset: (f.page - 1) * PAGE_SIZE,
+        limit: PAGE_SIZE,
+      }),
+    [scope, projectId, standingOnly, q, f.cats.join(","), f.srcs.join(","), f.history, f.sort, f.page],
+  );
+  const data = entries.data;
+  const historyCount = data?.historyCount ?? 0;
+  const total = data?.total ?? 0;
+  const pages = Math.max(Math.ceil(total / PAGE_SIZE), 1);
 
-  const all = useMemo(() => (entries.data ?? []).filter((e) => !standingOnly || e.category === "standing"), [entries.data, standingOnly]);
-  const historyCount = all.filter(isHistory).length;
-  const visible = f.history ? all : all.filter((e) => !isHistory(e));
+  // A page past the end (memories deleted, or an old link): go to the last one.
+  useEffect(() => {
+    if (data && f.page > pages) setF({ page: pages });
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [data, pages]);
 
-  const needle = f.q.trim().toLowerCase();
-  const textMatch = (e: Entry) => !needle || `${e.title}\n${e.body}\n${e.tags.join(" ")}\n${(e.keywords ?? []).join(" ")}`.toLowerCase().includes(needle);
-  const catMatch = (e: Entry) => standingOnly || !f.cats.length || f.cats.includes(e.category);
-  const srcMatch = (e: Entry) => !f.srcs.length || f.srcs.includes(e.source);
-
-  // Chip counts reflect what a click would produce: every other filter applied.
-  const forCatCounts = visible.filter((e) => textMatch(e) && srcMatch(e));
-  const forSrcCounts = visible.filter((e) => textMatch(e) && catMatch(e));
-  const presentCats = CATEGORY_ORDER.filter((c) => visible.some((e) => e.category === c) || f.cats.includes(c));
-  const extraCats = [...new Set(visible.map((e) => e.category))].filter((c) => !CATEGORY_ORDER.includes(c));
+  const catCount = (c: string) => data?.cats[c]?.n ?? 0;
+  const srcCount = (s: string) => data?.srcs[s]?.n ?? 0;
+  const presentCats = CATEGORY_ORDER.filter((c) => (data?.cats[c]?.present ?? 0) > 0 || f.cats.includes(c));
+  const extraCats = Object.keys(data?.cats ?? {}).filter((c) => !CATEGORY_ORDER.includes(c)).sort();
   const catChips = [...presentCats, ...extraCats];
 
-  const list = sortEntries(
-    visible.filter((e) => textMatch(e) && catMatch(e) && srcMatch(e)),
-    f.sort,
-  );
-  const order = [...CATEGORY_ORDER, ...extraCats];
-  const groups = order.map((c) => ({ category: c, items: list.filter((e) => e.category === c) })).filter((g) => g.items.length);
-  const filtering = Boolean(needle || (!standingOnly && f.cats.length) || f.srcs.length);
+  const list = data?.items ?? [];
+  const order = [...CATEGORY_ORDER, ...extraCats, ...new Set(list.map((e) => e.category))];
+  const groups = [...new Set(order)].map((c) => ({ category: c, items: list.filter((e) => e.category === c) })).filter((g) => g.items.length);
+  // Section size across every page (the category's match count; with a category filter on, the same).
+  const groupTotal = (c: string) => (data?.cats[c]?.n || 0) || list.filter((e) => e.category === c).length;
+  const filtering = Boolean(f.q.trim() || (!standingOnly && f.cats.length) || f.srcs.length);
   const clearFilters = () => setF({ q: "", cats: [], srcs: [] });
+  const goPage = (n: number) => {
+    setF({ page: Math.min(Math.max(n, 1), pages) });
+    window.scrollTo({ top: 0 });
+  };
 
   const activeSection = useActiveSection(groups.map((g) => `cat-${g.category}`));
 
@@ -171,7 +200,7 @@ export function ScopePage({ scope, projectId, standingOnly }: Props) {
             <button key={c} type="button" className="chip" aria-pressed={f.cats.includes(c)} onClick={() => setF({ cats: toggle(f.cats, c) })}>
               <span className={`cat-dot cat-${c}`} aria-hidden />
               {CATEGORY_LABEL[c] ?? c}
-              <span className="count">{forCatCounts.filter((e) => e.category === c).length}</span>
+              <span className="count">{catCount(c)}</span>
             </button>
           ))}
         {!standingOnly && catChips.length > 0 && <span className="chip-sep" aria-hidden />}
@@ -179,7 +208,7 @@ export function ScopePage({ scope, projectId, standingOnly }: Props) {
           <button key={s} type="button" className="chip" aria-pressed={f.srcs.includes(s)} onClick={() => setF({ srcs: toggle(f.srcs, s) })} title={SOURCE_LABEL[s]}>
             <span className={`chip-dot src-${s}`} aria-hidden />
             {SOURCE_CHIP[s]}
-            <span className="count">{forSrcCounts.filter((e) => e.source === s).length}</span>
+            <span className="count">{srcCount(s)}</span>
           </button>
         ))}
         {historyCount > 0 && (
@@ -230,8 +259,8 @@ export function ScopePage({ scope, projectId, standingOnly }: Props) {
           {showPolicy && <PolicyCard projectId={scope === "project" ? (projectId ?? null) : null} />}
         </PageHeader>
         <ErrorBox error={entries.error ?? project.error} />
-        {entries.loading && !entries.data && <SkeletonList />}
-        {entries.data &&
+        {entries.loading && !data && <SkeletonList />}
+        {data &&
           !groups.length &&
           (filtering ? (
             <Empty
@@ -262,7 +291,7 @@ export function ScopePage({ scope, projectId, standingOnly }: Props) {
               <h2 id={`cat-${g.category}-h`}>
                 <span className={`cat-dot-lg cat-${g.category}`} aria-hidden />
                 {CATEGORY_LABEL[g.category] ?? g.category}
-                <span className="count">{g.items.length}</span>
+                <span className="count">{groupTotal(g.category)}</span>
               </h2>
             </div>
             <div className="list">
@@ -272,6 +301,7 @@ export function ScopePage({ scope, projectId, standingOnly }: Props) {
             </div>
           </section>
         ))}
+        {pages > 1 && <Pager page={Math.min(f.page, pages)} pages={pages} total={total} onGo={goPage} />}
         {f.history && historyCount > 0 && groups.length > 0 && (
           <p className="history-note">흐리게 표시된 메모리는 대체됐거나 기한이 지난 이력입니다. 프롬프트에는 들어가지 않습니다.</p>
         )}
@@ -290,7 +320,7 @@ export function ScopePage({ scope, projectId, standingOnly }: Props) {
                 document.getElementById(`cat-${g.category}`)?.scrollIntoView({ behavior: "smooth" });
               }}
             >
-              {CATEGORY_LABEL[g.category] ?? g.category} <span className="count">{g.items.length}</span>
+              {CATEGORY_LABEL[g.category] ?? g.category} <span className="count">{groupTotal(g.category)}</span>
             </a>
           ))}
         </nav>
